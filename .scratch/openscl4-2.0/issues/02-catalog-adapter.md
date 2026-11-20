@@ -1,7 +1,7 @@
 # 02 — Catalog adapter
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** done
 **Blocked by:** —
 
 ## Goal
@@ -34,7 +34,7 @@ Turn `soundcore_models::catalog` into the data the vendored Add Device dialog ex
 
 ## Acceptance
 
-- [ ] `cargo test` in `desktop` passes.
-- [ ] `cargo clippy --all-targets -- -D warnings` passes.
-- [ ] No UI `.slint` file is edited.
-- [ ] No network or protocol code is added.
+- [x] `cargo test` in `desktop` passes.
+- [x] `cargo clippy --all-targets -- -D warnings` passes.
+- [x] No UI `.slint` file is edited.
+- [x] No network or protocol code is added.
