@@ -1,7 +1,8 @@
-# Desktop shell
+# OpenSCL4 2.0 desktop shell
 
-The desktop UI is **vendored from OpenSCL4** under GPL-3.0; it is not a new
-design. The Slint tree in `ui/` comes from
+The desktop app is the **OpenSCL4 2.0 desktop shell**: the product keeps the
+OpenSCL4 name, and the UI is **vendored from OpenSCL4** under GPL-3.0; it is not
+a new design. The Slint tree in `ui/` comes from
 `D:\Projects\OpenSCL4\desktop\ui` at commit `01276e08` and keeps the upstream
 layout, components, pages, icons, fonts and art.
 

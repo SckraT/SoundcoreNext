@@ -2,9 +2,13 @@
 
 Clean-room implementation of a Soundcore control app for Android, Windows and Linux.
 
+**OpenSCL4 2.0 development.** This branch is the first OpenSCL4 2.0 slice: the
+desktop product keeps the OpenSCL4 name, and its UI is vendored from OpenSCL4
+under GPL-3.0 — the window title, screens and strings stay unchanged.
+
 - **Core** (`core/`) — Rust: protocol framing, model state parsers, diagnostics. Written from the specification in the research wiki, without copying OpenSCL4 protocol code.
 - **Android** (`android/`) — planned Kotlin/Compose UI; the OpenSCL4 UI may be reused and adapted under GPL-3.0 (ADR 0004).
-- **Desktop** (`desktop/`) — planned Rust + Slint UI; the OpenSCL4 UI may be reused and adapted under GPL-3.0.
+- **Desktop** (`desktop/`) — Rust + Slint: the OpenSCL4 2.0 desktop shell, with the UI vendored from OpenSCL4 under GPL-3.0.
 
 The normative specification lives in the research repository at `D:\Pixel 8 Pro\Soundcore\wiki` (`wiki/docs/index.md`). In particular:
 
@@ -24,9 +28,8 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 | Single-battery layouts | intentionally unimplemented (`UnsupportedLayout`) |
 | TLV D1203 | not started |
 | Diagnostics | read-only probes, session manifest, serial/MAC redaction, ZIP export |
-| Desktop UI | OpenSCL4 Slint shell vendored under GPL-3.0; opens with empty state, not wired to core yet |
+| Desktop (OpenSCL4 2.0) | OpenSCL4 Slint shell vendored under GPL-3.0; opens with empty state until the catalog wiring lands |
 | Android UI | not started |
-| Desktop UI | not started |
 
 ## Build and test
 
