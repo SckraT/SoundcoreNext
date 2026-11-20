@@ -18,6 +18,7 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 | Area | Status |
 |---|---|
 | Frame parser/encoder | implemented, 503/503 corpus frames parse |
+| Model catalog | 39 models grouped into 5 form factors and 11 families |
 | A3949 real state | parsed, battery 5/4, firmware 14.43, masked serial |
 | A3954 100-step state | synthetic test, battery 100/75 |
 | Single-battery layouts | intentionally unimplemented (`UnsupportedLayout`) |
@@ -44,7 +45,7 @@ core/
     a3949-state.json      # real capture, serial masked, checksum recalculated
   crates/
     protocol/             # framing, checksum, request builders
-    models/               # registry and state parsers
+    models/               # registry, catalog taxonomy and state parsers
     diagnostics/          # read-only probes and session manifest
 android/                  # Kotlin/Compose app (next)
 desktop/                  # Rust + Slint app (next)

@@ -7,6 +7,8 @@
 
 use soundcore_protocol::{Command, Frame, parse};
 
+pub mod catalog;
+
 /// Raw maximum of a battery field. A value of 5 means 20 % steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatteryScale {
