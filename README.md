@@ -24,6 +24,7 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 | Single-battery layouts | intentionally unimplemented (`UnsupportedLayout`) |
 | TLV D1203 | not started |
 | Diagnostics | read-only probes, session manifest, serial/MAC redaction, ZIP export |
+| Desktop catalog prototype | grouped Slint picker with detail panel (`desktop/`) |
 | Android UI | not started |
 | Desktop UI | not started |
 
@@ -48,7 +49,7 @@ core/
     models/               # registry, catalog taxonomy and state parsers
     diagnostics/          # read-only probes and session manifest
 android/                  # Kotlin/Compose app (next)
-desktop/                  # Rust + Slint app (next)
+desktop/                  # Rust + Slint catalog prototype (grouped picker)
 ```
 
 ## Boundaries

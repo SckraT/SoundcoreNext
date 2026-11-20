@@ -56,6 +56,21 @@ pub enum Tier {
     Legacy,
 }
 
+impl Tier {
+    pub const fn title_ru(self) -> &'static str {
+        match self {
+            Self::Flagship => "Флагман",
+            Self::Midrange => "Средний сегмент",
+            Self::Budget => "Бюджет",
+            Self::Sport => "Спорт",
+            Self::OpenEar => "Открытые",
+            Self::Sleep => "Сон",
+            Self::Speaker => "Колонка",
+            Self::Legacy => "Legacy",
+        }
+    }
+}
+
 /// A broad control class expected in a family. It is intentionally coarser
 /// than a `SettingId`: the UI uses it for grouping and copy, not for deciding
 /// whether a concrete setting exists.
@@ -553,6 +568,49 @@ pub fn family(id: &str) -> Option<&'static ModelFamily> {
 
 pub fn model(code: &str) -> Option<&'static CatalogModel> {
     CATALOG.iter().find(|model| model.code == code)
+}
+
+impl Capability {
+    pub const fn title_ru(self) -> &'static str {
+        match self {
+            Self::Anc => "ANC",
+            Self::AdaptiveAnc => "Адаптивный ANC",
+            Self::Transparency => "Прозрачность",
+            Self::WindNoiseSuppression => "Подавление ветра",
+            Self::SpatialAudio => "Пространственный звук",
+            Self::Ldac => "LDAC",
+            Self::Multipoint => "Multipoint",
+            Self::CaseBattery => "Заряд кейса",
+            Self::WirelessCharging => "Беспроводная зарядка",
+            Self::EarDetection => "Обнаружение ношения",
+            Self::ParametricEq => "Параметрический EQ",
+            Self::TenBandEq => "10-полосный EQ",
+            Self::CaseDisplay => "Дисплей кейса",
+            Self::EasyChat => "Easy Chat",
+            Self::TouchControls => "Сенсорное управление",
+            Self::ButtonGestures => "Кнопки и жесты",
+            Self::AirplaneMode => "Авиарежим",
+        }
+    }
+}
+
+impl BatteryTopology {
+    pub const fn title_ru(self) -> &'static str {
+        match self {
+            Self::Single => "одна батарея",
+            Self::Dual => "левый/правый",
+            Self::DualWithCase => "левый/правый/кейс",
+        }
+    }
+}
+
+impl Confidence {
+    pub const fn title_ru(self) -> &'static str {
+        match self {
+            Self::Confirmed => "подтверждено",
+            Self::Inferred => "предположительно",
+        }
+    }
 }
 
 impl ModelFamily {
