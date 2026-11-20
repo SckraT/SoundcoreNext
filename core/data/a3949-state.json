@@ -1,0 +1,15 @@
+{
+  "model": "A3949",
+  "source": "real capture of P20i; serial bytes are zero, no address is present, checksum recalculated after masking",
+  "frame_hex": "09 FF 00 00 01 01 01 62 00 01 01 05 04 00 00 31 34 2E 34 33 31 34 2E 34 33 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 00 00 78 78 78 78 78 78 78 78 78 00 00 00 00 00 00 00 00 00 00 00 0E 01 FF 01 FF 01 65 01 66 01 32 01 33 FF FF FF 61 00 00 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF 35",
+  "expected": {
+    "host_device": "Right",
+    "tws_connected": true,
+    "left": 5,
+    "right": 4,
+    "scale": 5,
+    "firmware_left": "14.43",
+    "firmware_right": "14.43",
+    "serial": null
+  }
+}

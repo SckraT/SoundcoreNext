@@ -1,0 +1,13 @@
+[package]
+name = "soundcore-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Framing, checksum and command types for the Soundcore SPP protocol"
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

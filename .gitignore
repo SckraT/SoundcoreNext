@@ -1,0 +1,8 @@
+/core/target/
+**/*.log
+.idea/
+*.iml
+local.properties
+/android/.gradle/
+/android/build/
+/desktop/build/

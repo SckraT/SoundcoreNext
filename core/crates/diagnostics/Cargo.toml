@@ -1,0 +1,11 @@
+[package]
+name = "soundcore-diagnostics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Read-only diagnostics probes and session format"
+
+[dependencies]
+soundcore-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
