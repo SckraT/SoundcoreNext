@@ -63,8 +63,8 @@ pub fn paired_option(candidate: &Candidate) -> PairedOption {
     }
 }
 
-/// One Overview battery tile: `label` 0 left, 1 right, 2 case; `raw` is the
-/// device's own step value out of `maximum`.
+/// One Overview battery tile: `label` 0 left, 1 right, 2 case, 3 whole device;
+/// `raw` is the device's own step value out of `maximum`.
 pub fn battery_tile(label: i32, raw: u8, maximum: u8) -> Battery {
     let maximum = maximum.max(1);
     let raw = raw.min(maximum);
@@ -78,13 +78,28 @@ pub fn battery_tile(label: i32, raw: u8, maximum: u8) -> Battery {
     }
 }
 
-/// The Overview tiles of a parsed state: left, then right. The TWS CMM2 parser
-/// has no case field yet, so the case tile is not invented.
+/// The vendored UI's label for the battery of the device as a whole, which it
+/// renders as "Battery". Labels 0, 1 and 2 are left, right and case.
+pub const WHOLE_DEVICE_BATTERY_LABEL: i32 = 3;
+
+/// The Overview tiles of a parsed state: one whole-device tile for a
+/// single-battery layout, otherwise left and right. The TWS CMM2 parser has no
+/// case field yet, so the case tile is not invented.
 pub fn batteries(state: &DeviceState) -> Vec<Battery> {
-    let maximum = state.battery.scale.maximum();
+    if let Some(single) = &state.single_battery {
+        return vec![battery_tile(
+            WHOLE_DEVICE_BATTERY_LABEL,
+            single.value,
+            single.scale.maximum(),
+        )];
+    }
+    let Some(battery) = &state.battery else {
+        return Vec::new();
+    };
+    let maximum = battery.scale.maximum();
     vec![
-        battery_tile(0, state.battery.left, maximum),
-        battery_tile(1, state.battery.right, maximum),
+        battery_tile(0, battery.left, maximum),
+        battery_tile(1, battery.right, maximum),
     ]
 }
 
@@ -1164,13 +1179,33 @@ mod tests {
         DeviceState {
             host_device: HostDevice::Left,
             tws_connected: true,
-            battery: BatteryState {
+            battery: Some(BatteryState {
                 left,
                 right,
                 left_charging: false,
                 right_charging: false,
                 scale,
+            }),
+            single_battery: None,
+            firmware: FirmwareVersions {
+                left: None,
+                right: None,
             },
+            serial: None,
+        }
+    }
+
+    fn single_state_of(value: u8) -> DeviceState {
+        DeviceState {
+            host_device: HostDevice::Left,
+            tws_connected: false,
+            battery: None,
+            single_battery: Some(soundcore_models::SingleBatteryState {
+                value,
+                scale: BatteryScale::Ten,
+                charging: None,
+                firmware: Some("04.39".into()),
+            }),
             firmware: FirmwareVersions {
                 left: None,
                 right: None,
@@ -1205,6 +1240,26 @@ mod tests {
         assert_eq!(tiles[0].value.as_str(), "70%");
         assert_ratio(tiles[0].progress, 0.7);
         assert_eq!(tiles[1].value.as_str(), "100%");
+    }
+
+    #[test]
+    fn a_single_battery_state_is_one_whole_device_tile() {
+        // label 3 is the vendored UI's "whole device" battery, rendered as
+        // "Battery"; a raw 5 of 10 is 50 %.
+        let tiles = batteries(&single_state_of(5));
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].label, 3);
+        assert_eq!(tiles[0].value.as_str(), "50%");
+        assert!(tiles[0].known);
+        assert_ratio(tiles[0].progress, 0.5);
+    }
+
+    #[test]
+    fn a_single_battery_state_has_no_left_or_right_tiles() {
+        let tiles = batteries(&single_state_of(2));
+        assert_eq!(tiles.len(), 1);
+        assert!(tiles.iter().all(|tile| tile.label == 3));
+        assert_eq!(tiles[0].value.as_str(), "20%");
     }
 
     #[test]
@@ -1473,10 +1528,9 @@ mod tests {
         assert!(updated[1].current);
     }
 
-    /// The frame of the real, masked A3949 capture the core keeps in
-    /// `core/data/a3949-state.json`, read from the JSON without a JSON parser.
-    fn captured_a3949_frame() -> Vec<u8> {
-        let json = include_str!("../../core/data/a3949-state.json");
+    /// The frame of a real, masked capture the core keeps in `core/data`, read
+    /// from the JSON without a JSON parser.
+    fn captured_frame(json: &str) -> Vec<u8> {
         let key = json
             .find("\"frame_hex\"")
             .expect("the capture names its frame");
@@ -1490,6 +1544,14 @@ mod tests {
             .split_whitespace()
             .map(|byte| u8::from_str_radix(byte, 16).expect("the capture stores hex bytes"))
             .collect()
+    }
+
+    fn captured_a3949_frame() -> Vec<u8> {
+        captured_frame(include_str!("../../core/data/a3949-state.json"))
+    }
+
+    fn captured_a3062_frame() -> Vec<u8> {
+        captured_frame(include_str!("../../core/data/a3062-state.json"))
     }
 
     #[test]
@@ -1506,22 +1568,36 @@ mod tests {
         assert_eq!(tiles[1].value.as_str(), "80%");
     }
 
+    #[test]
+    fn the_real_a3062_capture_reads_as_a_single_twenty_percent_tile() {
+        // The acceptance case for ticket 05: the real Space One Pro answered
+        // `01 01` with a single 10-step battery; it was at 2/10 when captured.
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        let state = soundcore_models::parse_state_frame(model, &captured_a3062_frame())
+            .expect("the real capture parses");
+        let tiles = batteries(&state);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].label, 3);
+        assert_eq!(tiles[0].value.as_str(), "20%");
+        assert!(tiles[0].known);
+        assert_ratio(tiles[0].progress, 0.2);
+    }
+
     /// Manual hardware check, not part of the automated suite:
     ///
     /// ```text
     /// cargo test -p soundcore-desktop manual_paired_connect -- --ignored --nocapture
     /// ```
     ///
-    /// Enumerates the paired Soundcore candidates for the two MVP models,
-    /// connects to the suggested one through the same worker path the window
-    /// uses (only `01 01` is written), and prints the mapped battery
-    /// percentages. Addresses are masked, so the output is safe to paste into a
-    /// report.
+    /// Enumerates the paired Soundcore candidates for the MVP models, connects
+    /// to the suggested one through the same worker path the window uses (only
+    /// `01 01` is written), and prints the mapped battery percentages.
+    /// Addresses are masked, so the output is safe to paste into a report.
     #[test]
     #[ignore = "manual hardware check: needs a paired Soundcore device"]
     fn manual_paired_connect() {
-        // A3949 and A3954 are the two MVP models; A3062 is the single-battery
-        // diagnostic that should end with a readable unsupported-layout failure.
+        // A3949/A3954 are the TWS MVP models; A3062 is the single-battery model
+        // of ticket 05 and maps to one whole-device battery tile.
         for code in ["A3949", "A3954", "A3062"] {
             let Some(model) = selected_model(code) else {
                 continue;
