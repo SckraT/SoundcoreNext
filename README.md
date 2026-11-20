@@ -33,11 +33,23 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 
 ## Build and test
 
+Core:
+
 ```powershell
 cd core
 cargo test
-cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+```
+
+Desktop (Rust + Slint, depends on `core/crates/models` by path):
+
+```powershell
+cd desktop
+cargo test
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo build
 ```
 
 ## Layout
@@ -53,7 +65,15 @@ core/
     diagnostics/          # read-only probes and session manifest
 android/                  # Kotlin/Compose app (next)
 desktop/                  # Slint shell vendored from OpenSCL4 (GPL-3.0)
+  src/main.rs             # shell wiring: window state and Add Device callbacks
+  src/catalog_adapter.rs  # core catalog -> Add Device models, chips and art
+  ui/                     # vendored OpenSCL4 Slint tree, not edited
+.scratch/
+  openscl4-2.0/           # spec and tickets for this 2.0 slice
 ```
+
+The desktop crate depends on `core/crates/models` by path (`soundcore-models`);
+the protocol and diagnostics crates stay core-side.
 
 ## Boundaries
 

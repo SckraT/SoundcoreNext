@@ -9,6 +9,9 @@ layout, components, pages, icons, fonts and art.
 ## Status
 
 - The shell compiles and opens; the window title still says OpenSCL4.
+- The app is built as crate version `2.0.0`, and `AppState.app-version` is
+  filled from that crate version, so the About section says
+  “OpenSCL4 2.0.0”.
 - The vendored **Add Device** dialog is populated from the clean-room catalog
   (`core/crates/models/src/catalog.rs`) through `src/catalog_adapter.rs`: all
   39 supported models as cards with their name, code and device art.

@@ -42,6 +42,14 @@ Prove the slice on the integration branch and leave a screenshot for the 2.0 REA
 | `cd desktop; cargo test` | pass — 15 passed, 0 failed (catalog adapter) |
 | `cd core; cargo test` | pass — 32 passed, 0 failed (protocol, models, state, diagnostics) |
 
+**Review follow-up — core formatting and lint:** run later with the same
+toolchain, because requirement 4 only covered `cargo test` for `core`:
+
+| Command | Result |
+|---|---|
+| `cd core; cargo fmt --all -- --check` | pass — no diff |
+| `cd core; cargo clippy --all-targets -- -D warnings` | pass — exit 0 |
+
 **Screenshot:** `desktop/add-device.png`, 1602×1064 px. It shows the running
 `soundcore-desktop` window titled “My devices — OpenSCL4” with the Add Device
 dialog open: the search field, the five category chips (All selected) and eight

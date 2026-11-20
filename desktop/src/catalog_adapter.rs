@@ -1,34 +1,58 @@
 //! Adapter from the clean-room model catalog (`soundcore_models::catalog`) to
 //! the data the vendored Add Device dialog expects.
 //!
-//! The dialog's chips are used as indexes: All, Earbuds, Over-ear, Open-ear,
-//! Speakers. `CatalogEntry` is the pure layer; `filter_models` only converts it
-//! to the Slint `ModelOption`, so filtering is tested without a window.
+//! The dialog's chips are the five categories below, in the order the vendored
+//! UI lists them. `CatalogEntry` is the pure layer; `filter_models` only converts
+//! it to the Slint `ModelOption`, so filtering is tested without a window.
 
 use std::cell::RefCell;
 
-use soundcore_models::catalog::{CATALOG, FormFactor, grouped_families};
+use soundcore_models::catalog::{self, FormFactor};
 
 use crate::ModelOption;
 
-/// The All chip, which does not filter.
-pub const KIND_ALL: i32 = 0;
-/// The Earbuds chip. The vendored UI has no Sleep chip, so sleep buds share it.
-pub const KIND_EARBUDS: i32 = 1;
-/// The Over-ear chip.
-pub const KIND_OVER_EAR: i32 = 2;
-/// The Open-ear chip.
-pub const KIND_OPEN_EAR: i32 = 3;
-/// The Speakers chip.
-pub const KIND_SPEAKERS: i32 = 4;
+/// A chip on the vendored Add Device dialog, in the order the dialog lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chip {
+    All,
+    Earbuds,
+    OverEar,
+    OpenEar,
+    Speakers,
+}
 
-/// The vendored chip the form factor is shown under.
-pub fn category(form_factor: FormFactor) -> i32 {
+impl Chip {
+    /// The chip's position in the vendored row; the UI stores that index.
+    pub const fn index(self) -> i32 {
+        match self {
+            Self::All => 0,
+            Self::Earbuds => 1,
+            Self::OverEar => 2,
+            Self::OpenEar => 3,
+            Self::Speakers => 4,
+        }
+    }
+
+    /// The chip at a vendored row index, or `None` when the index is not a chip.
+    pub const fn from_index(index: i32) -> Option<Self> {
+        match index {
+            0 => Some(Self::All),
+            1 => Some(Self::Earbuds),
+            2 => Some(Self::OverEar),
+            3 => Some(Self::OpenEar),
+            4 => Some(Self::Speakers),
+            _ => None,
+        }
+    }
+}
+
+/// The vendored chip a form factor is shown under.
+pub fn category(form_factor: FormFactor) -> Chip {
     match form_factor {
-        FormFactor::TwsEarbuds | FormFactor::SleepBuds => KIND_EARBUDS,
-        FormFactor::Headphones => KIND_OVER_EAR,
-        FormFactor::OpenEar => KIND_OPEN_EAR,
-        FormFactor::Speaker => KIND_SPEAKERS,
+        FormFactor::TwsEarbuds | FormFactor::SleepBuds => Chip::Earbuds,
+        FormFactor::Headphones => Chip::OverEar,
+        FormFactor::OpenEar => Chip::OpenEar,
+        FormFactor::Speaker => Chip::Speakers,
     }
 }
 
@@ -37,22 +61,22 @@ pub fn category(form_factor: FormFactor) -> i32 {
 pub struct CatalogEntry {
     pub code: &'static str,
     pub name: &'static str,
-    pub kind: i32,
+    pub chip: Chip,
     pub art: slint::Image,
 }
 
 /// Every catalog model once, in the vendored list order: form factor, then
 /// family, then how the catalog lists the model in its family.
 pub fn entries() -> Vec<CatalogEntry> {
-    let mut entries = Vec::with_capacity(CATALOG.len());
-    for (form_factor, families) in grouped_families() {
-        let kind = category(form_factor);
+    let mut entries = Vec::with_capacity(catalog::CATALOG.len());
+    for (form_factor, families) in catalog::grouped_families() {
+        let chip = category(form_factor);
         for family in families {
-            for model in CATALOG.iter().filter(|model| model.family == family.id) {
+            for model in family.models() {
                 entries.push(CatalogEntry {
                     code: model.code,
                     name: model.name,
-                    kind,
+                    chip,
                     art: art(form_factor),
                 });
             }
@@ -99,11 +123,11 @@ pub fn art(form_factor: FormFactor) -> slint::Image {
 }
 
 /// The entries the dialog lists for a query and a chip.
-pub fn filter_entries(query: &str, kind: i32) -> Vec<CatalogEntry> {
+pub fn filter_entries(query: &str, chip: Chip) -> Vec<CatalogEntry> {
     let query = query.to_lowercase();
     entries()
         .into_iter()
-        .filter(|entry| kind == KIND_ALL || entry.kind == kind)
+        .filter(|entry| chip == Chip::All || entry.chip == chip)
         .filter(|entry| {
             query.is_empty()
                 || entry.code.to_lowercase().contains(&query)
@@ -125,18 +149,21 @@ pub struct Selection {
 /// The confirmation step for a model code, or `None` when the catalog lists no
 /// model of that exact code.
 pub fn selection(code: &str) -> Option<Selection> {
-    let entry = entries().into_iter().find(|entry| entry.code == code)?;
+    let model = catalog::model(code)?;
+    let form_factor = catalog::family(model.family)
+        .expect("every catalog model lists a family of the catalog")
+        .form_factor;
     Some(Selection {
-        name: entry.name,
-        code: entry.code,
-        art: entry.art,
-        is_speaker: entry.kind == KIND_SPEAKERS,
+        name: model.name,
+        code: model.code,
+        art: art(form_factor),
+        is_speaker: category(form_factor) == Chip::Speakers,
     })
 }
 
 /// The options the Add Device dialog's model list binds to.
-pub fn filter_models(query: &str, kind: i32) -> Vec<ModelOption> {
-    filter_entries(query, kind)
+pub fn filter_models(query: &str, chip: Chip) -> Vec<ModelOption> {
+    filter_entries(query, chip)
         .into_iter()
         .map(|entry| ModelOption {
             code: entry.code.into(),
@@ -151,13 +178,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_chip_indexes_match_the_vendored_row() {
+        for (index, chip) in [
+            Chip::All,
+            Chip::Earbuds,
+            Chip::OverEar,
+            Chip::OpenEar,
+            Chip::Speakers,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(chip.index(), index as i32);
+            assert_eq!(Chip::from_index(chip.index()), Some(chip));
+        }
+        // The vendored row lists five chips; no other index is a chip.
+        assert_eq!(Chip::from_index(-1), None);
+        assert_eq!(Chip::from_index(5), None);
+    }
+
+    #[test]
     fn form_factors_map_to_the_vendored_chips() {
-        assert_eq!(category(FormFactor::TwsEarbuds), 1);
-        assert_eq!(category(FormFactor::Headphones), 2);
-        assert_eq!(category(FormFactor::OpenEar), 3);
-        assert_eq!(category(FormFactor::Speaker), 4);
+        assert_eq!(category(FormFactor::TwsEarbuds), Chip::Earbuds);
+        assert_eq!(category(FormFactor::Headphones), Chip::OverEar);
+        assert_eq!(category(FormFactor::OpenEar), Chip::OpenEar);
+        assert_eq!(category(FormFactor::Speaker), Chip::Speakers);
         // The vendored UI has no Sleep chip, so sleep buds are earbuds.
-        assert_eq!(category(FormFactor::SleepBuds), 1);
+        assert_eq!(category(FormFactor::SleepBuds), Chip::Earbuds);
     }
 
     #[test]
@@ -177,64 +224,77 @@ mod tests {
                 "A3330", "A3388", "A3876", "D1101", "A3116", "D1301",
             ]
         );
-        let count = |kind: i32| entries.iter().filter(|entry| entry.kind == kind).count();
+        let count = |chip: Chip| entries.iter().filter(|entry| entry.chip == chip).count();
         // The catalog has 24 TWS models; the sleep buds join them under Earbuds.
-        assert_eq!(count(KIND_EARBUDS), 25);
-        assert_eq!(count(KIND_OVER_EAR), 9);
-        assert_eq!(count(KIND_OPEN_EAR), 4);
-        assert_eq!(count(KIND_SPEAKERS), 1);
+        assert_eq!(count(Chip::Earbuds), 25);
+        assert_eq!(count(Chip::OverEar), 9);
+        assert_eq!(count(Chip::OpenEar), 4);
+        assert_eq!(count(Chip::Speakers), 1);
+    }
+
+    #[test]
+    fn every_catalog_model_belongs_to_a_family() {
+        // `entries` walks families, and `selection` resolves a model's family for
+        // its form factor, so a model with a dangling family would drop out.
+        for model in catalog::CATALOG {
+            assert!(
+                catalog::family(model.family).is_some(),
+                "{} lists unknown family {:?}",
+                model.code,
+                model.family
+            );
+        }
     }
 
     #[test]
     fn search_by_code_finds_the_model() {
-        let found = filter_entries("A3954", KIND_ALL);
+        let found = filter_entries("A3954", Chip::All);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].code, "A3954");
         assert_eq!(found[0].name, "Liberty 4 Pro");
-        assert_eq!(filter_entries("a3954", KIND_ALL).len(), 1);
+        assert_eq!(filter_entries("a3954", Chip::All).len(), 1);
     }
 
     #[test]
     fn search_by_name_is_case_insensitive() {
-        let found = filter_entries("p20", KIND_ALL);
+        let found = filter_entries("p20", Chip::All);
         let codes: Vec<&str> = found.iter().map(|entry| entry.code).collect();
         assert_eq!(codes, ["A3949"]);
-        assert_eq!(filter_entries("P20", KIND_ALL).len(), 1);
-        assert_eq!(filter_entries("liberty 4 pro", KIND_ALL).len(), 1);
+        assert_eq!(filter_entries("P20", Chip::All).len(), 1);
+        assert_eq!(filter_entries("liberty 4 pro", Chip::All).len(), 1);
     }
 
     #[test]
     fn an_unknown_query_finds_nothing() {
-        assert!(filter_entries("no such model", KIND_ALL).is_empty());
+        assert!(filter_entries("no such model", Chip::All).is_empty());
     }
 
     #[test]
     fn an_empty_query_returns_the_whole_catalog() {
-        assert_eq!(filter_entries("", KIND_ALL).len(), 39);
+        assert_eq!(filter_entries("", Chip::All).len(), 39);
     }
 
     #[test]
     fn the_chips_filter_by_kind() {
-        let earbuds = filter_entries("", KIND_EARBUDS);
+        let earbuds = filter_entries("", Chip::Earbuds);
         assert_eq!(earbuds.len(), 25);
-        assert!(earbuds.iter().all(|entry| entry.kind == KIND_EARBUDS));
+        assert!(earbuds.iter().all(|entry| entry.chip == Chip::Earbuds));
         // The sleep buds are listed under Earbuds: the vendored UI has no Sleep chip.
         assert!(earbuds.iter().any(|entry| entry.code == "D1301"));
-        assert_eq!(filter_entries("", KIND_OVER_EAR).len(), 9);
-        assert_eq!(filter_entries("", KIND_OPEN_EAR).len(), 4);
-        assert_eq!(filter_entries("", KIND_SPEAKERS).len(), 1);
-        assert!(filter_entries("", 99).is_empty());
+        assert_eq!(filter_entries("", Chip::OverEar).len(), 9);
+        assert_eq!(filter_entries("", Chip::OpenEar).len(), 4);
+        assert_eq!(filter_entries("", Chip::Speakers).len(), 1);
     }
 
     #[test]
     fn search_and_kind_narrow_each_other() {
-        let space = filter_entries("space", KIND_ALL);
+        let space = filter_entries("space", Chip::All);
         assert_eq!(space.len(), 4);
-        let space_earbuds = filter_entries("space", KIND_EARBUDS);
+        let space_earbuds = filter_entries("space", Chip::Earbuds);
         let codes: Vec<&str> = space_earbuds.iter().map(|entry| entry.code).collect();
         assert_eq!(codes, ["A3936"]);
-        assert_eq!(filter_entries("space", KIND_OVER_EAR).len(), 3);
-        assert_eq!(filter_entries("A3954", KIND_OVER_EAR).len(), 0);
+        assert_eq!(filter_entries("space", Chip::OverEar).len(), 3);
+        assert_eq!(filter_entries("A3954", Chip::OverEar).len(), 0);
     }
 
     #[test]
@@ -273,7 +333,7 @@ mod tests {
 
     #[test]
     fn filter_models_returns_the_slint_options() {
-        let options = filter_models("A3954", KIND_ALL);
+        let options = filter_models("A3954", Chip::All);
         assert_eq!(options.len(), 1);
         assert_eq!(options[0].code.as_str(), "A3954");
         assert_eq!(options[0].name.as_str(), "Liberty 4 Pro");
@@ -282,9 +342,9 @@ mod tests {
 
     #[test]
     fn filter_models_passes_search_and_kind_through() {
-        assert_eq!(filter_models("", KIND_SPEAKERS).len(), 1);
-        assert_eq!(filter_models("p20", KIND_ALL)[0].code.as_str(), "A3949");
-        assert_eq!(filter_models("A3954", KIND_OVER_EAR).len(), 0);
+        assert_eq!(filter_models("", Chip::Speakers).len(), 1);
+        assert_eq!(filter_models("p20", Chip::All)[0].code.as_str(), "A3949");
+        assert_eq!(filter_models("A3954", Chip::OverEar).len(), 0);
     }
 
     #[test]
