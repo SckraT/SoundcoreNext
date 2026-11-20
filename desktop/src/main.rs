@@ -6,6 +6,8 @@
 
 slint::include_modules!();
 
+mod catalog_adapter;
+
 fn main() -> Result<(), slint::PlatformError> {
     AppWindow::new()?.run()
 }
