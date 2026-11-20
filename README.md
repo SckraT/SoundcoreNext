@@ -28,7 +28,7 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 | Single-battery layouts | intentionally unimplemented (`UnsupportedLayout`) |
 | TLV D1203 | not started |
 | Diagnostics | read-only probes, session manifest, serial/MAC redaction, ZIP export |
-| Desktop (OpenSCL4 2.0) | OpenSCL4 Slint shell vendored under GPL-3.0; opens with empty state until the catalog wiring lands |
+| Desktop (OpenSCL4 2.0) | OpenSCL4 Slint shell vendored under GPL-3.0; Add Device populated from the 39-model catalog, with category and search filters |
 | Android UI | not started |
 
 ## Build and test

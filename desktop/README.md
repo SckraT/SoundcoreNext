@@ -8,12 +8,25 @@ layout, components, pages, icons, fonts and art.
 
 ## Status
 
-- The shell compiles and opens.
-- It is not wired to the clean-room core yet: the screen opens with empty
-  state, which is expected until the desktop controller replaces the OpenSCL4
-  library adapter.
-- The grouped model catalog in `core/crates/models/src/catalog.rs` will feed
-  the add-device list; it does not replace the OpenSCL4 screens.
+- The shell compiles and opens; the window title still says OpenSCL4.
+- The vendored **Add Device** dialog is populated from the clean-room catalog
+  (`core/crates/models/src/catalog.rs`) through `src/catalog_adapter.rs`: all
+  39 supported models as cards with their name, code and device art.
+- The existing category chips filter by form factor: **All**, **Earbuds**
+  (TWS and sleep buds — the vendored UI has no Sleep chip), **Over-ear**,
+  **Open-ear** and **Speakers**. The search field filters by model name or code.
+- Choosing a model advances the existing dialog to its paired-device step with
+  that model's name, code and art. No transport, pairing or connection is
+  attempted yet.
+- Pages for a connected device still open in their placeholder state, which is
+  expected until the desktop controller replaces the OpenSCL4 library adapter.
+
+## Screenshot
+
+![Add device](add-device.png)
+
+The Add Device dialog with the catalog populated, captured from the running app
+on Windows.
 
 ## Run
 
