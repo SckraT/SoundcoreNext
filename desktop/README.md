@@ -1,18 +1,35 @@
-# Desktop shell
+# OpenSCL4 2.0 desktop shell
 
-The desktop UI is **vendored from OpenSCL4** under GPL-3.0; it is not a new
-design. The Slint tree in `ui/` comes from
+The desktop app is the **OpenSCL4 2.0 desktop shell**: the product keeps the
+OpenSCL4 name, and the UI is **vendored from OpenSCL4** under GPL-3.0; it is not
+a new design. The Slint tree in `ui/` comes from
 `D:\Projects\OpenSCL4\desktop\ui` at commit `01276e08` and keeps the upstream
 layout, components, pages, icons, fonts and art.
 
 ## Status
 
-- The shell compiles and opens.
-- It is not wired to the clean-room core yet: the screen opens with empty
-  state, which is expected until the desktop controller replaces the OpenSCL4
-  library adapter.
-- The grouped model catalog in `core/crates/models/src/catalog.rs` will feed
-  the add-device list; it does not replace the OpenSCL4 screens.
+- The shell compiles and opens; the window title still says OpenSCL4.
+- The app is built as crate version `2.0.0`, and `AppState.app-version` is
+  filled from that crate version, so the About section says
+  “OpenSCL4 2.0.0”.
+- The vendored **Add Device** dialog is populated from the clean-room catalog
+  (`core/crates/models/src/catalog.rs`) through `src/catalog_adapter.rs`: all
+  39 supported models as cards with their name, code and device art.
+- The existing category chips filter by form factor: **All**, **Earbuds**
+  (TWS and sleep buds — the vendored UI has no Sleep chip), **Over-ear**,
+  **Open-ear** and **Speakers**. The search field filters by model name or code.
+- Choosing a model advances the existing dialog to its paired-device step with
+  that model's name, code and art. No transport, pairing or connection is
+  attempted yet.
+- Pages for a connected device still open in their placeholder state, which is
+  expected until the desktop controller replaces the OpenSCL4 library adapter.
+
+## Screenshot
+
+![Add device](add-device.png)
+
+The Add Device dialog with the catalog populated, captured from the running app
+on Windows.
 
 ## Run
 
