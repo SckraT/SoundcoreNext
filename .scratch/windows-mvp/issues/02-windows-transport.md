@@ -1,7 +1,7 @@
 # 02 — Windows transport
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** done
 **Blocked by:** —
 
 ## Goal
@@ -31,6 +31,20 @@ Implement Windows paired-device enumeration and an RFCOMM transport that can be 
 
 ## Acceptance
 
-- [ ] `cargo build`, `cargo test`, `fmt --check`, `clippy -D warnings` pass in `desktop`.
-- [ ] Manual: enumerate the machine's paired devices, see the three Soundcore devices and their vendor service UUIDs (mask addresses in the report).
-- [ ] No `.slint` file changed.
+- [x] `cargo build`, `cargo test`, `fmt --check`, `clippy -D warnings` pass in `desktop`.
+- [x] Manual: enumerate the machine's paired devices, see the three Soundcore devices and their vendor service UUIDs (mask addresses in the report).
+- [x] No `.slint` file changed.
+
+## Comments
+
+- Implemented on `ticket/win-02-transport`; unit tests cover MAC formatting/parsing, vendor
+  UUID derivation, service preference, Winsock/Win32 error mapping and the readable error text.
+- Manual enumeration (Windows 11, Intel Wireless Bluetooth, addresses masked to the first four
+  octets): 5 paired classic devices. `soundcore P20i` advertises
+  `0CF12D31-FAC3-4553-BD80-D6832E7B3949` and the standard SPP UUID, `soundcore Liberty 4 Pro`
+  `0CF12D31-FAC3-4553-BD80-D6832E7B3954` and SPP, `soundcore Space One Pro`
+  `0CF12D31-FAC3-4553-BD80-D6832E7B3062` and SPP; the Pixel phone and Redmi soundbar advertise
+  neither a Soundcore vendor UUID nor SPP. No RFCOMM connection was attempted and no Bluetooth
+  state was changed (read-only enumeration and cached SDP lookup).
+- The ignored `manual_paired_enumeration` test in `transport_windows.rs` repeats that check:
+  `cargo test -p soundcore-desktop manual_paired_enumeration -- --ignored --nocapture`.

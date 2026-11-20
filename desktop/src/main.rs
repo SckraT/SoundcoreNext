@@ -8,6 +8,7 @@
 slint::include_modules!();
 
 mod catalog_adapter;
+mod transport_windows;
 
 use catalog_adapter::{Chip, filter_models, selection};
 use slint::{ModelRc, VecModel};
