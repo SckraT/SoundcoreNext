@@ -500,16 +500,16 @@ mod tests {
 
     #[test]
     fn formats_an_address_as_six_ui_octets() {
-        assert_eq!(format_mac(0x0000_A4C1_3992_1122), "A4:C1:39:92:11:22");
+        assert_eq!(format_mac(0x0000_0011_2233_4455), "00:11:22:33:44:55");
         assert_eq!(format_mac(0x0000_0000_0000_0001), "00:00:00:00:00:01");
-        assert_eq!(format_mac(0x0000_F49D_8AA2_ABCD), "F4:9D:8A:A2:AB:CD");
+        assert_eq!(format_mac(0x0000_DEAD_BEEF_0001), "DE:AD:BE:EF:00:01");
     }
 
     #[test]
     fn formatting_ignores_bits_above_the_48_bit_address() {
         assert_eq!(
-            format_mac(0xFFFF_F49D_8AA2_1122),
-            format_mac(0xF49D_8AA2_1122)
+            format_mac(0xFFFF_0011_2233_4455),
+            format_mac(0x0011_2233_4455)
         );
     }
 
@@ -517,7 +517,7 @@ mod tests {
     fn a_formatted_mac_parses_back_to_the_address() {
         for address in [
             0x0000_0000_0000_0000,
-            0x0000_A4C1_3992_1122,
+            0x0000_0011_2233_4455,
             0x0000_FFFF_FFFF_FFFF,
         ] {
             assert_eq!(parse_mac(&format_mac(address)), Some(address));
@@ -526,18 +526,18 @@ mod tests {
 
     #[test]
     fn parsing_accepts_lower_case_hex() {
-        assert_eq!(parse_mac("a4:c1:39:92:11:22"), Some(0x0000_A4C1_3992_1122));
+        assert_eq!(parse_mac("de:ad:be:ef:00:01"), Some(0x0000_DEAD_BEEF_0001));
     }
 
     #[test]
     fn parsing_rejects_malformed_macs() {
         for mac in [
             "",
-            "A4:C1:39:92:11",
-            "A4:C1:39:92:11:22:33",
-            "A4-C1-39-92-11-22",
-            "G4:C1:39:92:11:22",
-            "A4:C1:39:92:11:2",
+            "00:11:22:33:44",
+            "00:11:22:33:44:55:66",
+            "00-11-22-33-44-55",
+            "G0:11:22:33:44:55",
+            "00:11:22:33:44:5",
         ] {
             assert_eq!(parse_mac(mac), None, "{mac:?} parsed");
         }
@@ -546,8 +546,8 @@ mod tests {
     #[test]
     fn parses_a_mac_after_trimming_outer_whitespace() {
         assert_eq!(
-            parse_mac(" A4:C1:39:92:11:22 "),
-            Some(0x0000_A4C1_3992_1122)
+            parse_mac(" 00:11:22:33:44:55 "),
+            Some(0x0000_0011_2233_4455)
         );
     }
 
