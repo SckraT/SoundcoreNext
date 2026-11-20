@@ -4150,6 +4150,7 @@ dependencies = [
  "slint",
  "slint-build",
  "soundcore-models",
+ "windows",
 ]
 
 [[package]]

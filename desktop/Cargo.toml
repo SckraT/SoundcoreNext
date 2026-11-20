@@ -7,6 +7,11 @@ license = "GPL-3.0-or-later"
 [dependencies]
 slint = "1.18"
 soundcore-models = { path = "../core/crates/models" }
+windows = { version = "0.62", features = [
+    "Win32_Devices_Bluetooth",
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+] }
 
 [build-dependencies]
 slint-build = "1.18"
