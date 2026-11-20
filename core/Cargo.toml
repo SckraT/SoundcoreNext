@@ -16,3 +16,4 @@ repository = "https://example.invalid/soundcore-next"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 soundcore-protocol = { path = "crates/protocol" }
+soundcore-models = { path = "crates/models" }

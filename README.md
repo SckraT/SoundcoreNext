@@ -22,7 +22,7 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 | A3954 100-step state | synthetic test, battery 100/75 |
 | Single-battery layouts | intentionally unimplemented (`UnsupportedLayout`) |
 | TLV D1203 | not started |
-| Diagnostics | read-only probe catalog and session manifest; ZIP/redaction next |
+| Diagnostics | read-only probes, session manifest, serial/MAC redaction, ZIP export |
 | Android UI | not started |
 | Desktop UI | not started |
 

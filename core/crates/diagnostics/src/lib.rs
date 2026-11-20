@@ -6,7 +6,11 @@
 //! that those steps operate on.
 
 use serde::Serialize;
-use soundcore_protocol::{Command, Direction, checksum, request};
+use soundcore_models::DeviceModel;
+use soundcore_protocol::{Command, Direction, request};
+
+pub mod export;
+pub mod redact;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,12 +88,20 @@ pub struct FrameRecord {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiagnosticSession {
+    pub model: Option<DeviceModel>,
     pub probes: Vec<ProbeResult>,
     pub frames: Vec<FrameRecord>,
     pub notes: String,
 }
 
 impl DiagnosticSession {
+    pub fn new(model: DeviceModel) -> Self {
+        Self {
+            model: Some(model),
+            ..Self::default()
+        }
+    }
+
     pub fn record_probe(&mut self, result: ProbeResult) {
         self.probes.push(result);
     }
@@ -97,14 +109,18 @@ impl DiagnosticSession {
     /// Record a raw frame. The caller parses it; a broken frame is recorded by
     /// error string instead of being silently dropped.
     pub fn record_raw_frame(&mut self, elapsed_ms: u64, direction: Direction, raw: &[u8]) {
-        let (command, checksum_ok) = match soundcore_protocol::parse(raw) {
+        let stored = match self.model {
+            Some(model) => redact::redact_state_frame(raw, model).unwrap_or_else(|| raw.to_vec()),
+            None => raw.to_vec(),
+        };
+        let (command, checksum_ok) = match soundcore_protocol::parse(&stored) {
             Ok(frame) => (frame.command.to_string(), true),
             Err(_) => ("?".to_owned(), false),
         };
         self.frames.push(FrameRecord {
             elapsed_ms,
             direction,
-            hex: hex(raw),
+            hex: hex(&stored),
             command,
             checksum_ok,
         });
@@ -115,6 +131,7 @@ impl DiagnosticSession {
         #[serde(rename_all = "camelCase")]
         struct Summary<'a> {
             schema: u32,
+            model: Option<&'a str>,
             probe_count: usize,
             frame_count: usize,
             probes: &'a [ProbeResult],
@@ -123,6 +140,7 @@ impl DiagnosticSession {
         }
         serde_json::to_string_pretty(&Summary {
             schema: 1,
+            model: self.model.map(|model| model.code),
             probe_count: self.probes.len(),
             frame_count: self.frames.len(),
             probes: &self.probes,
@@ -140,9 +158,4 @@ pub fn hex(bytes: &[u8]) -> String {
         write!(&mut out, "{byte:02X} ").expect("write to string");
     }
     out.trim_end().to_owned()
-}
-
-#[allow(dead_code)]
-fn checksum_of(raw: &[u8]) -> u8 {
-    checksum(raw)
 }
