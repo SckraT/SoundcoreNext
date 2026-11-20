@@ -1,9 +1,18 @@
-# Soundcore Next — desktop catalog prototype
+# Desktop shell
 
-First Slint screen: grouped model catalog with a detail panel. It is a design
-and taxonomy validation, not yet a device controller.
+The desktop UI is **vendored from OpenSCL4** under GPL-3.0; it is not a new
+design. The Slint tree in `ui/` comes from
+`D:\Projects\OpenSCL4\desktop\ui` at commit `01276e08` and keeps the upstream
+layout, components, pages, icons, fonts and art.
 
-![Каталог моделей](catalog.png)
+## Status
+
+- The shell compiles and opens.
+- It is not wired to the clean-room core yet: the screen opens with empty
+  state, which is expected until the desktop controller replaces the OpenSCL4
+  library adapter.
+- The grouped model catalog in `core/crates/models/src/catalog.rs` will feed
+  the add-device list; it does not replace the OpenSCL4 screens.
 
 ## Run
 
@@ -12,27 +21,8 @@ cd desktop
 cargo run
 ```
 
-First build pulls Slint and takes a few minutes.
+## License and attribution
 
-## What it shows
-
-- Form factors in order: TWS, full-size headphones, open-ear, speakers, sleep.
-- Families inside each form factor: Liberty flagship, Liberty NC, P/A, Life,
-  Space, Sport, Q line, open-ear, speaker, sleep.
-- Each model row: code, name, battery topology and a "проверить" marker for
-  inferred assignments.
-- Click a row: detail panel with family, tier, parser status and shared
-  capabilities.
-
-## Data
-
-The screen reads `soundcore_models::catalog`; it does not touch the protocol
-or the transport. The source of the groups is
-`wiki/docs/protocol/model-taxonomy.md` in the research repository.
-
-## Design
-
-Colours and spacing follow the tokens in `wiki/docs/apps/design-system.md`
-(warm background `#f5efea`, white cards, purple accent `#6c4fb3`). The real
-desktop shell will later reuse the OpenSCL4 Slint views under GPL-3.0; this
-prototype proves the grouped picker before that port.
+GPL-3.0-or-later. The vendored files keep their upstream copyright; see
+`ui/SOURCE.md` and the root `NOTICE`. Changes to vendored files are recorded in
+the commit that makes them.

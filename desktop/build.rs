@@ -1,3 +1,3 @@
 fn main() {
-    slint_build::compile("ui/catalog.slint").expect("compile catalog UI");
+    slint_build::compile("ui/app.slint").expect("compile OpenSCL4 UI");
 }

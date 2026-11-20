@@ -1,0 +1,142 @@
+import "fonts/onest.ttf";
+import { Palette } from "std-widgets.slint";
+import { Theme, PaletteChoice } from "theme.slint";
+import { Icons } from "icons.slint";
+import { AppState, Actions, Page, Connection, FailureKind, ToastKind, DeviceCard, ModelOption, PairedOption } from "types.slint";
+import { Strings } from "strings.slint";
+import { Button, ButtonKind, Banner } from "components/basics.slint";
+import { ScrollArea } from "components/scrollarea.slint";
+import { Sidebar, StatusBar } from "shell.slint";
+import { DevicesPage, ConnectionState } from "pages/devices.slint";
+import { AddDeviceDialog, ConfirmForgetDialog } from "pages/add_device.slint";
+import { SectionPage } from "pages/sections.slint";
+import { OverviewPage, LayoutDialog, QuickTogglesDialog } from "pages/overview.slint";
+import { EqualizerPage, SaveProfileDialog, DeleteProfileDialog, ImportDialog } from "pages/equalizer.slint";
+import { SettingsPage } from "pages/settings.slint";
+import { PresetsPage, CreatePresetDialog, PresetEditorDialog, LoadPresetDialog, DeletePresetDialog } from "pages/presets.slint";
+
+export { Theme, PaletteChoice, AppState, Actions, Page, Connection, FailureKind, DeviceCard, ModelOption, PairedOption, Strings }
+export { RowKind, SettingRow, PanelKind, SettingsPanel, ModeOption, ToastKind, BlockKind, Battery, QuickToggle, OverviewBlockData, OverviewRow, LayoutBlock, PresetItem, EqBand, EqLine, EqProfile, ImportItem, TransferNote, PresetCard, PresetFieldRow, PresetGroup, SystemPage } from "types.slint";
+
+export component AppWindow inherits Window {
+    title: (AppState.connection == Connection.connected && AppState.page != Page.devices && AppState.page != Page.settings
+        ? Strings.title(AppState.page) + " · " + AppState.device-name : Strings.title(AppState.page)) + " — OpenSCL4";
+    // the window keeps its size: the content scale makes the text and shapes larger in it, as a zoom does
+    preferred-width: 1280px;
+    preferred-height: 820px;
+    min-width: 800px;
+    min-height: 600px;
+    background: Theme.bg;
+    default-font-family: "Onest";
+    default-font-size: Theme.font-body;
+    icon: @image-url("icons/app.svg");
+
+    private property <bool> compact: root.width <= 1030px;
+    private property <bool> device-page: AppState.page != Page.devices && AppState.page != Page.settings;
+    // pages with their own layout rather than the settings in panels
+    private property <bool> own-page: AppState.page == Page.overview || AppState.page == Page.equalizer || AppState.page == Page.presets;
+
+    // the standard widgets (lists, number fields) follow the app's theme
+    private property <bool> dark: Theme.dark;
+    init => { Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light; }
+    changed dark => { Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light; }
+
+    // placed by hand: the sidebar's width follows the window's, so it must not be part of the window's own layout
+    sidebar := Sidebar {
+        compact: root.compact;
+        x: 0px;
+        y: 0px;
+        width: root.compact ? 68px : 236px * Theme.content-scale;
+        height: root.height;
+    }
+    Rectangle {
+        x: sidebar.width;
+        y: 0px;
+        width: root.width - sidebar.width;
+        height: root.height;
+        VerticalLayout {
+            scroll := ScrollArea {
+                vertical-stretch: 1;
+                content := VerticalLayout {
+                    width: scroll.visible-width;
+                    padding: (root.width <= 800px * Theme.content-scale ? 20px : 28px) * Theme.content-scale;
+                    padding-top: 24px;
+                    spacing: 16px;
+                    alignment: start;
+                    if root.device-page && AppState.error-label != "": Banner {
+                        error: true;
+                        icon: Icons.warning;
+                        text: @tr("Could not change “{}”. The device kept its previous value.", AppState.error-label);
+                        Button {
+                            text: @tr("Retry");
+                            kind: ButtonKind.soft;
+                            clicked => { Actions.retry(); }
+                        }
+                        Button {
+                            text: @tr("Close");
+                            kind: ButtonKind.ghost;
+                            clicked => { Actions.dismiss-error(); }
+                        }
+                    }
+                    if AppState.page == Page.devices: DevicesPage { }
+                    if root.device-page && AppState.connection != Connection.connected && AppState.connection != Connection.recovering: ConnectionState { }
+                    if root.device-page && AppState.connection == Connection.recovering: Banner {
+                        icon: Icons.info;
+                        text: @tr("Reconnecting:") + " " + (AppState.connection-reason == "" ? @tr("changes are paused until the device is back.") : AppState.connection-reason);
+                    }
+                    if AppState.page == Page.overview && (AppState.connection == Connection.connected || AppState.connection == Connection.recovering): OverviewPage {
+                        wide: root.width - sidebar.width > 900px;
+                    }
+                    if AppState.page == Page.equalizer && (AppState.connection == Connection.connected || AppState.connection == Connection.recovering): EqualizerPage {
+                        wide: root.width - sidebar.width > 900px;
+                    }
+                    if AppState.page == Page.presets && (AppState.connection == Connection.connected || AppState.connection == Connection.recovering): PresetsPage {
+                        wide: root.width - sidebar.width > 900px;
+                    }
+                    if root.device-page && (AppState.connection == Connection.connected || AppState.connection == Connection.recovering) && !root.own-page: SectionPage {
+                        page: AppState.page;
+                        wide: root.width - sidebar.width > 860px;
+                    }
+                    if AppState.page == Page.settings: SettingsPage {
+                        wide: root.width - sidebar.width > 900px;
+                    }
+                }
+            }
+            StatusBar { }
+        }
+    }
+
+    if AppState.adding: AddDeviceDialog { }
+    if AppState.confirm-forget-mac != "": ConfirmForgetDialog { }
+    if AppState.editing-layout: LayoutDialog { }
+    if AppState.choosing-toggles: QuickTogglesDialog { }
+    if AppState.eq-saving: SaveProfileDialog { }
+    if AppState.eq-deleting != "": DeleteProfileDialog { }
+    if AppState.importing: ImportDialog { }
+    if AppState.creating-preset: CreatePresetDialog { }
+    if AppState.editing-preset != "": PresetEditorDialog { }
+    if AppState.loading-preset: LoadPresetDialog { }
+    if AppState.deleting-preset != "": DeletePresetDialog { }
+    if AppState.toast != ToastKind.none: Rectangle {
+        y: root.height - 80px;
+        x: (root.width - self.width) / 2;
+        width: toast-text.preferred-width + 36px;
+        height: 42px;
+        border-radius: 14px;
+        background: Theme.text;
+        toast-text := Text {
+            text: AppState.toast == ToastKind.copied ? @tr("Copied")
+                : AppState.toast == ToastKind.profile-saved ? @tr("Profile saved")
+                : AppState.toast == ToastKind.profile-deleted ? @tr("Profile deleted")
+                : AppState.toast == ToastKind.file-saved ? @tr("Saved to the file")
+                : AppState.toast == ToastKind.imported ? @tr("Imported {n} profile" | "Imported {n} profiles" % AppState.toast-count)
+                : AppState.toast == ToastKind.migrated ? @tr("Moved {n} profile" | "Moved {n} profiles" % AppState.toast-count)
+                : AppState.toast == ToastKind.preset-applied ? @tr("Preset “{}” applied", AppState.toast-name)
+                : AppState.toast == ToastKind.preset-deleted ? @tr("Preset deleted")
+                : AppState.toast == ToastKind.preset-replaced ? @tr("Preset values replaced")
+                : AppState.toast == ToastKind.preset-loaded ? @tr("Current settings loaded into the preset") : "";
+            color: Theme.bg;
+            font-size: Theme.font-small;
+        }
+    }
+}

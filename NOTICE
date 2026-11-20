@@ -17,3 +17,7 @@ The Android and desktop interfaces may contain code adapted from OpenSCL4
 (https://github.com/SckraT/OpenSCL4), licensed GPL-3.0-or-later. Files adapted
 from OpenSCL4 keep their original copyright headers; changes are noted in the
 file header or in the commit that introduces them.
+
+The desktop Slint tree in `desktop/ui` is vendored from OpenSCL4 commit
+01276e08 (https://github.com/SckraT/OpenSCL4), GPL-3.0-or-later. Changes and
+adaptations are recorded in `desktop/ui/SOURCE.md`.

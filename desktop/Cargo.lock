@@ -4149,22 +4149,6 @@ version = "0.1.0"
 dependencies = [
  "slint",
  "slint-build",
- "soundcore-models",
-]
-
-[[package]]
-name = "soundcore-models"
-version = "0.1.0"
-dependencies = [
- "serde",
- "soundcore-protocol",
-]
-
-[[package]]
-name = "soundcore-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
 ]
 
 [[package]]

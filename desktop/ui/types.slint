@@ -1,0 +1,426 @@
+// What the window shows and what it can ask for. Rust (src/lib.rs, src/view.rs) fills AppState and answers Actions.
+
+export enum Page {
+    overview,
+    sound-modes,
+    equalizer,
+    effects,
+    presets,
+    controls,
+    comfort,
+    power,
+    connections,
+    case,
+    about,
+    sleep,
+    lights,
+    alarms,
+    other,
+    devices,
+    settings,
+}
+
+export enum Connection { no-device, off, connecting, connected, recovering, lost, bluetooth-off, failed }
+
+// the earbud whose controls the controls page shows
+export enum ControlSide { left, right }
+
+export enum FailureKind { none, not-found, timed-out, other }
+
+// short messages at the bottom of the window; some say how many with AppState.toast-count
+export enum ToastKind { none, copied, profile-saved, profile-deleted, file-saved, imported, migrated, preset-applied, preset-deleted, preset-replaced, preset-loaded }
+
+// a page of the system's own settings
+export enum SystemPage { bluetooth, sound }
+
+// what the import and export panel last did
+export enum TransferNote { none, file-saved, file-save-failed, not-profiles, clipboard-empty, too-large, read-failed, imported }
+
+export struct DeviceCard {
+    mac: string,
+    name: string,
+    code: string,
+    art: image,
+    current: bool,
+    demo: bool,
+}
+
+// 1 earbuds, 2 over-ear headphones, 3 open earbuds, 4 speakers
+export struct ModelOption {
+    code: string,
+    name: string,
+    art: image,
+}
+
+// a setting as a row: what kind of control it gets, and its value in that kind's terms
+export enum RowKind { toggle, select, range, info, action, list, hue, time }
+
+export struct SettingRow {
+    id: string,
+    kind: RowKind,
+    label: string,
+    enabled: bool,
+    // why the row cannot be changed in the device's current state, empty while it can
+    reason: string,
+    checked: bool,
+    // a select's options, or a list's items
+    options: [string],
+    index: int,
+    minimum: int,
+    maximum: int,
+    step: int,
+    value: int,
+    text: string,
+}
+
+export enum PanelKind { plain, volume, gestures, presses, cycle, reset, case-screen, case-status, info, dual-devices, power-off }
+
+export struct SettingsPanel {
+    kind: PanelKind,
+    rows: [SettingRow],
+}
+
+export struct ModeOption {
+    value: string,
+    label: string,
+}
+
+export enum BlockKind { sound-mode, equalizer, quick-presets, controls, comfort, spatial, power, connections, case }
+
+// 0 left, 1 right, 2 case, 3 the whole device
+export struct Battery {
+    label: int,
+    value: string,
+    progress: float,
+    known: bool,
+}
+
+export struct QuickToggle {
+    id: string,
+    label: string,
+    on: bool,
+    enabled: bool,
+    // why the toggle cannot be changed in the device's current state, empty while it can
+    reason: string,
+}
+
+// a block of the overview, and what its shortcut says: numbers and names the window puts into words
+export struct OverviewBlockData {
+    kind: BlockKind,
+    page: Page,
+    number: int,
+    total: int,
+    text: string,
+    on: bool,
+    has-mode-cycle: bool,
+}
+
+export struct OverviewRow {
+    shortcuts: bool,
+    blocks: [OverviewBlockData],
+}
+
+export struct LayoutBlock {
+    kind: BlockKind,
+    visible: bool,
+}
+
+// 0 not applied, 1 the device has its values, 2 applied last and still in effect
+export struct PresetItem {
+    name: string,
+    detail: string,
+    status: int,
+    enabled-count: int,
+}
+
+// an equalizer band: its frequency without the unit, and its value in device units and as the field shows it
+export struct EqBand {
+    frequency: string,
+    khz: bool,
+    value: int,
+    text: string,
+}
+
+// a guide across the equalizer chart
+export struct EqLine {
+    value: int,
+    label: string,
+}
+
+// a saved equalizer profile, or one of OpenSCQ30 1.x still to move
+export struct EqProfile {
+    name: string,
+    curve: string,
+    bands: int,
+    in-effect: bool,
+    // chosen for export
+    export: bool,
+}
+
+// a profile in a file to import: 0 new, 1 replaces a saved one, 2 has the wrong number of bands, 3 is out of range
+export struct ImportItem {
+    name: string,
+    curve: string,
+    status: int,
+    bands: int,
+}
+
+// a quick preset's card: 0 not applied, 1 the device has its values, 2 applied last and still in effect
+export struct PresetCard {
+    name: string,
+    status: int,
+    // the first few of its settings with their values, and how many more there are
+    fields: [string],
+    more: int,
+    enabled-count: int,
+    curve: string,
+}
+
+// a setting a preset can apply, and whether it does
+export struct PresetFieldRow {
+    id: string,
+    label: string,
+    value: string,
+    enabled: bool,
+    curve: string,
+}
+
+export struct PresetGroup {
+    page: Page,
+    fields: [PresetFieldRow],
+}
+
+export struct PairedOption {
+    mac: string,
+    name: string,
+    suggested: bool,
+}
+
+export global AppState {
+    in-out property <Page> page: Page.devices;
+    // the pages of the connected device, under "Sound" and "Device" in the sidebar
+    in property <[Page]> sound-pages;
+    in property <[Page]> device-pages;
+
+    in property <Connection> connection: Connection.no-device;
+    // why the connection is recovering or was lost, empty otherwise
+    in property <string> connection-reason;
+    in property <string> device-name;
+    in property <string> device-code;
+    in property <image> device-art;
+    in property <bool> device-is-speaker;
+    in property <bool> one-earbud;
+    in property <FailureKind> failure-kind;
+    // the library's own words, for failures the window has no name for
+    in property <string> failure-text;
+
+    in property <[DeviceCard]> devices;
+
+    // adding a device: a model, then the paired device that is it
+    in-out property <bool> adding;
+    in-out property <int> add-step;
+    in property <[ModelOption]> models;
+    in-out property <string> model-query;
+    in-out property <int> model-kind;
+    in property <string> add-model-name;
+    in property <string> add-model-code;
+    in property <image> add-model-art;
+    in property <bool> add-model-is-speaker;
+    in-out property <bool> add-demo;
+    in property <bool> add-loading;
+    in property <[PairedOption]> paired-options;
+    in property <FailureKind> add-failure-kind;
+    in property <string> add-error;
+    in property <bool> add-bluetooth-off;
+
+    // the current page's settings
+    in property <[SettingsPanel]> panels;
+    in-out property <ControlSide> controls-side: ControlSide.left;
+    in property <bool> has-sides;
+
+    // the sound mode: tiles, or the 1 to 11 scale
+    in property <[ModeOption]> modes;
+    in property <int> mode-index: -1;
+    in property <bool> mode-scale;
+    in property <int> scale-position;
+    in property <[SettingRow]> mode-rows;
+    in property <string> normal-label;
+    in property <string> transparency-label;
+    in property <string> noise-canceling-label;
+    in property <string> airplane-label;
+    in property <int> airplane-index: -1;
+
+    // the overview
+    in property <[Battery]> batteries;
+    in property <[QuickToggle]> quick-toggles;
+    in property <[QuickToggle]> all-toggles;
+    in property <[OverviewRow]> overview-rows;
+    in property <[LayoutBlock]> layout-blocks;
+    in property <int> layout-preset: -1;
+    in-out property <bool> editing-layout;
+    in-out property <bool> choosing-toggles;
+    in property <bool> show-one-earbud-badge: true;
+    in property <[PresetItem]> presets;
+    in property <string> eq-name;
+    in property <string> eq-curve;
+    in property <int> eq-band-count;
+    in property <int> eq-min;
+    in property <int> eq-max;
+
+    // the equalizer page
+    in property <bool> eq-available;
+    in property <bool> eq-read-only;
+    in property <[ModeOption]> eq-presets;
+    in property <string> eq-preset;
+    in property <int> eq-preset-count;
+    in property <bool> eq-expanded;
+    in property <[EqBand]> eq-bands;
+    in property <[EqLine]> eq-lines;
+    in property <string> eq-chart-line;
+    in property <string> eq-chart-area;
+    in property <string> eq-min-text;
+    in property <string> eq-max-text;
+    in property <bool> has-saved-profiles;
+    in property <[EqProfile]> eq-profiles;
+    in property <int> eq-export-count;
+    in property <[EqProfile]> eq-legacy;
+    in-out property <bool> eq-legacy-open;
+    in property <TransferNote> transfer-note;
+    in property <int> transfer-count;
+    // saving a profile: 1 the name is empty, 2 a profile of the name exists and saving again replaces it
+    in-out property <bool> eq-saving;
+    in-out property <int> eq-save-problem;
+    in property <string> eq-save-existing;
+    in-out property <string> eq-deleting;
+    in-out property <bool> importing;
+    in property <[ImportItem]> import-items;
+    in property <bool> import-blocked;
+
+    // the quick presets page
+    in property <[PresetCard]> preset-cards;
+    in property <bool> presets-need-both-earbuds;
+    // creating one: 1 the name is empty, 2 a preset of the name exists and creating again replaces its values
+    in-out property <bool> creating-preset;
+    in-out property <int> preset-create-problem;
+    in property <string> preset-existing;
+    in property <string> editing-preset;
+    in property <[PresetGroup]> preset-groups;
+    in-out property <bool> loading-preset;
+    in-out property <string> deleting-preset;
+
+    // the app's settings, each as the index of its choice
+    in property <int> app-theme;
+    in property <int> app-palette;
+    in property <int> app-device-color;
+    in property <int> app-mode-view;
+    // 100%, 110% or 125%, as the content scale; Theme.content-scale holds the multiplier
+    in property <int> app-content-scale;
+    // whether this device can be shown as the 1 to 11 scale, so the choice is worth offering
+    in property <bool> app-mode-view-applies;
+    // Only a pair of earbuds can be down to one of them, so the badge choice is offered for those alone.
+    in property <bool> one-earbud-badge-applies;
+    in property <int> app-language;
+    in property <bool> app-tray;
+    in property <bool> app-tray-available;
+    in property <bool> app-close-to-tray;
+    in property <bool> tray-battery;
+    in property <bool> tray-modes;
+    in property <bool> tray-presets;
+    in property <bool> tray-ldac;
+    // the system's language, then every language by its own name
+    in property <[string]> language-names;
+    in property <string> app-version;
+    // the system the window runs on, for wording, and whether it has settings pages to open
+    in property <bool> linux;
+    in property <bool> system-settings-available;
+
+    // what the asides of the section pages show
+    in property <bool> has-ldac;
+    in property <bool> has-spatial;
+    in property <string> case-battery;
+
+    // a change the device did not take, shown above the page
+    in property <string> error-label;
+    in property <ToastKind> toast;
+    in property <int> toast-count;
+    in property <string> toast-name;
+
+    // asking before forgetting
+    in-out property <string> confirm-forget-mac;
+    in-out property <string> confirm-forget-name;
+}
+
+export global Actions {
+    callback navigate(Page);
+    callback connect(string);
+    callback cancel-connect();
+    callback disconnect();
+    callback forget(string);
+    callback open-add-device();
+    callback filter-models(string, int);
+    callback choose-model(string);
+    callback set-demo(bool);
+    callback refresh-paired();
+    callback pair(string, string);
+    callback retry();
+    callback dismiss-error();
+    callback open-uri(string);
+    callback open-system-settings(SystemPage);
+    callback set-toggle(string, bool);
+    callback set-option(string, int);
+    callback set-number(string, int);
+    callback press(string);
+    callback remove-item(string, int);
+    callback set-scale(int);
+    callback set-side(ControlSide);
+    callback copy(string);
+    callback choose-toggle(string, bool);
+    callback edit-layout();
+    callback layout-visible(int, bool);
+    callback layout-move(int, int);
+    callback layout-use(int);
+    callback apply-preset(string);
+    callback eq-preset(string);
+    callback eq-expand(bool);
+    // a band while it is dragged, and once it is let go
+    callback eq-preview(int, int);
+    callback eq-commit(int, int);
+    callback eq-type(int, string);
+    callback eq-reset();
+    callback eq-apply(string);
+    // the name, and whether to replace the profile of that name
+    callback eq-save(string, bool);
+    callback eq-delete(string);
+    callback eq-export-one(string);
+    // a profile chosen for export or not, or all of them with ""
+    callback eq-export-choose(string, bool);
+    callback eq-export-file();
+    callback eq-export-copy();
+    callback eq-import-file();
+    callback eq-import-paste();
+    callback eq-import();
+    // one old profile to move, or all of them with ""
+    callback eq-migrate(string);
+    // the name, and whether to replace the values of the preset of that name
+    callback preset-create(string, bool);
+    // the preset to edit, or "" to close the editor
+    callback preset-edit(string);
+    callback preset-toggle(string, string, bool);
+    callback preset-load(string);
+    callback preset-delete(string);
+    // the app's settings: as in the system, light, dark; purple, sage, rose; as the theme, silver, black;
+    // tiles, the scale; 100, 110 or 125 percent; as in the system, Russian, English
+    callback set-app-theme(int);
+    callback set-palette(int);
+    callback set-device-color(int);
+    callback set-mode-view(int);
+    callback set-content-scale(int);
+    callback set-badge(bool);
+    callback set-language(int);
+    callback copy-logs();
+    callback set-tray(bool);
+    callback set-close-to-tray(bool);
+    callback set-tray-item(int, bool);
+    callback quit-app();
+}
+
