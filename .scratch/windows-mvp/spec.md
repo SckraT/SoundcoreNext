@@ -37,13 +37,14 @@ This is the first functional Windows slice. It proves the clean-room session lay
 | `01-session-core.md` | — | `soundcore-session` crate: Transport trait, frame assembly, state polling, tests |
 | `02-windows-transport.md` | — | Windows enumeration + RFCOMM transport implementing the core trait, tests + manual enumeration |
 | `03-controller-ui.md` | 01, 02 | Add Device paired list, connect flow, Overview battery, navigation/errors |
-| `04-acceptance.md` | 03 | Real P20i and Liberty 4 Pro check, screenshot, docs |
+| `04-acceptance.md` | 03, 05 | Real-device check (Space One Pro; P20i/Liberty if reachable), screenshot, docs |
+| `05-single-battery-a3062.md` | — | Single-battery state layout so Space One Pro can show battery |
 
 ## Acceptance criteria
 
 1. `cargo build`, `cargo test`, `fmt --check`, `clippy -D warnings` pass in `desktop` and `core`.
 2. The app lists at least one paired Soundcore model for the chosen catalog model and marks the vendor-UUID candidate as suggested.
-3. Connecting to a real P20i (A3949) shows `100 %`/`80 %` or the current 5-step values (mapped to %) in the Overview battery tiles; Liberty 4 Pro (A3954) shows left/right/case values.
+3. Connecting to the available real Space One Pro (A3062) shows its single battery tile (raw 5/10 → 50 %); if P20i (A3949) or Liberty 4 Pro (A3954) are reachable, their left/right/case values are shown too.
 4. Bluetooth-off, missing device, timeout and unsupported-layout cases show a readable failure, not a crash or a raw MAC.
 5. Disconnect returns to the Devices page; retry reconnects; navigation works.
 6. Only `01 01` is written; no settings are changed.
