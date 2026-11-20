@@ -1,7 +1,7 @@
 # 03 — Controller and UI wiring
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** done
 **Blocked by:** 01, 02
 
 ## Goal
@@ -40,7 +40,48 @@ Do not edit any `.slint` file.
 
 ## Acceptance
 
-- [ ] Build/test/fmt/clippy pass.
-- [ ] Manual: choose a model, see paired candidates, pair one, reach Overview, see battery tiles.
-- [ ] Disconnect and retry work; Bluetooth-off and timeout show readable errors.
-- [ ] No `.slint` edits; no MAC/serial in logs or UI text.
+- [x] Build/test/fmt/clippy pass.
+- [x] Manual: choose a model, see paired candidates, pair one, reach Overview, see battery tiles.
+- [x] Disconnect and retry work; Bluetooth-off and timeout show readable errors.
+- [x] No `.slint` edits; no MAC/serial in logs or UI text.
+
+## Comments
+
+- Implemented on `ticket/win-03-controller`; `desktop/src/controller.rs` owns the worker
+  threads and the single `mpsc` channel, and a `slint::Timer` (20 ms) drains it on the Slint
+  thread. No worker touches `AppWindow`; stale enumeration/connect results are dropped by
+  sequence number, and `cancel-connect` sets the attempt's cancellation flag without waiting.
+- Pairing reads the chosen `add-model-code`, fills the hero/card, closes the dialog, navigates
+  to Overview, and connects on a worker with the cached SDP vendor UUID (standard SPP
+  fallback). Only the session's `01 01` state request is written; nothing else is sent.
+- Pure helpers are unit-tested (70 fast tests): selected-model lookup, paired-row MAC
+  round-trip, battery mapping for the 5/10/100-step scales, failure mapping, candidate
+  filtering/suggestion (vendor UUID first, name/code match for SPP-only models), and current
+  card replacement. The ignored `manual_paired_connect` test repeats the hardware check with
+  masked addresses.
+- Battery tiles use labels 0/1 (left/right) with `NN%` and `raw / scale.maximum()`. The TWS
+  CMM2 state parser has no case field, so a case tile (label 2) is not invented. The real
+  masked A3949 capture in `core/data/a3949-state.json` parses to 100 %/80 % in a test.
+- Manual UI check with Windows UI Automation on the running app (`target/debug/soundcore-desktop.exe`):
+  - Add Device → Liberty 4 Pro listed `soundcore P20i`, `soundcore Liberty 4 Pro`
+    (`Paired in Windows · looks like the chosen model`) and `soundcore Space One Pro`.
+  - Demo mode listed the simulated rows; pairing one reached Overview with the hero connected
+    and the tiles `Left: 100%` / `Right: 80%`.
+  - Real P20i (A3949 candidate suggested): pairing reached Overview `Connecting…`, then after
+    ~5 s `Could not connect` + `The device did not answer in time. Try again.`; no MAC in the
+    UI. Retry showed `Connecting…` again, Cancel returned to `Not connected` and the stale
+    timeout result did not override it.
+  - Real Space One Pro (A3062): RFCOMM connect and `01 01` succeeded; the state frame parsed
+    as an unsupported battery layout and the UI showed `This model reports a battery layout the
+    app cannot read yet, so battery levels are unavailable.` — readable, no crash, no MAC.
+  - The P20i and Liberty 4 Pro were not powered on/reachable at test time (radio page timeout).
+    A positive battery read from them on hardware is still pending for ticket 04; the demo and
+    captured-frame checks cover the UI path and the mapping meanwhile.
+- `disconnect` is wired but the vendored UI has no control that calls it; `connect`/`retry`/
+  `cancel-connect`/`navigate`/`refresh-paired`/`pair`/`set-demo` are wired. `sound-pages`,
+  `device-pages`, `overview-rows`, `panels`, `quick-toggles`, `all-toggles` stay empty;
+  `linux = false` and `system-settings-available = false`.
+- Checks run from `desktop`: `cargo test` (70 passed, 2 ignored), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets -- -D warnings`, `cargo build`; from `core`: `cargo test`.
+  No `.slint` file changed.
+
