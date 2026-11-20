@@ -3,6 +3,8 @@
 First Slint screen: grouped model catalog with a detail panel. It is a design
 and taxonomy validation, not yet a device controller.
 
+![Каталог моделей](catalog.png)
+
 ## Run
 
 ```powershell
