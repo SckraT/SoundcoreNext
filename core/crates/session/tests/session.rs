@@ -111,7 +111,8 @@ fn assembles_a_frame_split_across_reads() {
     let mut session = DeviceSession::new(model, transport);
 
     let state = session.poll_state().expect("state");
-    assert_eq!((state.battery.left, state.battery.right), (5, 4));
+    let battery = state.battery.as_ref().expect("A3949 is a TWS layout");
+    assert_eq!((battery.left, battery.right), (5, 4));
 }
 
 #[test]
@@ -177,7 +178,8 @@ fn resynchronises_after_a_prefix_with_an_impossible_length() {
     let mut session = DeviceSession::new(model, transport);
 
     let state = session.poll_state().expect("state after resynchronising");
-    assert_eq!((state.battery.left, state.battery.right), (5, 4));
+    let battery = state.battery.as_ref().expect("A3949 is a TWS layout");
+    assert_eq!((battery.left, battery.right), (5, 4));
 }
 
 #[test]
@@ -188,11 +190,12 @@ fn polls_the_real_a3949_state() {
 
     let state = session.poll_state().expect("state");
 
-    assert_eq!(state.battery.left, 5);
-    assert_eq!(state.battery.right, 4);
-    assert_eq!(state.battery.scale, BatteryScale::Five);
-    assert!(!state.battery.left_charging);
-    assert!(!state.battery.right_charging);
+    let battery = state.battery.as_ref().expect("A3949 is a TWS layout");
+    assert_eq!(battery.left, 5);
+    assert_eq!(battery.right, 4);
+    assert_eq!(battery.scale, BatteryScale::Five);
+    assert!(!battery.left_charging);
+    assert!(!battery.right_charging);
     assert_eq!(state.firmware.left.as_deref(), Some("14.43"));
     assert_eq!(state.firmware.right.as_deref(), Some("14.43"));
     assert_eq!(state.serial, None);

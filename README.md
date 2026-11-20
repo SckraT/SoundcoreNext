@@ -24,8 +24,9 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 | Frame parser/encoder | implemented, 503/503 corpus frames parse |
 | Model catalog | 39 models grouped into 5 form factors and 11 families |
 | A3949 real state | parsed, battery 5/4, firmware 14.43, masked serial |
+| A3062 real single-battery state | parsed, one battery tile, firmware 04.39, masked serial |
 | A3954 100-step state | synthetic test, battery 100/75 |
-| Single-battery layouts | intentionally unimplemented (`UnsupportedLayout`) |
+| Other single-battery layouts | intentionally unimplemented (`UnsupportedLayout`) |
 | TLV D1203 | not started |
 | Diagnostics | read-only probes, session manifest, serial/MAC redaction, ZIP export |
 | Desktop (OpenSCL4 2.0) | OpenSCL4 Slint shell vendored under GPL-3.0; Add Device populated from the 39-model catalog, with category and search filters |
