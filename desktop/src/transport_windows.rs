@@ -4,18 +4,12 @@
 //! The transport keeps Bluetooth addresses numeric (`u64`) everywhere; the UI
 //! formats them with [`format_mac`] only at its own boundary.
 //!
-//! The platform-independent session crate (ticket 01) is not on this branch
-//! yet. Its `Transport` trait is specified as blocking `write_all` plus a
-//! partial `read`, both returning [`std::io::Result`]; the socket already has
-//! exactly those methods, so ticket 03 only adds the trait impl once that crate
-//! is merged:
-//!
-//! ```ignore
-//! impl soundcore_session::Transport for WindowsRfcommTransport { /* delegate */ }
-//! ```
-//!
-//! `connect` blocks while Windows pages the device (tens of seconds), so the
-//! desktop controller must call it on a worker thread.
+//! It implements [`soundcore_session::Transport`]: blocking `write_all` and a
+//! partial `read`, both returning [`std::io::Result`], with a read deadline of
+//! [`IO_TIMEOUT`] reported as [`io::ErrorKind::TimedOut`]. Ticket 03 owns
+//! creating the `DeviceSession` and driving it from a worker thread; `connect`
+//! itself blocks while Windows pages the device (tens of seconds), never on a
+//! UI thread.
 
 #![allow(dead_code)] // wired into the desktop controller by ticket 03
 
@@ -303,6 +297,19 @@ impl WindowsRfcommTransport {
             return Err(BluetoothError::from_wsa(code.0).into());
         }
         Ok(received as usize)
+    }
+}
+
+/// The Windows socket is the blocking byte transport the session layer expects:
+/// a timed-out read is an [`io::ErrorKind::TimedOut`] `io::Error`, and every
+/// short send is retried by [`WindowsRfcommTransport::write_all`].
+impl soundcore_session::Transport for WindowsRfcommTransport {
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        WindowsRfcommTransport::write_all(self, bytes)
+    }
+
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        WindowsRfcommTransport::read(self, buffer)
     }
 }
 
@@ -678,6 +685,14 @@ mod tests {
         let error: io::Error = BluetoothError::ConnectionFailed.into();
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert!(error.to_string().contains("Bluetooth connection"));
+    }
+
+    #[test]
+    fn the_socket_is_a_session_transport() {
+        // Compile-time check that ticket 03 can hand this socket to
+        // `DeviceSession::new`; the hardware is not needed for it.
+        fn assert_transport<T: soundcore_session::Transport>() {}
+        assert_transport::<WindowsRfcommTransport>();
     }
 
     /// Manual hardware check, not part of the automated suite:
