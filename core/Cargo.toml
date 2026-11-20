@@ -3,6 +3,7 @@ members = [
     "crates/protocol",
     "crates/models",
     "crates/diagnostics",
+    "crates/session",
 ]
 resolver = "3"
 
