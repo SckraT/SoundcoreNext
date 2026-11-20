@@ -32,6 +32,16 @@ Turn `soundcore_models::catalog` into the data the vendored Add Device dialog ex
 5. Exactly the 39 `CATALOG` entries are exposed; unsupported codes never appear.
 6. Unit tests for mapping, count, search by code/name, empty result and kind filtering. `ModelOption` is a Slint type, so test the pure `CatalogEntry`/filter layer before conversion.
 
+## Deviation
+
+Requirement 3 names `slint::include_image!`, but no such macro exists in the
+Slint this crate resolves (`slint 1.19.0`, selected from `slint = "1.18"` in
+`desktop/Cargo.toml`). The approved substitute is `include_bytes!` on the
+vendored SVG plus `slint::Image::load_from_svg_data`, decoded once per form
+factor and shared from a thread-local cache; see `art_svg` and `art` in
+`desktop/src/catalog_adapter.rs`. The art assets, the
+one-image-per-form-factor rule and the no-new-assets rule are unchanged.
+
 ## Acceptance
 
 - [x] `cargo test` in `desktop` passes.
