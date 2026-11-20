@@ -1643,12 +1643,132 @@ mod tests {
                         .map(|tile| format!("label {}={}", tile.label, tile.value))
                         .collect();
                     println!("  connected: {}", shown.join(" "));
+                    // Firmware is part of the acceptance record; the serial is
+                    // deliberately not printed.
+                    let firmware = state
+                        .single_battery
+                        .as_ref()
+                        .and_then(|single| single.firmware.clone())
+                        .or_else(|| state.firmware.left.clone())
+                        .or_else(|| state.firmware.right.clone());
+                    println!("  firmware: {}", firmware.as_deref().unwrap_or("unknown"));
                 }
                 Some(ConnectOutcome::Failed(failure)) => {
                     println!("  failed ({:?}): {}", failure.kind(), failure.text());
                 }
                 None => println!("  cancelled"),
             }
+        }
+    }
+
+    /// Manual hardware check of the controller's `disconnect` and `retry`
+    /// callbacks, not part of the automated suite:
+    ///
+    /// ```text
+    /// cargo test -p soundcore-desktop manual_disconnect_and_retry -- --ignored --nocapture
+    /// ```
+    ///
+    /// The vendored UI has no disconnect control, so this drives the same
+    /// callbacks the window's actions call, against a real paired device:
+    /// connect the suggested A3062, disconnect back to My Devices, then retry
+    /// the saved card and wait for the second real connection. Addresses are
+    /// masked, so the output is safe to paste into a report.
+    #[test]
+    #[ignore = "manual hardware check: needs a paired Soundcore device"]
+    fn manual_disconnect_and_retry() {
+        let ui = AppWindow::new().expect("the shell window builds");
+        let (sender, receiver) = mpsc::channel();
+        let inner = Rc::new(Inner {
+            ui: ui.as_weak(),
+            sender,
+            receiver: RefCell::new(receiver),
+            enumeration: Cell::new(0),
+            connect: Cell::new(0),
+            cancel: RefCell::new(None),
+        });
+        let state = ui.global::<AppState>();
+
+        let model = selected_model("A3062").expect("A3062 has a catalog entry and a parser");
+        let found = enumerate_candidates(Some((model.code, model.name))).expect("enumeration");
+        let candidate = found
+            .iter()
+            .find(|candidate| candidate.suggested)
+            .or_else(|| found.first())
+            .expect("a paired A3062");
+        let mac = format_mac(candidate.address);
+        println!(
+            "== {} {} via {} ==",
+            model.code,
+            model.name,
+            masked_mac(&mac)
+        );
+
+        // `pair` reads the chosen model from the dialog state; set what
+        // `choose_model` would set and skip its own enumeration worker.
+        state.set_add_model_code(model.code.into());
+        state.set_add_model_name(model.name.into());
+        pair(&ui, &inner, &mac, &candidate.name);
+        assert_eq!(state.get_connection(), Connection::Connecting);
+        assert_eq!(state.get_page(), Page::Overview);
+        assert!(
+            wait_for_connection(&inner, &ui, Connection::Connected, Duration::from_secs(20)),
+            "the first real connection succeeds"
+        );
+        let tiles = shown_batteries(&state);
+        println!("  connected: {tiles:?}");
+        assert!(!tiles.is_empty(), "the connection shows battery tiles");
+
+        // Disconnect returns to My Devices and forgets the current card.
+        disconnect(&ui, &inner);
+        assert_eq!(state.get_page(), Page::Devices);
+        assert_eq!(state.get_connection(), Connection::Off);
+        assert_eq!(state.get_batteries().row_count(), 0);
+        let cards: Vec<DeviceCard> = state.get_devices().iter().collect();
+        assert!(cards.iter().all(|card| !card.current));
+        println!(
+            "  disconnect: page={:?} connection={:?}",
+            state.get_page(),
+            state.get_connection()
+        );
+
+        // Retry reconnects the saved card on the real device.
+        retry(&ui, &inner);
+        assert_eq!(state.get_connection(), Connection::Connecting);
+        assert!(
+            wait_for_connection(&inner, &ui, Connection::Connected, Duration::from_secs(20)),
+            "the retried connection succeeds"
+        );
+        let tiles = shown_batteries(&state);
+        println!("  retry connected: {tiles:?}");
+        assert!(!tiles.is_empty(), "the retry shows battery tiles");
+    }
+
+    /// The battery tiles of an Overview, as plain values for test output.
+    fn shown_batteries(state: &AppState<'_>) -> Vec<(i32, String)> {
+        state
+            .get_batteries()
+            .iter()
+            .map(|tile| (tile.label, tile.value.to_string()))
+            .collect()
+    }
+
+    /// Pumps the worker channel until the window reaches `want`, or the timeout.
+    fn wait_for_connection(
+        inner: &Rc<Inner>,
+        ui: &AppWindow,
+        want: Connection,
+        timeout: Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            drain_events(inner);
+            if ui.global::<AppState>().get_connection() == want {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
