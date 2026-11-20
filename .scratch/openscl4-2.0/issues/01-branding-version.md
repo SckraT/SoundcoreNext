@@ -1,7 +1,7 @@
 # 01 — Branding and version 2.0
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** done
 **Blocked by:** —
 
 ## Goal
@@ -19,8 +19,8 @@ Do **not** edit `desktop/Cargo.toml`; ticket 02 owns that file. Do not rename th
 
 ## Acceptance
 
-- [ ] Root README states that this is OpenSCL4 2.0 development and that the UI is vendored from OpenSCL4 under GPL-3.0.
-- [ ] `desktop/README.md` says the shell is the OpenSCL4 2.0 desktop shell.
-- [ ] `NOTICE` mentions the vendored desktop UI and keeps the GPL-3.0 attribution.
-- [ ] No user-visible string is renamed; the title still says OpenSCL4.
-- [ ] Markdown links still resolve; no new broken links.
+- [x] Root README states that this is OpenSCL4 2.0 development and that the UI is vendored from OpenSCL4 under GPL-3.0.
+- [x] `desktop/README.md` says the shell is the OpenSCL4 2.0 desktop shell.
+- [x] `NOTICE` mentions the vendored desktop UI and keeps the GPL-3.0 attribution.
+- [x] No user-visible string is renamed; the title still says OpenSCL4.
+- [x] Markdown links still resolve; no new broken links.
