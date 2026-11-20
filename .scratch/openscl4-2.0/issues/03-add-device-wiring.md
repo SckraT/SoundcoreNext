@@ -1,7 +1,7 @@
 # 03 — Wire the catalog into Add Device
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** done
 **Blocked by:** 02
 
 ## Goal
@@ -32,9 +32,19 @@ Populate the vendored Add Device dialog from the adapter. The UI files are not e
 
 ## Acceptance
 
-- [ ] `cargo build` and `cargo test` pass.
-- [ ] Running the app and opening Add Device shows the catalog (manual or automated check).
-- [ ] Search `A3954` shows Liberty 4 Pro; `P20` shows P20i/P25i/R50i; unknown text shows the existing empty state.
-- [ ] Category chips filter as specified.
-- [ ] Clicking a model reaches the existing paired-device step with the right name/code.
-- [ ] No protocol code or connection attempt is added.
+- [x] `cargo build` and `cargo test` pass.
+- [x] Running the app and opening Add Device shows the catalog (manual or automated check).
+- [x] Search `A3954` shows Liberty 4 Pro; `P20` shows P20i/P25i/R50i; unknown text shows the existing empty state.
+- [x] Category chips filter as specified.
+- [x] Clicking a model reaches the existing paired-device step with the right name/code.
+- [x] No protocol code or connection attempt is added.
+
+The callbacks were exercised on the real `AppWindow` headlessly with Slint's
+testing backend (temporary local harness, not committed: the internal
+`i-slint-backend-testing` crate is not a project dependency). It confirmed
+`invoke_open_add_device` resets `adding`/`add-step`/`model-query`/`model-kind`/
+`add-loading`/`add-bluetooth-off`/`paired-options` and refreshes all 39 models,
+`invoke_filter_models` narrows to A3954, P20 and the empty state, and
+`invoke_choose_model` sets the name/code/art/speaker flag and `add-step = 1`
+while ignoring an unknown code. The visible-window check was not run because
+the desktop session was in active use; the screenshot stays with ticket 04.

@@ -5,10 +5,6 @@
 //! Speakers. `CatalogEntry` is the pure layer; `filter_models` only converts it
 //! to the Slint `ModelOption`, so filtering is tested without a window.
 
-// Ticket 03 wires this module to the dialog's callbacks. Until then nothing in
-// the binary calls the adapter, so its items would be dead code warnings.
-#![allow(dead_code)]
-
 use std::cell::RefCell;
 
 use soundcore_models::catalog::{CATALOG, FormFactor, grouped_families};
@@ -114,6 +110,28 @@ pub fn filter_entries(query: &str, kind: i32) -> Vec<CatalogEntry> {
                 || entry.name.to_lowercase().contains(&query)
         })
         .collect()
+}
+
+/// What choosing a model card puts into the Add Device dialog's confirmation
+/// step: the fields it shows, and whether it words the dialog for a speaker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Selection {
+    pub name: &'static str,
+    pub code: &'static str,
+    pub art: slint::Image,
+    pub is_speaker: bool,
+}
+
+/// The confirmation step for a model code, or `None` when the catalog lists no
+/// model of that exact code.
+pub fn selection(code: &str) -> Option<Selection> {
+    let entry = entries().into_iter().find(|entry| entry.code == code)?;
+    Some(Selection {
+        name: entry.name,
+        code: entry.code,
+        art: entry.art,
+        is_speaker: entry.kind == KIND_SPEAKERS,
+    })
 }
 
 /// The options the Add Device dialog's model list binds to.
@@ -267,5 +285,25 @@ mod tests {
         assert_eq!(filter_models("", KIND_SPEAKERS).len(), 1);
         assert_eq!(filter_models("p20", KIND_ALL)[0].code.as_str(), "A3949");
         assert_eq!(filter_models("A3954", KIND_OVER_EAR).len(), 0);
+    }
+
+    #[test]
+    fn choosing_a_model_carries_the_confirmation_fields() {
+        let selection = selection("A3954").expect("A3954 is in the catalog");
+        assert_eq!(selection.name, "Liberty 4 Pro");
+        assert_eq!(selection.code, "A3954");
+        assert_eq!(selection.art, art(FormFactor::TwsEarbuds));
+        assert!(!selection.is_speaker);
+    }
+
+    #[test]
+    fn choosing_a_speaker_marks_it_as_one() {
+        let selection = selection("A3116").expect("A3116 is in the catalog");
+        assert!(selection.is_speaker);
+    }
+
+    #[test]
+    fn choosing_a_code_outside_the_catalog_yields_nothing() {
+        assert!(selection("not-a-model").is_none());
     }
 }
