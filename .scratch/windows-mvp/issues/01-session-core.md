@@ -1,7 +1,7 @@
 # 01 — Session core
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** done
 **Blocked by:** —
 
 ## Goal
@@ -31,6 +31,6 @@ Add the platform-independent session layer that sits between a transport and the
 
 ## Acceptance
 
-- [ ] `cargo test` and `cargo clippy --all-targets -- -D warnings` pass in `core`.
-- [ ] Existing protocol/models tests still pass.
-- [ ] No `windows` or Slint dependency in this crate.
+- [x] `cargo test` and `cargo clippy --all-targets -- -D warnings` pass in `core`.
+- [x] Existing protocol/models tests still pass.
+- [x] No `windows` or Slint dependency in this crate.
