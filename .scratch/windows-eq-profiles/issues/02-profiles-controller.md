@@ -26,7 +26,7 @@ Persist profiles and wire save/apply/delete to the vendored Equalizer page.
    - `Actions.eq-save` with replace true replaces bands.
 4. `Actions.eq-apply(name)`: resolve profile, write custom `03 87`, re-poll, update bands/chart/in-effect; readable error.
 5. `Actions.eq-delete(name)`: remove after `eq-deleting` confirmation, persist, update list.
-6. Import/export/legacy fields stay empty/inert: `eq-export-count=0`, `eq-legacy=[]`; no file/clipboard actions.
+6. Import/export/legacy fields stay empty/inert: `eq-export-count=0`, `eq-legacy=[]`; no file/clipboard actions. The vendored Import and export panel stays visible but inert (its buttons do nothing).
 7. A3949 deferred: no page, no writes.
 8. Tests: profile load/save atomicity (temp dir), duplicate/empty/invalid, apply writes one curve, in-effect matching, delete persists, malformed file tolerated.
 9. Real A3062: save a custom profile, apply, delete; restart persistence checked in acceptance.
@@ -56,16 +56,18 @@ fills the fields they read.
   JSON to `<document>.tmp`, `sync_all`s it, and renames it over the document.
   The rename is atomic on Windows and replaces the previous document as a
   whole, so a crash or a full disk cannot leave a half-written profile file; a
-  failed save removes its temporary file. A failed save is logged to stderr and
-  the in-memory profiles stay usable: the next successful save rewrites the
-  whole set.
+  failed save removes its temporary file.
+- A failed save is a visible failure, not a silent one: the in-memory change is
+  rolled back (the saved list and the document keep agreeing), the page's error
+  banner shows the readable label `Could not save equalizer profiles`, and the
+  reason is also logged to stderr. A missing `%APPDATA%` directory is treated the
+  same way: the profile is not kept, because it would not survive a restart.
 
 ### Saved-profile rows
 
-- `EqualizerDisplay::saved_profiles` is true exactly when the model's page is
-  editable (the A3062), so `has-saved-profiles` is true only for the A3062 and
-  the deferred A3949 keeps the panel, the Save button and every profile write
-  hidden.
+- The controller fills the `has-saved-profiles` field from
+  `EqualizerDisplay::editable`, so it is true only for the A3062; the deferred
+  A3949 keeps the panel, the Save button and every profile write hidden.
 - `profile_rows` maps the loaded set to `AppState.eq-profiles`: each row has the
   trimmed name, a curve path generated from the eight bands in the 600×100
   viewbox the vendored `ProfileCurve` draws (`profile_curve` shares the chart's
@@ -80,15 +82,26 @@ fills the fields they read.
 ### Save, apply, delete
 
 - `Actions.eq-save(name, replace)` is answered by `save_request` +
-  `save_equalizer_profile`. A trimmed-empty name sets `eq-save-problem = 1`; a
-  saved name without `replace` sets problem 2 and `eq-save-existing`, so the
-  dialog asks before overwriting; otherwise the page's eight current (clamped)
-  bands become an `EqualizerProfile` under the trimmed name (replacing the saved
-  bands when it exists), the set is persisted, the row list is refreshed, the
-  dialog closes (`eq-saving = false`) and the profile is already Applied because
-  its bands are the current bands. The model's 60-character name limit has no
-  own dialog slot, so an over-long name is reported like an empty one
-  (problem 1) and its reason is logged to stderr.
+  `save_equalizer_profile`. The dialog values are named by the small
+  `SaveProblem` enum (`None = 0`, `EmptyName = 1`, `NeedsReplace = 2`) instead
+  of bare integers, matching the vendored `.slint` dialog. A trimmed-empty name
+  stays in the dialog with problem 1; a saved name without `replace` sets
+  problem 2 and `eq-save-existing`, so the dialog asks before overwriting;
+  otherwise the page's eight current (clamped) bands become an
+  `EqualizerProfile` under the trimmed name (replacing the saved bands when it
+  exists), the set is persisted and the row list is refreshed. On success the
+  dialog closes (`eq-saving = false`), the profile is already Applied because
+  its bands are the current bands, and a stale write-failure banner is cleared.
+  The model's 60-character name limit has no own dialog slot, so an over-long
+  name is reported like an empty one (problem 1) and its reason is logged to
+  stderr.
+- A save whose document cannot be written does **not** close the dialog as a
+  success and does **not** list the profile: the in-memory add/replace is rolled
+  back, the dialog closes (the vendored dialog has only name-problem slots, so
+  the page banner is the visible error), and the banner shows
+  `Could not save equalizer profiles`; stderr carries the file error. The
+  outcome is the small `SaveOutcome`/`Persistence` enum set, so the controller
+  decides from named states instead of loose flags.
 - `Actions.eq-apply(name)` resolves the profile and queues its bands through the
   existing `DeviceCommand::WriteCustomCurve`: the device worker writes exactly
   one custom `03 87` body from its last re-polled state (preserving the HearID
@@ -100,15 +113,19 @@ fills the fields they read.
   edits.
 - `Actions.eq-delete(name)` runs after the `eq-deleting` confirmation dialog:
   the profile is removed, the smaller set persisted, the rows refreshed, and
-  `eq-deleting` is cleared last (a stale name only closes the dialog).
+  `eq-deleting` is cleared last (a stale name only closes the dialog). A delete
+  whose document cannot be written restores the profile, keeps the row, and
+  shows the same write-failure banner instead of reporting a delete that did not
+  persist.
 - The A3949 is deferred: it has no page, so `has-saved-profiles` is false, no
   rows are shown and the save/apply gates reject it; no profile file action ever
   writes a `03 87` frame for it.
 
 ## Verification
 
-- `desktop` `cargo test`: **130 passed, 0 failed, 8 ignored** (was 117/7 before
-  this ticket; +13 automated tests and one new ignored hardware test).
+- `desktop` `cargo test`: **136 passed, 0 failed, 8 ignored** (was 117/7 before
+  this ticket; +19 saved-profile tests, including the review-fix failure-path
+  tests, and one new ignored hardware test).
 - New automated tests, all passing:
   - `the_profile_document_lives_in_the_app_data_directory` — the document path
     is `<app-data>\OpenSCL4\equalizer-profiles.json` and the temporary sibling is
@@ -126,6 +143,25 @@ fills the fields they read.
   - `a_save_that_cannot_write_the_document_reports_an_error` — a file where the
     directory belongs makes the save return a readable error without panicking
     or leaving a temporary file, and the blocking file is untouched.
+  - `a_save_that_cannot_write_the_document_rolls_back_and_reports` — a save into
+    a blocked document path returns `SaveOutcome::NotWritten`, rolls the set
+    back to empty, closes the dialog, and shows the write-failure banner label;
+    the blocking file is untouched.
+  - `a_delete_that_cannot_write_the_document_keeps_the_profile` — a delete whose
+    document write fails returns `DeleteOutcome::NotWritten` and keeps the
+    profile in the set, so the row is not silently lost.
+  - `a_missing_app_data_directory_is_not_reported_as_saved` — a save with no
+    app-data path is `NotWritten` (nothing kept in memory), closes the dialog and
+    shows the write-failure banner instead of pretending the profile persists.
+  - `a_written_profile_closes_the_dialog_and_clears_a_stale_banner` — a written
+    save stores the trimmed name, matches the document, closes the dialog, clears
+    the name problem and clears a stale write-failure banner.
+  - `the_save_problem_values_match_the_vendored_dialog` — `SaveProblem::None`,
+    `EmptyName` and `NeedsReplace` are 0, 1 and 2, the values the vendored
+    `.slint` dialog compares to.
+  - `the_dialog_shows_the_name_problems_on_the_page` — an empty name shows
+    problem 1 and a saved name shows problem 2 with the trimmed existing name;
+    both keep the dialog open and change nothing.
   - `a_profile_curve_is_drawn_in_the_thumbnail_box` — the curve path starts at
     x=37.5 in the 600-wide box, a flat 0 dB curve sits at y≈52.4 of the 100-unit
     box, and the range ends stay inside the margins.
@@ -142,11 +178,11 @@ fills the fields they read.
     already proves that command writes one `03 87` frame and re-polls).
   - `an_unknown_profile_or_a_stopped_worker_queues_nothing` — unknown names and
     a stopped worker write nothing and report Unknown/Disconnected.
-  - `deleting_a_saved_profile_persists_the_smaller_set` — removing a profile,
-    saving and reloading leaves only the other one, and the file is the smaller
-    set.
-  - `only_the_editable_a3062_page_offers_saved_profiles` — the A3062 page offers
-    saved profiles while the deferred A3949 page does not.
+  - `deleting_a_saved_profile_persists_the_smaller_set` — `delete_profile`
+    removes and persists the smaller set (reload leaves only the other one), and
+    an unknown name is `NotFound` without touching the document.
+  - `only_the_editable_a3062_page_offers_saved_profiles` — the A3062 page is
+    `editable` (so it offers saved profiles) while the deferred A3949 page is not.
 - `desktop` `cargo fmt --all -- --check` clean, `cargo clippy --all-targets --
   -D warnings` clean, `cargo build` ok (only the pre-existing vendored-Slint
   layout warnings).
@@ -188,6 +224,10 @@ cargo test -p soundcore-desktop manual_saved_profiles -- --ignored --nocapture
   reconnected.
 - **Delete:** after the `eq-deleting` confirmation state the row was gone, the
   dialog cleared, and the document loaded empty.
+- **Write failure:** a save bound to a temporary blocked document path showed
+  the banner label `"Could not save equalizer profiles"`, closed the save
+  dialog, added no row and left the user's real document empty/unchanged; the
+  then-current blocks in the scripted run print this line.
 - Left as found: the preset found on connect (Soundcore Signature, flat) was
   restored, and the profile document was backed up before the run and restored
   afterwards, so no profile was left behind. Addresses are masked; no
@@ -197,4 +237,4 @@ cargo test -p soundcore-desktop manual_saved_profiles -- --ignored --nocapture
 
 - [x] desktop/core gates pass.
 - [x] Real save/apply/delete verified.
-- [x] No `.slint` edits; import/export inert.
+- [x] No `.slint` edits; the vendored import/export panel stays visible but inert.
