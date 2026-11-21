@@ -41,30 +41,38 @@ layout, components, pages, icons, fonts and art.
   mode frame.
 - The **Equalizer** page is implemented for the models the core reports an
   equalizer for — today the Space One Pro (A3062). On connect the page shows the
-  device's current built-in preset and its read-only curve: the 22 catalog
-  presets as chips (the current one checked) and the eight visible band values
-  in the measured −12.0…+13.4 dB range on the vendored chart. Choosing another
-  chip writes one `03 87` preset frame, then re-reads the `01 01` state and
-  selects the preset, its name and its curve from what the device reports.
-  Custom band editing, saved profiles and import/export stay out of scope: the
-  page is read-only, so the band sliders/fields and those controls are hidden
-  and no band value can be written. The P20i (A3949) equalizer is deliberately
-  deferred in this slice: the committed A3949 state carries an equalizer block
-  at body 32..44, but no A3949 `03 87` write body is verified, so the page stays
-  hidden and no preset frame is sent for that model.
+  device's current preset and its curve: the 22 catalog presets as chips (the
+  current one checked) and the eight visible band values in the measured
+  −12.0…+13.4 dB range on the vendored chart. Choosing another chip writes one
+  `03 87` preset frame, then re-reads the `01 01` state and selects the preset,
+  its name and its curve from what the device reports.
+- The eight A3062 bands are **editable**, so the page is not read-only: each
+  band has a value field and a slider, and there is a Reset button. Dragging a
+  chart point or a slider previews the curve locally and writes nothing; letting
+  go, or pressing Enter in a field, writes one `03 87` custom frame (`0xFEFE`
+  and the eight visible values, the rest of the measured body copied from the
+  last re-poll) and then re-reads the `01 01` state, so the chart, the name tag
+  (“Your own settings”) and the fields follow the device. Reset writes a flat
+  custom curve. Built-in preset chips still work and switch the device away
+  from a custom curve and back. Saved profiles, import/export and HearID stay
+  out of scope and their vendored controls stay hidden.
+- The P20i (A3949) equalizer is deliberately deferred in this slice: the
+  committed A3949 state carries an equalizer block at body 32..44, but no A3949
+  `03 87` write body is verified, so the page stays hidden and no equalizer
+  frame is sent for that model.
 - Connecting shows “Connecting…”, and Bluetooth off, not found, timeout and
   unsupported-layout failures each show a readable message instead of a crash.
   Cancel and Retry are wired. The vendored UI has no disconnect control; the
   controller's `disconnect` action clears the current device and returns to My
   Devices.
 - Only the `01 01` state request, the `06 81` sound-mode frame and the `03 87`
-  equalizer-preset frame are written to the device; pairing stays in Windows
-  settings and the app never changes it.
+  equalizer frames (the built-in preset and the custom bands) are written to the
+  device; pairing stays in Windows settings and the app never changes it.
 - ANC strength, wind noise, adaptive ANC and the 1-to-11 strength scale are not
   part of this slice, so the Sound mode page shows only the three mode tiles.
-  Equalizer custom bands (the `eq-commit`/`eq-preview`/`eq-type`/`eq-reset`
-  controls), saved profiles and import/export are out of scope too: the page is
-  read-only and offers only the built-in presets.
+  Saved equalizer profiles, import/export, the profile list and HearID are out
+  of scope as well: those vendored controls keep their empty state and no
+  profile is saved, listed or read.
 - Pages other than Overview, My Devices, Sound mode and (for an A3062) the
   Equalizer still open in their placeholder state, which is expected: this shell
   does not implement controls, comfort or connections.
@@ -86,16 +94,18 @@ is selected; noise canceling, transparency and normal are the three choices.
 Choosing another mode writes one `06 81` frame and re-reads the `01 01` state.
 No Bluetooth address or serial number appears on this page or in the capture.
 
-![Equalizer with a connected Space One Pro](equalizer-connected.png)
+![Custom equalizer with a connected Space One Pro](equalizer-custom.png)
 
 The Equalizer page from the running app on Windows: a paired **soundcore
-Space One Pro** (A3062) is connected over RFCOMM and its current built-in
-preset (Soundcore Signature) is checked. All 22 catalog preset chips are shown,
-and the “Equalizer bands: 8” panel holds the eight read-only band values as the
-measured curve in the −12.0…+13.4 dB range. Choosing another chip writes one
-`03 87` preset frame and re-reads the `01 01` state; custom band editing, saved
-profiles and import/export are out of scope and the page is read-only. No
-Bluetooth address or serial number appears on this page or in the capture.
+Space One Pro** (A3062) is connected over RFCOMM and its bands are editable.
+The eight band fields and sliders, the chart, the Reset button and all 22
+catalog preset chips are shown. A typed custom curve (+4.0 dB at 100 Hz,
+−4.0 dB at 800 Hz) was committed and re-read from the device, so the name tag
+reads “Your own settings” and the fields hold the re-polled values. Typing a
+value or letting go of a drag writes one `03 87` custom frame (`0xFEFE`), then
+re-reads the `01 01` state; Reset writes a flat custom curve. Saved profiles,
+import/export and HearID are out of scope and hidden. No Bluetooth address or
+serial number appears on this page or in the capture.
 
 ![Add device](add-device.png)
 
