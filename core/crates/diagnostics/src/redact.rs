@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn redacts_mac_addresses() {
         assert_eq!(
-            redact_text("device A4:C1:39:92:2B:F1 connected"),
+            redact_text("device 00:11:22:33:44:55 connected"),
             "device <redacted-mac> connected"
         );
         assert_eq!(
