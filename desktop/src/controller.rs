@@ -1,13 +1,14 @@
 //! The desktop controller: wires the vendored UI to the Windows Bluetooth
-//! transport and the clean-room session.
+//! transport and the session.
 //!
 //! The controller keeps every `AppWindow` access on the Slint thread. Bluetooth
 //! work happens on worker threads that report results over one `mpsc` channel;
 //! a [`slint::Timer`] drains that channel on the UI thread. A connection
-//! attempt is short-lived, but when the model reports a sound mode its worker
-//! outlives the connect: it keeps the session open and serves mode writes from
-//! a second `mpsc` command channel, dropped by the UI to end the worker and
-//! close the connection. Nothing here waits for Bluetooth on the UI thread.
+//! attempt is short-lived, but when the model reports a sound mode or an
+//! equalizer its worker outlives the connect: it keeps the session open and
+//! serves writes from a second `mpsc` command channel, dropped by the UI to end
+//! the worker and close the connection. Nothing here waits for Bluetooth on the
+//! UI thread.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -17,7 +18,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
-use soundcore_models::{DeviceModel, DeviceState, SoundMode};
+use soundcore_models::{DeviceModel, DeviceState, EqualizerPreset, EqualizerState, SoundMode};
 use soundcore_session::{DeviceSession, SessionError, Transport};
 use windows::core::GUID;
 
@@ -27,8 +28,8 @@ use crate::transport_windows::{
     list_paired_devices, parse_mac, pick_service, vendor_service,
 };
 use crate::{
-    Actions, AppState, AppWindow, Battery, Connection, DeviceCard, FailureKind, ModeOption, Page,
-    PairedOption,
+    Actions, AppState, AppWindow, Battery, Connection, DeviceCard, EqBand, EqLine, FailureKind,
+    ModeOption, Page, PairedOption,
 };
 
 /// The model chosen in the Add Device dialog: what the catalog card shows plus
@@ -165,14 +166,296 @@ pub fn mode_for_index(index: i32) -> Option<SoundMode> {
         .and_then(|index| SoundMode::ALL.get(index).copied())
 }
 
-/// The sidebar pages of a parsed state: Sound mode only when the device reports
-/// a mode, so a P20i never shows the page.
-pub fn sound_pages(sound_mode: Option<SoundMode>) -> Vec<Page> {
+/// The sidebar pages of a parsed state: Sound mode and Equalizer only when the
+/// device reports a measured mode and a supported equalizer. A P20i has no
+/// measured sound mode, and its equalizer is deliberately deferred in this
+/// slice, so it shows neither page.
+pub fn sound_pages(sound_mode: Option<SoundMode>, has_equalizer: bool) -> Vec<Page> {
+    let mut pages = Vec::new();
     if sound_mode.is_some() {
-        vec![Page::SoundModes]
-    } else {
-        Vec::new()
+        pages.push(Page::SoundModes);
     }
+    if has_equalizer {
+        pages.push(Page::Equalizer);
+    }
+    pages
+}
+
+/// The A3062 equalizer range in device units (dB×10): -12.0..+13.4 dB. It is
+/// the measured band-byte range 0..=254 minus the 120 offset the state uses.
+pub const EQ_MIN: i16 = -120;
+/// See [`EQ_MIN`].
+pub const EQ_MAX: i16 = 134;
+
+/// The number of A3062 bands the vendored page shows. The state carries ten
+/// band bytes, but the last two are fixed by every preset and not adjustable
+/// (0 dB and -12.0 dB): OpenSCL4's measured A3062 equalizer also exposes eight
+/// visible bands, and the Soundcore app's own X labels are these eight.
+pub const EQ_VISIBLE_BANDS: usize = 8;
+
+/// The measured frequency of each visible A3062 band in hertz, as OpenSCL4's
+/// A3062 equalizer settings and the Soundcore app's equalizer chart label them.
+pub const EQ_BAND_HZ: [u16; EQ_VISIBLE_BANDS] = [100, 200, 400, 800, 1600, 3200, 6400, 12800];
+
+/// The `AppState.eq-presets` chips of a model: one per built-in preset, in the
+/// catalog's display order. The chip value is the decimal preset id the state
+/// reports, so a click names exactly one catalog entry (the page compares the
+/// value with `eq-preset`, which is also the id string); the label is the
+/// preset's name. A model whose equalizer this slice does not implement (the
+/// deferred A3949) gets no chips.
+pub fn preset_options(model: Option<DeviceModel>) -> Vec<ModeOption> {
+    model
+        .map(DeviceModel::equalizer_presets)
+        .unwrap_or_default()
+        .iter()
+        .map(|preset| ModeOption {
+            value: preset.id.to_string().into(),
+            label: preset.name.into(),
+        })
+        .collect()
+}
+
+/// The preset id a chip value names, when the page offers that value. Anything
+/// else is ignored, so an unknown or stale value never writes.
+pub fn selectable_preset_id(presets: &[ModeOption], value: &str) -> Option<u16> {
+    let id = value.parse::<u16>().ok()?;
+    presets
+        .iter()
+        .any(|preset| preset.value.as_str() == value)
+        .then_some(id)
+}
+
+/// The `EqBand.frequency` text and whether it is in kilohertz: `100` is
+/// ("100", false), `1600` is ("1.6", true), `12800` is ("12.8", true).
+pub fn band_frequency(hz: u16) -> (String, bool) {
+    if hz < 1000 {
+        return (hz.to_string(), false);
+    }
+    let khz = format!("{}.{:03}", hz / 1000, hz % 1000);
+    (
+        khz.trim_end_matches('0').trim_end_matches('.').to_string(),
+        true,
+    )
+}
+
+/// A band value in decibels as the value field shows it: 134 is "13.4", -120
+/// is "-12", 0 is "0". The device stores tenths of a decibel.
+pub fn band_value_text(value: i16) -> String {
+    let magnitude = i32::from(value).unsigned_abs();
+    let sign = if value < 0 { "-" } else { "" };
+    let (whole, fraction) = (magnitude / 10, magnitude % 10);
+    if fraction == 0 {
+        format!("{sign}{whole}")
+    } else {
+        format!("{sign}{whole}.{fraction}")
+    }
+}
+
+/// A value with a sign and one decimal digit, as the chart's guide labels and
+/// the range note show it: "+13.4", "0.0", "−12.0". The minus is U+2212 as in
+/// the vendored strings.
+pub fn signed_decibels(value: i16) -> String {
+    let magnitude = i32::from(value).unsigned_abs();
+    let sign = match value.signum() {
+        1 => "+",
+        -1 => "\u{2212}",
+        _ => "",
+    };
+    format!("{sign}{}.{}", magnitude / 10, magnitude % 10)
+}
+
+/// The visible bands of a parsed state: the first eight band values with their
+/// measured frequencies. Read-only: this slice never writes band values.
+pub fn equalizer_bands(equalizer: &EqualizerState) -> Vec<EqBand> {
+    EQ_BAND_HZ
+        .iter()
+        .zip(equalizer.bands.iter())
+        .map(|(hz, value)| {
+            let (frequency, khz) = band_frequency(*hz);
+            EqBand {
+                frequency: frequency.into(),
+                khz,
+                value: i32::from(*value),
+                text: band_value_text(*value).into(),
+            }
+        })
+        .collect()
+}
+
+/// The chart's guides: the range ends, half of each, and zero, with their
+/// decibel labels.
+pub fn equalizer_lines() -> Vec<EqLine> {
+    [EQ_MAX, 70, 0, -60, EQ_MIN]
+        .into_iter()
+        .map(|value| EqLine {
+            value: i32::from(value),
+            label: signed_decibels(value).into(),
+        })
+        .collect()
+}
+
+/// The chart's path commands are in a box of this size; the vendored chart
+/// stretches it to its own size.
+const CHART_WIDTH: f32 = 600.0;
+const CHART_HEIGHT: f32 = 200.0;
+/// The part of the chart's height kept above the highest and below the lowest
+/// value, so the points are not cut off. `EqualizerChart` uses the same margin.
+const CHART_MARGIN: f32 = 0.06;
+
+/// The curve through `values` and the area under it, as path commands for the
+/// vendored chart. Empty when there is nothing to draw.
+pub fn equalizer_chart(values: &[i16], min: i16, max: i16) -> (String, String) {
+    if values.is_empty() || max <= min {
+        return (String::new(), String::new());
+    }
+    let count = values.len() as f32;
+    let points: Vec<(f32, f32)> = values
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, value)| {
+            let x = (index as f32 + 0.5) / count;
+            let span = f32::from((max - min).max(1));
+            let fraction = f32::from(value.clamp(min, max) - min) / span;
+            let y = CHART_MARGIN + (1.0 - fraction) * (1.0 - 2.0 * CHART_MARGIN);
+            (x * CHART_WIDTH, y * CHART_HEIGHT)
+        })
+        .collect();
+    let line = smooth_path(&points);
+    let first = points[0].0;
+    let last = points[points.len() - 1].0;
+    // The fill walks the same segments as the line, but starts and ends at its
+    // own bottom corners so a flat run has no gap between fill and stroke.
+    let area = format!(
+        "M {first:.1} {CHART_HEIGHT:.1} L {first:.1} {:.1}{} L {last:.1} {CHART_HEIGHT:.1} Z",
+        points[0].1,
+        smooth_segments(&points),
+    );
+    (line, area)
+}
+
+/// A path through `points`, smoothed so it follows the values instead of
+/// stepping between them (Fritsch–Carlson: zero slope at a turning point, the
+/// harmonic mean of the neighbouring slopes elsewhere, so it never overshoots a
+/// band's value).
+fn smooth_path(points: &[(f32, f32)]) -> String {
+    let Some(first) = points.first() else {
+        return String::new();
+    };
+    format!("M {:.1} {:.1}{}", first.0, first.1, smooth_segments(points))
+}
+
+/// The `C` commands that continue a path through `points`; empty when there is
+/// nothing to join.
+fn smooth_segments(points: &[(f32, f32)]) -> String {
+    if points.len() < 2 {
+        return String::new();
+    }
+    let slopes = slopes(points);
+    let mut segments = String::new();
+    for (index, pair) in points.windows(2).enumerate() {
+        let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+        let dx = x1 - x0;
+        let control0 = (x0 + dx / 3.0, y0 + slopes[index] * dx / 3.0);
+        let control1 = (x1 - dx / 3.0, y1 - slopes[index + 1] * dx / 3.0);
+        segments.push_str(&format!(
+            " C {:.1} {:.1} {:.1} {:.1} {:.1} {:.1}",
+            control0.0, control0.1, control1.0, control1.1, x1, y1,
+        ));
+    }
+    segments
+}
+
+/// The slope of the curve at each point, one per point.
+fn slopes(points: &[(f32, f32)]) -> Vec<f32> {
+    let between: Vec<f32> = points
+        .windows(2)
+        .map(|pair| {
+            let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+            if x1 > x0 { (y1 - y0) / (x1 - x0) } else { 0.0 }
+        })
+        .collect();
+    let mut slopes = Vec::with_capacity(points.len());
+    // The ends keep the slope of their only neighbouring segment.
+    slopes.push(between[0]);
+    for index in 1..between.len() {
+        let (before, after) = (between[index - 1], between[index]);
+        slopes.push(if before * after <= 0.0 {
+            0.0
+        } else {
+            2.0 * before * after / (before + after)
+        });
+    }
+    slopes.push(between[between.len() - 1]);
+    slopes
+}
+
+/// Everything the vendored Equalizer page shows for a parsed state, worked out
+/// on the worker's result so the UI thread only copies it into `AppState`.
+#[derive(Debug, Clone, Default)]
+pub struct EqualizerDisplay {
+    /// Whether the device reported an equalizer this slice can show.
+    pub available: bool,
+    /// The preset chips, their count, and the id string of the current preset
+    /// (`""` when the device reports custom bands).
+    pub presets: Vec<ModeOption>,
+    pub preset_count: i32,
+    pub preset: String,
+    /// The read-only band values, their count, and the decibel range.
+    pub band_count: i32,
+    pub min: i32,
+    pub max: i32,
+    pub min_text: String,
+    pub max_text: String,
+    pub bands: Vec<EqBand>,
+    pub lines: Vec<EqLine>,
+    pub chart_line: String,
+    pub chart_area: String,
+    /// The name of the current built-in preset, empty for custom bands.
+    pub name: String,
+}
+
+impl EqualizerDisplay {
+    /// The page data of a parsed state: presets from `model`'s catalog, the
+    /// current preset and its read-only curve from `equalizer`.
+    pub fn new(model: Option<DeviceModel>, equalizer: Option<&EqualizerState>) -> Self {
+        let Some(equalizer) = equalizer else {
+            return Self::default();
+        };
+        let presets = preset_options(model);
+        let bands = equalizer_bands(equalizer);
+        let (chart_line, chart_area) =
+            equalizer_chart(&equalizer_values(equalizer), EQ_MIN, EQ_MAX);
+        let built_in = equalizer.preset();
+        Self {
+            available: true,
+            preset_count: i32::try_from(presets.len()).unwrap_or(0),
+            presets,
+            preset: equalizer.preset_id.to_string(),
+            band_count: i32::try_from(bands.len()).unwrap_or(0),
+            min: i32::from(EQ_MIN),
+            max: i32::from(EQ_MAX),
+            min_text: signed_decibels(EQ_MIN),
+            max_text: signed_decibels(EQ_MAX),
+            bands,
+            lines: equalizer_lines(),
+            chart_line,
+            chart_area,
+            name: built_in
+                .map(|preset| preset.name.to_owned())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// The `EqBand` values of a state, as integers for the chart.
+fn equalizer_values(equalizer: &EqualizerState) -> Vec<i16> {
+    equalizer
+        .bands
+        .iter()
+        .take(EQ_VISIBLE_BANDS)
+        .copied()
+        .collect()
 }
 
 /// Why a sound-mode change did not take, in the words the vendored error banner
@@ -195,10 +478,11 @@ impl ModeFailure {
             SessionError::Io(_) => Self::Disconnected,
             // A change is only written for a model whose state reported a sound
             // mode, so the session always has a `06 81` body to write; the
-            // write-only variant keeps the mapping total.
+            // write-only variants keep the mapping total.
             SessionError::Protocol(_)
             | SessionError::UnsupportedLayout
-            | SessionError::UnsupportedSoundMode => Self::Unreadable,
+            | SessionError::UnsupportedSoundMode
+            | SessionError::UnsupportedEqualizer => Self::Unreadable,
         }
     }
 
@@ -224,6 +508,62 @@ pub fn change_sound_mode<T: Transport>(
         .map_err(ModeFailure::from_session)?;
     let state = session.poll_state().map_err(ModeFailure::from_session)?;
     state.sound_mode.ok_or(ModeFailure::Unreadable)
+}
+
+/// Why an equalizer preset change did not take, in the words the vendored error
+/// banner shows above the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EqFailure {
+    /// The device did not answer the write or the state re-read in time.
+    TimedOut,
+    /// The Bluetooth link dropped before the new preset was confirmed.
+    Disconnected,
+    /// The device answered with something this app cannot read.
+    Unreadable,
+}
+
+impl EqFailure {
+    /// Reduces a session failure to the case the page has words for.
+    pub fn from_session(error: SessionError) -> Self {
+        match error {
+            SessionError::Timeout => Self::TimedOut,
+            SessionError::Io(_) => Self::Disconnected,
+            // A change is only written for a model whose state reported an
+            // equalizer, so the session always has a `03 87` body to write; the
+            // write-only variants keep the mapping total.
+            SessionError::Protocol(_)
+            | SessionError::UnsupportedLayout
+            | SessionError::UnsupportedSoundMode
+            | SessionError::UnsupportedEqualizer => Self::Unreadable,
+        }
+    }
+
+    /// The `AppState.error-label` of a failed change; the vendored banner wraps
+    /// it as "Could not change “{}”.".
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TimedOut => "Equalizer profile (no answer)",
+            Self::Disconnected => "Equalizer profile (connection lost)",
+            Self::Unreadable => "Equalizer profile (unreadable answer)",
+        }
+    }
+}
+
+/// Writes `preset` and re-reads the state, returning the equalizer the device
+/// reports. `current` is the last state the worker read: the write keeps its
+/// HearID block, exactly as OpenSCL4's A3062 equalizer does.
+///
+/// Blocking: only the device worker calls this, never the UI thread.
+pub fn change_equalizer_preset<T: Transport>(
+    session: &mut DeviceSession<T>,
+    current: &EqualizerState,
+    preset: &EqualizerPreset,
+) -> Result<EqualizerState, EqFailure> {
+    session
+        .set_equalizer_preset(current, preset)
+        .map_err(EqFailure::from_session)?;
+    let state = session.poll_state().map_err(EqFailure::from_session)?;
+    state.equalizer.ok_or(EqFailure::Unreadable)
 }
 
 /// A failed connection, reduced to the cases the window has words for. It
@@ -272,8 +612,11 @@ impl ConnectFailure {
             SessionError::Timeout => Self::TimedOut,
             SessionError::Io(error) => Self::Transport(error.to_string()),
             // A connection attempt only polls `01 01`; `UnsupportedSoundMode`
-            // only comes from a mode write, so it cannot reach this mapping.
-            SessionError::Protocol(_) | SessionError::UnsupportedSoundMode => Self::Protocol,
+            // only comes from a mode write and `UnsupportedEqualizer` only from
+            // an equalizer write, so they cannot reach this mapping.
+            SessionError::Protocol(_)
+            | SessionError::UnsupportedSoundMode
+            | SessionError::UnsupportedEqualizer => Self::Protocol,
             SessionError::UnsupportedLayout => Self::UnsupportedLayout,
         }
     }
@@ -452,8 +795,10 @@ struct ConnectRequest {
 /// What the Bluetooth worker found.
 #[derive(Debug)]
 enum ConnectOutcome {
-    /// The device answered `01 01` with a state this model parses.
-    Connected(DeviceState),
+    /// The device answered `01 01` with a state this model parses. The model is
+    /// carried along so the page can show its preset catalog; the state is
+    /// boxed because it is much larger than a failure.
+    Connected(DeviceModel, Box<DeviceState>),
     /// The attempt ended in a failure the window has words for.
     Failed(ConnectFailure),
 }
@@ -464,6 +809,9 @@ enum DeviceCommand {
     /// Write a sound mode and re-read the state; `request` identifies the click
     /// so the UI can drop a result a newer click has superseded.
     SetSoundMode { request: u64, mode: SoundMode },
+    /// Write an equalizer preset and re-read the state; `request` identifies the
+    /// click the same way `SetSoundMode` does.
+    SetEqualizerPreset { request: u64, preset_id: u16 },
 }
 
 /// A worker-to-UI message; the sequence number tells the UI whether the result
@@ -484,6 +832,13 @@ enum Event {
         request: u64,
         outcome: Result<SoundMode, ModeFailure>,
     },
+    /// A device worker finished an equalizer preset change and re-read the
+    /// state.
+    PresetChanged {
+        attempt: u64,
+        request: u64,
+        outcome: Result<EqualizerState, EqFailure>,
+    },
 }
 
 /// State shared between the UI callbacks and the polling timer. Every field is
@@ -503,6 +858,8 @@ struct Inner {
     commands: RefCell<Option<Sender<DeviceCommand>>>,
     /// The newest sound-mode change; results of older changes are stale.
     mode_change: Cell<u64>,
+    /// The newest equalizer preset change; results of older changes are stale.
+    preset_change: Cell<u64>,
 }
 
 impl Inner {
@@ -532,11 +889,13 @@ impl Inner {
         }
     }
 
-    /// Connects on a worker thread and keeps that worker for sound-mode writes.
+    /// Connects on a worker thread and keeps that worker for mode and equalizer
+    /// writes.
     fn request_connect(&self, request: ConnectRequest) {
         let attempt = self.connect.get() + 1;
         self.connect.set(attempt);
         self.mode_change.set(0);
+        self.preset_change.set(0);
         let cancel = Arc::new(AtomicBool::new(false));
         *self.cancel.borrow_mut() = Some(Arc::clone(&cancel));
         let (commands, command_receiver) = mpsc::channel();
@@ -573,6 +932,7 @@ impl Inner {
     fn stop_worker(&self) {
         self.commands.borrow_mut().take();
         self.mode_change.set(0);
+        self.preset_change.set(0);
     }
 }
 
@@ -597,6 +957,7 @@ impl Controller {
             cancel: RefCell::new(None),
             commands: RefCell::new(None),
             mode_change: Cell::new(0),
+            preset_change: Cell::new(0),
         });
         initial_state(ui);
         wire_actions(ui, &inner);
@@ -618,9 +979,11 @@ fn initial_state(ui: &AppWindow) {
     // settings deep links to offer.
     state.set_linux(false);
     state.set_system_settings_available(false);
-    // Only Add Device, the device cards, the Overview battery and the Sound
-    // mode page are wired in this shell; every other page's content stays empty.
-    show_sound_mode(&state, None);
+    // Only Add Device, the device cards, the Overview battery, the Sound mode
+    // and the Equalizer page are wired in this shell; every other page's content
+    // stays empty.
+    show_sound_mode(&state, None, false);
+    show_equalizer(&state, &EqualizerDisplay::default());
     state.set_device_pages(ModelRc::default());
     state.set_overview_rows(ModelRc::default());
     state.set_panels(ModelRc::default());
@@ -730,6 +1093,15 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         }
     });
 
+    actions.on_eq_preset({
+        let inner = Rc::clone(inner);
+        move |value| {
+            if let Some(window) = inner.ui.upgrade() {
+                select_equalizer_preset(&window, &inner, value.as_str());
+            }
+        }
+    });
+
     actions.on_navigate({
         let inner = Rc::clone(inner);
         move |page| {
@@ -766,6 +1138,18 @@ fn mode_result_applies(
     attempt == current_attempt && (outcome.is_err() || request == newest_request)
 }
 
+/// Whether a finished equalizer preset change still updates the page, for the
+/// same reasons as [`mode_result_applies`].
+fn preset_result_applies(
+    outcome: &Result<EqualizerState, EqFailure>,
+    attempt: u64,
+    request: u64,
+    current_attempt: u64,
+    newest_request: u64,
+) -> bool {
+    attempt == current_attempt && (outcome.is_err() || request == newest_request)
+}
+
 /// Drains everything the workers sent since the last tick and applies it on the
 /// Slint thread. Stale results (from a superseded enumeration or a cancelled
 /// connect attempt) are dropped.
@@ -784,12 +1168,13 @@ fn drain_events(inner: &Rc<Inner>) {
                 if attempt == inner.connect.get()
                     && let Some(window) = inner.ui.upgrade()
                 {
-                    // Only a connected model with a measured sound mode keeps its
-                    // worker (and socket) for writes; everything else ends as in
-                    // the MVP.
+                    // Only a connected model with a measured mode or a
+                    // supported equalizer keeps its worker (and socket) for
+                    // writes; everything else ends as in the MVP.
                     let keeps_worker = matches!(
                         &outcome,
-                        ConnectOutcome::Connected(state) if state.sound_mode.is_some()
+                        ConnectOutcome::Connected(_, state)
+                            if state.sound_mode.is_some() || state.equalizer.is_some()
                     );
                     if !keeps_worker {
                         inner.stop_worker();
@@ -811,6 +1196,22 @@ fn drain_events(inner: &Rc<Inner>) {
                 );
                 if applies && let Some(window) = inner.ui.upgrade() {
                     apply_mode_outcome(&window, inner, outcome);
+                }
+            }
+            Ok(Event::PresetChanged {
+                attempt,
+                request,
+                outcome,
+            }) => {
+                let applies = preset_result_applies(
+                    &outcome,
+                    attempt,
+                    request,
+                    inner.connect.get(),
+                    inner.preset_change.get(),
+                );
+                if applies && let Some(window) = inner.ui.upgrade() {
+                    apply_preset_outcome(&window, inner, outcome);
                 }
             }
             // Both an empty queue and a closed channel mean nothing more will
@@ -876,10 +1277,11 @@ fn open_session(request: &ConnectRequest, cancel: &AtomicBool) -> OpenOutcome {
 }
 
 /// The connected device worker: connects, then hands the open session to
-/// [`serve_device`] for the initial state report and the sound-mode writes.
+/// [`serve_device`] for the initial state report and the mode and equalizer
+/// writes.
 ///
 /// Every change runs on this worker, so the UI thread never blocks on
-/// Bluetooth, and a re-poll after each write keeps `mode-index` in step with the
+/// Bluetooth, and a re-poll after each write keeps the page in step with the
 /// device.
 fn run_device_worker(
     request: ConnectRequest,
@@ -902,8 +1304,11 @@ fn run_device_worker(
     serve_device(session, attempt, events, commands);
 }
 
-/// Reports the initial state, then serves sound-mode changes on the same
-/// session until the UI drops the command channel or a change fails.
+/// Reports the initial state, then serves sound-mode and equalizer changes on
+/// the same session until the UI drops the command channel or a change fails.
+///
+/// The last read equalizer state is kept for the preset writes: the `03 87`
+/// body preserves its HearID block.
 ///
 /// Generic over the transport so the tests can drive it with a scripted one.
 fn serve_device<T: Transport>(
@@ -923,31 +1328,70 @@ fn serve_device<T: Transport>(
             return;
         }
     };
+    let model = session.model();
     let has_sound_mode = state.sound_mode.is_some();
+    let mut equalizer = state.equalizer;
+    let has_equalizer = equalizer.is_some();
     let _ = events.send(Event::Connected {
         attempt,
-        outcome: ConnectOutcome::Connected(state),
+        outcome: ConnectOutcome::Connected(model, Box::new(state)),
     });
-    // A model without a measured mode has nothing this worker can write; ending
-    // it closes the socket as the MVP did. A model with a mode keeps its session
-    // open for the `06 81` writes.
-    if !has_sound_mode {
+    // A model with neither a measured mode nor a supported equalizer has
+    // nothing this worker can write; ending it closes the socket as the MVP
+    // did. Any other model keeps its session open for the `06 81` and `03 87`
+    // writes.
+    if !has_sound_mode && !has_equalizer {
         return;
     }
-    while let Ok(DeviceCommand::SetSoundMode { request, mode }) = commands.recv() {
-        let outcome = change_sound_mode(&mut session, mode);
-        let failed = outcome.is_err();
-        let _ = events.send(Event::ModeChanged {
-            attempt,
-            request,
-            outcome,
-        });
-        if failed {
-            // The session is out of step after a failed write or read; the
-            // banner's Retry opens a fresh connection instead of writing on a
-            // broken one. Any click already queued behind this one is dropped
-            // with the channel, and the surfaced failure explains why.
-            return;
+    while let Ok(command) = commands.recv() {
+        match command {
+            DeviceCommand::SetSoundMode { request, mode } => {
+                let outcome = change_sound_mode(&mut session, mode);
+                let failed = outcome.is_err();
+                let _ = events.send(Event::ModeChanged {
+                    attempt,
+                    request,
+                    outcome,
+                });
+                if failed {
+                    // The session is out of step after a failed write or read;
+                    // the banner's Retry opens a fresh connection instead of
+                    // writing on a broken one. Any click already queued behind
+                    // this one is dropped with the channel, and the surfaced
+                    // failure explains why.
+                    return;
+                }
+            }
+            DeviceCommand::SetEqualizerPreset { request, preset_id } => {
+                // The UI only offers catalog ids; an id that is not one of the
+                // model's presets is treated as an unreadable answer rather than
+                // writing an invented body.
+                let preset = model
+                    .equalizer_presets()
+                    .iter()
+                    .find(|preset| preset.id == preset_id);
+                let outcome = match (preset, equalizer.as_ref()) {
+                    (Some(preset), Some(current)) => {
+                        let reported = change_equalizer_preset(&mut session, current, preset);
+                        if let Ok(reported) = &reported {
+                            equalizer = Some(*reported);
+                        }
+                        reported
+                    }
+                    _ => Err(EqFailure::Unreadable),
+                };
+                let failed = outcome.is_err();
+                let _ = events.send(Event::PresetChanged {
+                    attempt,
+                    request,
+                    outcome,
+                });
+                if failed {
+                    // Same rule as a failed mode change: stop writing on a
+                    // session that is out of step and let Retry reconnect.
+                    return;
+                }
+            }
         }
     }
 }
@@ -1123,7 +1567,8 @@ fn begin_connecting(state: &AppState<'_>, inner: &Rc<Inner>, request: ConnectReq
     state.set_failure_text("".into());
     state.set_error_label("".into());
     state.set_batteries(ModelRc::default());
-    show_sound_mode(state, None);
+    show_sound_mode(state, None, false);
+    show_equalizer(state, &EqualizerDisplay::default());
     inner.request_connect(request);
 }
 
@@ -1142,7 +1587,8 @@ fn cancel_connect(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_failure_kind(FailureKind::None);
     state.set_failure_text("".into());
     state.set_error_label("".into());
-    show_sound_mode(&state, None);
+    show_sound_mode(&state, None, false);
+    show_equalizer(&state, &EqualizerDisplay::default());
 }
 
 /// Drops the current device and returns to My Devices.
@@ -1169,7 +1615,8 @@ fn disconnect(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_failure_kind(FailureKind::None);
     state.set_failure_text("".into());
     state.set_error_label("".into());
-    show_sound_mode(&state, None);
+    show_sound_mode(&state, None, false);
+    show_equalizer(&state, &EqualizerDisplay::default());
     state.set_page(Page::Devices);
 }
 
@@ -1212,9 +1659,11 @@ fn apply_paired(window: &AppWindow, result: Result<Vec<Candidate>, BluetoothErro
 fn apply_outcome(window: &AppWindow, outcome: ConnectOutcome) {
     let state = window.global::<AppState>();
     match outcome {
-        ConnectOutcome::Connected(device_state) => {
+        ConnectOutcome::Connected(model, device_state) => {
+            let equalizer = EqualizerDisplay::new(Some(model), device_state.equalizer.as_ref());
             state.set_batteries(ModelRc::new(VecModel::from(batteries(&device_state))));
-            show_sound_mode(&state, device_state.sound_mode);
+            show_sound_mode(&state, device_state.sound_mode, equalizer.available);
+            show_equalizer(&state, &equalizer);
             state.set_connection(Connection::Connected);
             state.set_connection_reason("".into());
             state.set_failure_kind(FailureKind::None);
@@ -1231,7 +1680,8 @@ fn apply_outcome(window: &AppWindow, outcome: ConnectOutcome) {
 /// readable explanation.
 fn apply_failure(state: &AppState<'_>, failure: ConnectFailure) {
     state.set_batteries(ModelRc::default());
-    show_sound_mode(state, None);
+    show_sound_mode(state, None, false);
+    show_equalizer(state, &EqualizerDisplay::default());
     state.set_connection(failure.connection());
     state.set_connection_reason("".into());
     state.set_failure_kind(failure.kind());
@@ -1245,12 +1695,15 @@ fn apply_failure(state: &AppState<'_>, failure: ConnectFailure) {
 /// Sound mode page; a P20i gets none of them, so it never offers a mode change.
 /// The 1-to-11 scale and the per-mode strength/wind rows stay out of scope, so
 /// `mode-scale` is false and `mode-rows` stays empty.
-fn show_sound_mode(state: &AppState<'_>, sound_mode: Option<SoundMode>) {
+fn show_sound_mode(state: &AppState<'_>, sound_mode: Option<SoundMode>, has_equalizer: bool) {
     state.set_modes(ModelRc::new(VecModel::from(mode_options(sound_mode))));
     state.set_mode_index(mode_index(sound_mode));
     state.set_mode_scale(false);
     state.set_mode_rows(ModelRc::default());
-    state.set_sound_pages(ModelRc::new(VecModel::from(sound_pages(sound_mode))));
+    state.set_sound_pages(ModelRc::new(VecModel::from(sound_pages(
+        sound_mode,
+        has_equalizer,
+    ))));
     let label = |mode: SoundMode| {
         if sound_mode.is_some() {
             mode_label(mode)
@@ -1261,6 +1714,34 @@ fn show_sound_mode(state: &AppState<'_>, sound_mode: Option<SoundMode>) {
     state.set_noise_canceling_label(label(SoundMode::NoiseCanceling).into());
     state.set_transparency_label(label(SoundMode::Transparency).into());
     state.set_normal_label(label(SoundMode::Normal).into());
+}
+
+/// Fills the vendored Equalizer page from the parsed state.
+///
+/// The page is read-only: this slice selects built-in presets but never writes
+/// band values, so the custom band controls stay hidden. The saved profiles,
+/// the legacy banner and import/export stay empty — they are out of scope.
+fn show_equalizer(state: &AppState<'_>, display: &EqualizerDisplay) {
+    state.set_eq_available(display.available);
+    state.set_eq_read_only(display.available);
+    state.set_eq_presets(ModelRc::new(VecModel::from(display.presets.clone())));
+    state.set_eq_preset(display.preset.as_str().into());
+    state.set_eq_preset_count(display.preset_count);
+    state.set_eq_expanded(false);
+    state.set_eq_band_count(display.band_count);
+    state.set_eq_min(display.min);
+    state.set_eq_max(display.max);
+    state.set_eq_min_text(display.min_text.as_str().into());
+    state.set_eq_max_text(display.max_text.as_str().into());
+    state.set_eq_bands(ModelRc::new(VecModel::from(display.bands.clone())));
+    state.set_eq_lines(ModelRc::new(VecModel::from(display.lines.clone())));
+    state.set_eq_chart_line(display.chart_line.as_str().into());
+    state.set_eq_chart_area(display.chart_area.as_str().into());
+    state.set_eq_name(display.name.as_str().into());
+    state.set_has_saved_profiles(false);
+    state.set_eq_profiles(ModelRc::default());
+    state.set_eq_export_count(0);
+    state.set_eq_legacy(ModelRc::default());
 }
 
 /// Applies a finished sound-mode change: the mode the device reports becomes the
@@ -1283,6 +1764,50 @@ fn apply_mode_outcome(
             state.set_error_label(failure.label().into());
         }
     }
+}
+
+/// Applies a finished equalizer preset change: the preset and read-only curve
+/// the device reports become the page's, or the error banner names the setting
+/// that failed. The preset catalog is kept; only the state-dependent fields
+/// change.
+fn apply_preset_outcome(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    outcome: Result<EqualizerState, EqFailure>,
+) {
+    let state = window.global::<AppState>();
+    match outcome {
+        Ok(reported) => {
+            show_equalizer_state(&state, &reported);
+            state.set_error_label("".into());
+        }
+        Err(failure) => {
+            // The worker closes the session after a failed change; Retry in the
+            // banner opens a fresh connection.
+            inner.stop_worker();
+            state.set_error_label(failure.label().into());
+        }
+    }
+}
+
+/// Replaces the state-dependent Equalizer page fields with a re-read state:
+/// the current preset, its read-only bands and the curve. The catalog, range
+/// and page availability are unchanged by a preset write.
+fn show_equalizer_state(state: &AppState<'_>, equalizer: &EqualizerState) {
+    let bands = equalizer_bands(equalizer);
+    let (chart_line, chart_area) = equalizer_chart(&equalizer_values(equalizer), EQ_MIN, EQ_MAX);
+    state.set_eq_preset(equalizer.preset_id.to_string().into());
+    state.set_eq_bands(ModelRc::new(VecModel::from(bands)));
+    state.set_eq_lines(ModelRc::new(VecModel::from(equalizer_lines())));
+    state.set_eq_chart_line(chart_line.into());
+    state.set_eq_chart_area(chart_area.into());
+    state.set_eq_name(
+        equalizer
+            .preset()
+            .map(|preset| preset.name)
+            .unwrap_or_default()
+            .into(),
+    );
 }
 
 /// Answers a choice control on the UI thread. Only the Sound mode tiles are
@@ -1313,6 +1838,36 @@ fn set_option(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, index: i3
         // The worker of a previous failed change has closed the connection; the
         // banner's Retry reconnects.
         state.set_error_label(ModeFailure::Disconnected.label().into());
+    }
+}
+
+/// Answers an Equalizer preset chip. Only a preset id the page offers is
+/// accepted, so an unknown or stale value never writes; the custom band
+/// callbacks (`eq-commit`, `eq-preview`, `eq-type`, `eq-reset`) have no wired
+/// callback, so no band value can be written.
+fn select_equalizer_preset(window: &AppWindow, inner: &Rc<Inner>, value: &str) {
+    let state = window.global::<AppState>();
+    // No connection, or a model whose equalizer is deferred (the A3949), means
+    // no chips and no `03 87` frame.
+    if state.get_connection() != Connection::Connected || state.get_eq_presets().row_count() == 0 {
+        return;
+    }
+    let presets: Vec<ModeOption> = state.get_eq_presets().iter().collect();
+    let Some(preset_id) = selectable_preset_id(&presets, value) else {
+        return;
+    };
+    let request = inner.preset_change.get() + 1;
+    inner.preset_change.set(request);
+    let command = DeviceCommand::SetEqualizerPreset { request, preset_id };
+    let sent = inner
+        .commands
+        .borrow()
+        .as_ref()
+        .is_some_and(|sender| sender.send(command).is_ok());
+    if !sent {
+        // The worker of a previous failed change has closed the connection; the
+        // banner's Retry reconnects.
+        state.set_error_label(EqFailure::Disconnected.label().into());
     }
 }
 
@@ -1425,6 +1980,7 @@ mod tests {
             }),
             single_battery: None,
             sound_mode: None,
+            equalizer: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,
@@ -1445,6 +2001,7 @@ mod tests {
                 firmware: Some("04.39".into()),
             }),
             sound_mode: None,
+            equalizer: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,
@@ -1837,6 +2394,32 @@ mod tests {
         captured_frame(&json[at..])
     }
 
+    /// The masked real A3062 `01 01` frame after one equalizer preset write,
+    /// from the core fixtures.
+    fn captured_eq_frame(preset: &str) -> Vec<u8> {
+        let json = include_str!("../../core/data/a3062-eq-presets.json");
+        let anchor = format!("\"name\": \"{preset}\"");
+        let at = json.find(&anchor).expect("the fixture lists every preset");
+        captured_frame(&json[at..])
+    }
+
+    /// The parsed Bass Reducer state of the committed capture.
+    fn bass_reducer_equalizer() -> EqualizerState {
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        soundcore_models::parse_state_frame(model, &captured_eq_frame("Bass Reducer"))
+            .expect("the real capture parses")
+            .equalizer
+            .expect("the capture reports an equalizer")
+    }
+
+    /// The measured full `03 87` frame that selects Bass Reducer from the
+    /// capture's Signature state (ticket 01 recorded it from the real device).
+    fn bass_reducer_frame() -> Vec<u8> {
+        hex(
+            "08 EE 00 00 00 03 87 3F 00 03 00 00 00 50 5A 6E 78 78 78 78 78 78 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 50 5A 6E 78 78 78 78 78 78 00 00 7E",
+        )
+    }
+
     #[test]
     fn the_real_a3062_capture_exposes_the_sound_mode_page() {
         let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
@@ -1844,7 +2427,10 @@ mod tests {
             soundcore_models::parse_state_frame(model, &captured_a3062_frame()).expect("parses");
         // The committed capture was taken while the device was in normal mode.
         assert_eq!(state.sound_mode, Some(SoundMode::Normal));
-        assert_eq!(sound_pages(state.sound_mode), vec![Page::SoundModes]);
+        assert_eq!(
+            sound_pages(state.sound_mode, state.equalizer.is_some()),
+            vec![Page::SoundModes, Page::Equalizer]
+        );
         assert_eq!(mode_index(state.sound_mode), 2);
     }
 
@@ -1854,7 +2440,7 @@ mod tests {
         let state =
             soundcore_models::parse_state_frame(model, &captured_a3949_frame()).expect("parses");
         assert_eq!(state.sound_mode, None);
-        assert!(sound_pages(state.sound_mode).is_empty());
+        assert!(sound_pages(state.sound_mode, state.equalizer.is_some()).is_empty());
         assert!(mode_options(state.sound_mode).is_empty());
         assert_eq!(mode_index(state.sound_mode), -1);
     }
@@ -1914,6 +2500,308 @@ mod tests {
             let label = readable(failure.label());
             assert!(label.contains("sound mode"), "{label:?} names the setting");
         }
+    }
+
+    /// The parsed equalizer block of the committed real A3062 capture.
+    fn captured_a3062_equalizer() -> EqualizerState {
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        soundcore_models::parse_state_frame(model, &captured_a3062_frame())
+            .expect("the real capture parses")
+            .equalizer
+            .expect("the real capture reports an equalizer")
+    }
+
+    #[test]
+    fn the_a3062_equalizer_presets_are_the_twenty_two_catalog_ids_and_names() {
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        let options = preset_options(Some(model));
+        assert_eq!(options.len(), 22, "the full A3062 catalog");
+        assert_eq!(
+            options.len(),
+            soundcore_models::A3062_EQUALIZER_PRESETS.len(),
+            "the page offers every catalog entry"
+        );
+        // The chip value is the decimal preset id the state reports; the label
+        // is the display name.
+        assert_eq!(options[0].value.as_str(), "0");
+        assert_eq!(options[0].label.as_str(), "Soundcore Signature");
+        let bass_reducer = options
+            .iter()
+            .find(|option| option.label.as_str() == "Bass Reducer")
+            .expect("the catalog has Bass Reducer");
+        assert_eq!(bass_reducer.value.as_str(), "3");
+        let bass_booster = options
+            .iter()
+            .find(|option| option.label.as_str() == "Bass Booster")
+            .expect("the catalog has Bass Booster");
+        // The catalog's unusual id 0x7E7E, as a decimal string.
+        assert_eq!(bass_booster.value.as_str(), "32382");
+        // A model whose equalizer is deferred offers no chips.
+        assert!(
+            preset_options(soundcore_models::model_by_code("A3949")).is_empty(),
+            "the A3949 equalizer is deferred in this slice"
+        );
+        assert!(preset_options(None).is_empty());
+    }
+
+    #[test]
+    fn only_a_catalog_preset_id_is_selectable() {
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        let presets = preset_options(Some(model));
+        assert_eq!(selectable_preset_id(&presets, "0"), Some(0));
+        assert_eq!(selectable_preset_id(&presets, "3"), Some(3));
+        assert_eq!(selectable_preset_id(&presets, "32382"), Some(0x7E7E));
+        // Id 2 is not in the A3062 list, custom bands (0xFEFE) are not a chip,
+        // and a value that is not a number is not an id.
+        for value in ["2", "65278", "abc", "", "-1", "32383", "90000"] {
+            assert_eq!(
+                selectable_preset_id(&presets, value),
+                None,
+                "{value:?} is not a chip"
+            );
+        }
+        // The deferred A3949 offers no chips, so no value selects anything.
+        let p20i = preset_options(soundcore_models::model_by_code("A3949"));
+        assert!(p20i.is_empty());
+        assert_eq!(selectable_preset_id(&p20i, "0"), None);
+    }
+
+    #[test]
+    fn the_custom_band_actions_have_no_write_path() {
+        // `eq-commit`/`eq-preview`/`eq-type`/`eq-reset` are never wired in
+        // `wire_actions`, and the only equalizer command the controller sends
+        // names a catalog preset: no command carries band values, so the
+        // read-only page cannot write them.
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        let presets = preset_options(Some(model));
+        assert_eq!(
+            selectable_preset_id(
+                &presets,
+                &soundcore_models::CUSTOM_EQUALIZER_PRESET_ID.to_string()
+            ),
+            None,
+            "a custom preset id cannot be written through the preset chips"
+        );
+        for value in ["commit", "preview", "type", "reset", "0.0", "+3"] {
+            assert_eq!(
+                selectable_preset_id(&presets, value),
+                None,
+                "{value:?} is not a chip"
+            );
+        }
+    }
+
+    #[test]
+    fn the_real_a3062_capture_shows_its_preset_and_eight_read_only_bands() {
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        let equalizer = captured_a3062_equalizer();
+        let display = EqualizerDisplay::new(Some(model), Some(&equalizer));
+
+        assert!(display.available);
+        // The committed capture was taken on Soundcore Signature.
+        assert_eq!(display.preset, "0");
+        assert_eq!(display.name, "Soundcore Signature");
+        assert_eq!(display.preset_count, 22);
+        assert_eq!(display.min, -120);
+        assert_eq!(display.max, 134);
+        assert_eq!(display.min_text, "\u{2212}12.0");
+        assert_eq!(display.max_text, "+13.4");
+
+        // Eight visible bands: 100 Hz … 12.8 kHz, the signature curve at 0 dB.
+        assert_eq!(display.band_count, 8);
+        let frequencies: Vec<&str> = display
+            .bands
+            .iter()
+            .map(|band| band.frequency.as_str())
+            .collect();
+        let khz: Vec<bool> = display.bands.iter().map(|band| band.khz).collect();
+        let values: Vec<i32> = display.bands.iter().map(|band| band.value).collect();
+        assert_eq!(
+            frequencies,
+            ["100", "200", "400", "800", "1.6", "3.2", "6.4", "12.8"]
+        );
+        assert_eq!(khz, [false, false, false, false, true, true, true, true]);
+        assert_eq!(values, [0; 8]);
+        assert!(
+            display.bands.iter().all(|band| band.text.as_str() == "0"),
+            "0 dB fields show \"0\""
+        );
+
+        // The chart's guides are the range ends, their halves and zero.
+        let lines: Vec<i32> = display.lines.iter().map(|line| line.value).collect();
+        let labels: Vec<&str> = display
+            .lines
+            .iter()
+            .map(|line| line.label.as_str())
+            .collect();
+        assert_eq!(lines, [134, 70, 0, -60, -120]);
+        assert_eq!(
+            labels,
+            ["+13.4", "+7.0", "0.0", "\u{2212}6.0", "\u{2212}12.0"]
+        );
+        assert!(
+            display.chart_line.starts_with("M "),
+            "{}",
+            display.chart_line
+        );
+        assert!(display.chart_area.ends_with('Z'), "{}", display.chart_area);
+    }
+
+    #[test]
+    fn a_preset_with_boost_and_cut_bands_shows_their_values_and_texts() {
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        let equalizer = bass_reducer_equalizer();
+        let display = EqualizerDisplay::new(Some(model), Some(&equalizer));
+        assert_eq!(display.preset, "3");
+        assert_eq!(display.name, "Bass Reducer");
+        let values: Vec<i32> = display.bands.iter().map(|band| band.value).collect();
+        let texts: Vec<&str> = display
+            .bands
+            .iter()
+            .map(|band| band.text.as_str())
+            .collect();
+        assert_eq!(values, [-40, -30, -10, 0, 0, 0, 0, 0]);
+        assert_eq!(texts, ["-4", "-3", "-1", "0", "0", "0", "0", "0"]);
+        // The equalizer band fields never show the invisible last two bytes.
+        assert_eq!(display.bands.len(), 8);
+    }
+
+    #[test]
+    fn a_custom_preset_is_read_only_with_no_selected_chip() {
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        let mut frame = captured_a3062_frame();
+        // Report custom bands: the state's preset id becomes 0xFEFE and the
+        // frame checksum is recomputed.
+        frame[9 + 23] = 0xFE;
+        frame[9 + 24] = 0xFE;
+        let last = frame.len() - 1;
+        frame[last] = frame[..last]
+            .iter()
+            .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+        let state =
+            soundcore_models::parse_state_frame(model, &frame).expect("the custom state parses");
+        let equalizer = state.equalizer.expect("the state reports an equalizer");
+        assert!(equalizer.is_custom());
+
+        let display = EqualizerDisplay::new(Some(model), Some(&equalizer));
+        assert!(display.available);
+        assert_eq!(display.preset, "65278", "the custom id string");
+        assert_eq!(display.name, "", "custom bands have no built-in name");
+        assert_eq!(
+            display.band_count, 8,
+            "the read-only curve still follows the device"
+        );
+        // No chip is selected: the custom id is not one of the catalog values.
+        assert!(
+            !display
+                .presets
+                .iter()
+                .any(|preset| preset.value.as_str() == display.preset)
+        );
+    }
+
+    #[test]
+    fn the_equalizer_page_is_exposed_for_the_a3062_and_deferred_for_the_a3949() {
+        let a3062 = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        let a3062_state = soundcore_models::parse_state_frame(a3062, &captured_a3062_frame())
+            .expect("the A3062 capture parses");
+        assert_eq!(
+            sound_pages(a3062_state.sound_mode, a3062_state.equalizer.is_some()),
+            vec![Page::SoundModes, Page::Equalizer]
+        );
+
+        // The A3949's equalizer is deliberately deferred in this slice: the
+        // real capture's block (body 32..44) is known, but no A3949 `03 87`
+        // write body is verified, so the model has no capability, catalog or
+        // page and no chip value is selectable. This is a limitation, not a
+        // claim that the model has no equalizer.
+        let a3949 = soundcore_models::model_by_code("A3949").expect("A3949 is a state model");
+        let a3949_state = soundcore_models::parse_state_frame(a3949, &captured_a3949_frame())
+            .expect("the A3949 capture parses");
+        assert!(
+            a3949_state.equalizer.is_none(),
+            "A3949 equalizer parsing is deferred"
+        );
+        assert!(sound_pages(a3949_state.sound_mode, a3949_state.equalizer.is_some()).is_empty());
+        assert!(preset_options(Some(a3949)).is_empty());
+        assert_eq!(
+            selectable_preset_id(&preset_options(Some(a3949)), "0"),
+            None,
+            "no chip value is offered, so no preset click can name one"
+        );
+        let display = EqualizerDisplay::new(Some(a3949), a3949_state.equalizer.as_ref());
+        assert!(!display.available);
+        assert_eq!(display.preset_count, 0);
+        assert!(display.presets.is_empty());
+        assert!(display.bands.is_empty());
+        assert_eq!(display.band_count, 0);
+    }
+
+    #[test]
+    fn the_chart_follows_the_band_values_inside_its_margins() {
+        // The flat signature curve is a straight line: 0 dB sits slightly above
+        // the middle, because the range is -12.0…+13.4 dB.
+        let flat = [0i16; EQ_VISIBLE_BANDS];
+        let (line, area) = equalizer_chart(&flat, EQ_MIN, EQ_MAX);
+        assert!(line.starts_with("M 37.5 104.9"), "{line}");
+        assert!(line.ends_with("562.5 104.9"), "{line}");
+        assert!(area.starts_with("M 37.5 200.0 L 37.5 104.9"), "{area}");
+        assert!(area.ends_with("L 562.5 200.0 Z"), "{area}");
+
+        // The highest and lowest values sit at the chart's margins, not past
+        // them.
+        let (line, _) = equalizer_chart(&[EQ_MAX, EQ_MIN], EQ_MIN, EQ_MAX);
+        assert!(line.starts_with("M 150.0 12.0"), "{line}");
+        assert!(line.ends_with("450.0 188.0"), "{line}");
+        // Nothing to draw.
+        assert_eq!(
+            equalizer_chart(&[], EQ_MIN, EQ_MAX),
+            (String::new(), String::new())
+        );
+        assert_eq!(
+            equalizer_chart(&flat, 10, 10),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn a_failed_preset_change_maps_to_a_readable_label() {
+        let cases = [
+            (SessionError::Timeout, EqFailure::TimedOut),
+            (
+                SessionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "connection reset by peer",
+                )),
+                EqFailure::Disconnected,
+            ),
+            (
+                SessionError::Protocol(soundcore_session::ProtocolError::State(
+                    soundcore_models::StateError::NotAStateFrame,
+                )),
+                EqFailure::Unreadable,
+            ),
+            (SessionError::UnsupportedEqualizer, EqFailure::Unreadable),
+        ];
+        for (error, expected) in cases {
+            let failure = EqFailure::from_session(error);
+            assert_eq!(failure, expected);
+            let label = readable(failure.label());
+            assert!(label.contains("equalizer"), "{label:?} names the setting");
+        }
+    }
+
+    #[test]
+    fn a_failed_preset_change_surfaces_although_a_newer_click_was_queued() {
+        let failure = Err(EqFailure::TimedOut);
+        assert!(
+            preset_result_applies(&failure, 4, 1, 4, 2),
+            "a failure of the current attempt always surfaces"
+        );
+        let success = Ok(captured_a3062_equalizer());
+        assert!(!preset_result_applies(&success, 4, 1, 4, 2));
+        assert!(preset_result_applies(&success, 4, 2, 4, 2));
+        assert!(!preset_result_applies(&failure, 3, 1, 4, 1));
     }
 
     /// A scripted transport: writes are recorded and reads come from a queue.
@@ -2122,7 +3010,7 @@ mod tests {
             received.try_recv().expect("the state report"),
             Event::Connected {
                 attempt: 9,
-                outcome: ConnectOutcome::Connected(_)
+                outcome: ConnectOutcome::Connected(..)
             }
         ));
         assert!(matches!(
@@ -2135,6 +3023,243 @@ mod tests {
         ));
         // The worker ended instead of running the queued click, so the banner's
         // Retry is the way back to a working connection.
+        assert!(
+            received.try_recv().is_err(),
+            "the worker reports nothing else and stops"
+        );
+    }
+
+    /// The `01 01` re-poll request the worker writes after every change.
+    fn state_request() -> Vec<u8> {
+        hex("08 EE 00 00 00 01 01 0A 00 02")
+    }
+
+    #[test]
+    fn a_preset_switch_writes_the_measured_frame_and_re_reads_the_curve() {
+        let current = captured_a3062_equalizer();
+        let preset = soundcore_models::a3062_equalizer_preset(3).expect("Bass Reducer");
+        // The real device acknowledges `03 87`; the re-poll skips the ack and
+        // reads the state it now reports.
+        let transport = FakeTransport::scripted([captured_eq_frame("Bass Reducer")]);
+        let mut session = session_with("A3062", &transport);
+
+        let reported =
+            change_equalizer_preset(&mut session, &current, preset).expect("the change takes");
+
+        assert_eq!(reported.preset_id, 3);
+        assert_eq!(
+            &reported.bands[..EQ_VISIBLE_BANDS],
+            &preset.bands[..EQ_VISIBLE_BANDS]
+        );
+        assert_eq!(
+            transport.writes(),
+            vec![bass_reducer_frame(), state_request()],
+            "one measured 03 87 frame, then the 01 01 re-poll"
+        );
+        // The page follows the re-polled state.
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        let display = EqualizerDisplay::new(Some(model), Some(&reported));
+        assert_eq!(display.preset, "3");
+        assert_eq!(display.name, "Bass Reducer");
+        let values: Vec<i32> = display.bands.iter().map(|band| band.value).collect();
+        assert_eq!(values, [-40, -30, -10, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn the_page_shows_the_preset_the_device_reports_after_the_write() {
+        // The write was acknowledged but the device reports another preset: the
+        // page follows the device, not the click.
+        let current = captured_a3062_equalizer();
+        let preset = soundcore_models::a3062_equalizer_preset(3).expect("Bass Reducer");
+        let transport = FakeTransport::scripted([captured_eq_frame("Podcast")]);
+        let mut session = session_with("A3062", &transport);
+
+        let reported =
+            change_equalizer_preset(&mut session, &current, preset).expect("the change is read");
+
+        assert_eq!(reported.preset_id, 5);
+        assert_eq!(reported.preset().map(|preset| preset.name), Some("Podcast"));
+    }
+
+    #[test]
+    fn a_silent_device_after_the_preset_write_is_a_timeout() {
+        let current = captured_a3062_equalizer();
+        let preset = soundcore_models::a3062_equalizer_preset(3).expect("Bass Reducer");
+        let transport = FakeTransport::failing(std::io::ErrorKind::TimedOut);
+        let mut session = session_with("A3062", &transport);
+
+        let failure = change_equalizer_preset(&mut session, &current, preset)
+            .expect_err("the device stays silent");
+
+        assert_eq!(failure, EqFailure::TimedOut);
+        assert_eq!(failure.label(), "Equalizer profile (no answer)");
+        assert_eq!(
+            transport.writes(),
+            vec![bass_reducer_frame(), state_request()],
+            "the preset frame and the 01 01 re-poll were written"
+        );
+    }
+
+    #[test]
+    fn a_dropped_link_after_the_preset_write_is_a_lost_connection() {
+        let current = captured_a3062_equalizer();
+        let preset = soundcore_models::a3062_equalizer_preset(3).expect("Bass Reducer");
+        let transport = FakeTransport::failing(std::io::ErrorKind::ConnectionReset);
+        let mut session = session_with("A3062", &transport);
+
+        let failure =
+            change_equalizer_preset(&mut session, &current, preset).expect_err("the link dropped");
+
+        assert_eq!(failure, EqFailure::Disconnected);
+        assert_eq!(failure.label(), "Equalizer profile (connection lost)");
+    }
+
+    #[test]
+    fn the_worker_serves_equalizer_presets_alongside_sound_modes() {
+        let mut mode_answer = mode_ack();
+        mode_answer.extend_from_slice(&captured_mode_frame("Transparency"));
+        let transport = FakeTransport::scripted([
+            captured_a3062_frame(),
+            mode_answer,
+            captured_eq_frame("Bass Reducer"),
+        ]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::SetSoundMode {
+                request: 1,
+                mode: SoundMode::Transparency,
+            })
+            .expect("the mode click is queued");
+        commands
+            .send(DeviceCommand::SetEqualizerPreset {
+                request: 1,
+                preset_id: 3,
+            })
+            .expect("the preset click is queued behind it");
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                hex("08 EE 00 00 00 06 81 10 00 01 51 01 01 00 05 E6"),
+                state_request(),
+                bass_reducer_frame(),
+                state_request(),
+            ],
+            "both writes and both re-polls, in click order"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected {
+                attempt: 9,
+                outcome: ConnectOutcome::Connected(..)
+            }
+        ));
+        assert!(matches!(
+            received.try_recv().expect("the mode change"),
+            Event::ModeChanged {
+                attempt: 9,
+                request: 1,
+                outcome: Ok(SoundMode::Transparency)
+            }
+        ));
+        assert!(matches!(
+            received.try_recv().expect("the preset change"),
+            Event::PresetChanged {
+                attempt: 9,
+                request: 1,
+                outcome: Ok(reported)
+            } if reported.preset_id == 3
+        ));
+    }
+
+    #[test]
+    fn an_unknown_preset_id_writes_no_equalizer_frame() {
+        let transport = FakeTransport::scripted([captured_a3062_frame()]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        // Id 2 is not in the A3062 catalog; the UI never offers it, and the
+        // worker refuses to invent a body for it.
+        commands
+            .send(DeviceCommand::SetEqualizerPreset {
+                request: 1,
+                preset_id: 2,
+            })
+            .expect("the click is queued");
+        drop(commands);
+
+        serve_device(session, 3, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![state_request()],
+            "no 03 87 frame is written for an unknown preset"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected { .. }
+        ));
+        assert!(matches!(
+            received.try_recv().expect("the refused change"),
+            Event::PresetChanged {
+                request: 1,
+                outcome: Err(EqFailure::Unreadable),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_failed_preset_change_ends_the_worker_without_running_the_queued_click() {
+        // The initial state is a real masked A3062 capture; no read is scripted
+        // after it, so the re-poll of the first change times out.
+        let transport = FakeTransport::scripted([captured_a3062_frame()]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::SetEqualizerPreset {
+                request: 1,
+                preset_id: 1,
+            })
+            .expect("the first click is queued");
+        commands
+            .send(DeviceCommand::SetEqualizerPreset {
+                request: 2,
+                preset_id: 3,
+            })
+            .expect("the newer click is queued behind the first");
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        // Only the first change reached the device: the connect `01 01`, its
+        // `03 87`, and the `01 01` re-poll that timed out. The queued click
+        // wrote nothing.
+        let writes = transport.writes();
+        assert_eq!(writes.len(), 3, "the queued click must not be written");
+        assert_eq!(writes[0], state_request());
+        assert_eq!(&writes[1][..9], &hex("08 EE 00 00 00 03 87 3F 00")[..]);
+        assert_eq!(writes[1].len(), 63, "the measured 53-byte body");
+        assert_eq!(writes[2], state_request());
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected { .. }
+        ));
+        assert!(matches!(
+            received.try_recv().expect("the failed change"),
+            Event::PresetChanged {
+                attempt: 9,
+                request: 1,
+                outcome: Err(EqFailure::TimedOut)
+            }
+        ));
         assert!(
             received.try_recv().is_err(),
             "the worker reports nothing else and stops"
@@ -2312,6 +3437,7 @@ mod tests {
             cancel: RefCell::new(None),
             commands: RefCell::new(None),
             mode_change: Cell::new(0),
+            preset_change: Cell::new(0),
         })
     }
 
@@ -2435,7 +3561,7 @@ mod tests {
             state.get_mode_scale(),
             state.get_mode_rows().row_count()
         );
-        assert_eq!(pages, vec![Page::SoundModes]);
+        assert_eq!(pages, vec![Page::SoundModes, Page::Equalizer]);
         assert_eq!(values, ["NoiseCanceling", "Transparency", "Normal"]);
         assert_eq!(labels, ["Noise canceling", "Transparency", "Normal"]);
         assert!(!state.get_mode_scale(), "the 1-to-11 scale is out of scope");
@@ -2498,7 +3624,7 @@ mod tests {
             state.get_sound_pages().row_count(),
             state.get_error_label()
         );
-        assert_eq!(state.get_sound_pages().row_count(), 1, "the page is back");
+        assert_eq!(state.get_sound_pages().row_count(), 2, "the pages are back");
         assert_eq!(state.get_error_label().as_str(), "", "the banner is gone");
         let reported = state.get_mode_index();
         println!("  retried connection reports mode index {reported}");
@@ -2549,6 +3675,219 @@ mod tests {
         disconnect(&ui, &inner);
     }
 
+    /// Presses an Equalizer preset chip through the wired `Actions.eq-preset`
+    /// callback, as the vendored page's chip does.
+    fn click_preset(ui: &AppWindow, value: &str) {
+        ui.global::<Actions>().invoke_eq_preset(value.into());
+    }
+
+    /// Pumps the worker channel until the page shows `want` as the current
+    /// preset id. `None` when the error banner appeared first or the timeout
+    /// expired.
+    fn wait_for_preset(ui: &AppWindow, inner: &Rc<Inner>, want: &str) -> Option<String> {
+        let state = ui.global::<AppState>();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            drain_events(inner);
+            if !state.get_error_label().is_empty() {
+                println!("  error banner: {}", state.get_error_label());
+                return None;
+            }
+            if state.get_eq_preset().as_str() == want {
+                return Some(want.to_owned());
+            }
+            if std::time::Instant::now() >= deadline {
+                println!(
+                    "  timed out waiting for preset {want}; current {:?}",
+                    state.get_eq_preset()
+                );
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Manual hardware check of the Equalizer page on the real Space One Pro:
+    ///
+    /// ```text
+    /// cargo test -p soundcore-desktop manual_equalizer_preset_switch -- --ignored --nocapture
+    /// ```
+    ///
+    /// Connects the suggested A3062, asserts the vendored page state (22 preset
+    /// chips, the current preset selected, eight read-only bands with their
+    /// frequencies and values, the -12.0…+13.4 dB range, read-only), then clicks
+    /// three different presets through the `eq-preset` action and checks that
+    /// the selection and the bands follow the `01 01` re-poll after each one.
+    /// The preset found on connect is restored, a stopped worker checks the
+    /// readable error banner and its Retry, and the device is left as found.
+    /// Addresses are masked.
+    #[test]
+    #[ignore = "manual hardware check: needs a paired A3062"]
+    fn manual_equalizer_preset_switch() {
+        let ui = AppWindow::new().expect("the shell window builds");
+        let inner = test_inner(&ui);
+        wire_actions(&ui, &inner);
+        if connect_real_device(&ui, &inner, "A3062").is_none() {
+            return;
+        }
+        let state = ui.global::<AppState>();
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 has a parser");
+        let presets: Vec<ModeOption> = state.get_eq_presets().iter().collect();
+        let values: Vec<String> = presets.iter().map(|p| p.value.to_string()).collect();
+        let labels: Vec<String> = presets.iter().map(|p| p.label.to_string()).collect();
+        let bands: Vec<EqBand> = state.get_eq_bands().iter().collect();
+        let frequencies: Vec<String> = bands.iter().map(|b| b.frequency.to_string()).collect();
+        let band_values: Vec<i32> = bands.iter().map(|b| b.value).collect();
+        let pages: Vec<Page> = state.get_sound_pages().iter().collect();
+        println!("  sound-pages: {pages:?}");
+        println!(
+            "  eq-available: {} eq-read-only: {}",
+            state.get_eq_available(),
+            state.get_eq_read_only()
+        );
+        println!(
+            "  eq-presets: {} ids {values:?}",
+            state.get_eq_presets().row_count()
+        );
+        println!(
+            "  eq-preset: {:?} eq-name: {:?}",
+            state.get_eq_preset(),
+            state.get_eq_name()
+        );
+        println!(
+            "  eq-bands: {} frequencies {frequencies:?} values {band_values:?}",
+            bands.len()
+        );
+        println!(
+            "  eq-range: {}..{} text {:?}..{:?} band-count {}",
+            state.get_eq_min(),
+            state.get_eq_max(),
+            state.get_eq_min_text(),
+            state.get_eq_max_text(),
+            state.get_eq_band_count()
+        );
+        assert_eq!(pages, vec![Page::SoundModes, Page::Equalizer]);
+        assert!(state.get_eq_available(), "the page is available");
+        assert!(state.get_eq_read_only(), "the page is read-only");
+        assert_eq!(values.len(), 22, "the catalog is the 22-entry list");
+        assert_eq!(labels.len(), 22);
+        assert_eq!(bands.len(), 8, "eight visible bands");
+        assert_eq!(
+            frequencies,
+            ["100", "200", "400", "800", "1.6", "3.2", "6.4", "12.8"]
+        );
+        assert_eq!(state.get_eq_band_count(), 8);
+        assert_eq!(state.get_eq_min(), -120);
+        assert_eq!(state.get_eq_max(), 134);
+        assert_eq!(state.get_eq_min_text().as_str(), "\u{2212}12.0");
+        assert_eq!(state.get_eq_max_text().as_str(), "+13.4");
+        assert!(state.get_eq_lines().row_count() > 0, "the chart has guides");
+        assert!(
+            !state.get_eq_chart_line().is_empty(),
+            "the chart has a curve"
+        );
+        let initial = state.get_eq_preset().to_string();
+        let Some(initial_id) = initial.parse::<u16>().ok() else {
+            println!("  current preset {initial:?} is not a preset id; leaving the device as is");
+            disconnect(&ui, &inner);
+            return;
+        };
+        let Some(initial_preset) = model
+            .equalizer_presets()
+            .iter()
+            .find(|preset| preset.id == initial_id)
+        else {
+            // A custom curve has no catalog entry and cannot be restored through
+            // the read-only preset chips, so do not change it.
+            println!("  current preset id {initial_id} is custom; leaving the device as is");
+            disconnect(&ui, &inner);
+            return;
+        };
+        assert_eq!(state.get_eq_name().as_str(), initial_preset.name);
+
+        // Open the page the way the sidebar does.
+        state.set_page(Page::Equalizer);
+        assert_eq!(state.get_page(), Page::Equalizer);
+
+        // Switch between three presets, checking the selection and the curve
+        // follow the device after each write.
+        let targets: Vec<&soundcore_models::EqualizerPreset> = model
+            .equalizer_presets()
+            .iter()
+            .filter(|preset| preset.id != initial_id)
+            .take(3)
+            .collect();
+        assert_eq!(targets.len(), 3, "three presets to switch between");
+        for target in &targets {
+            click_preset(&ui, &target.id.to_string());
+            let reported = wait_for_preset(&ui, &inner, &target.id.to_string())
+                .unwrap_or_else(|| panic!("switching to {} fails", target.name));
+            let bands: Vec<EqBand> = state.get_eq_bands().iter().collect();
+            let values: Vec<i32> = bands.iter().map(|band| band.value).collect();
+            println!(
+                "  preset {} ({}) -> re-polled {:?} bands {values:?}",
+                target.id, target.name, reported
+            );
+            assert_eq!(reported, target.id.to_string());
+            assert_eq!(state.get_eq_name().as_str(), target.name);
+            assert_eq!(
+                values,
+                target.bands[..8]
+                    .iter()
+                    .map(|v| i32::from(*v))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        // Put the preset found on connect back.
+        click_preset(&ui, &initial);
+        let restored =
+            wait_for_preset(&ui, &inner, &initial).expect("the original preset is restored");
+        let bands: Vec<EqBand> = state.get_eq_bands().iter().collect();
+        let values: Vec<i32> = bands.iter().map(|band| band.value).collect();
+        println!("  restored preset {restored:?} bands {values:?}");
+        assert_eq!(state.get_eq_name().as_str(), initial_preset.name);
+        assert_eq!(
+            values,
+            initial_preset.bands[..8]
+                .iter()
+                .map(|v| i32::from(*v))
+                .collect::<Vec<_>>()
+        );
+
+        // A stopped worker shows the readable error banner instead of writing;
+        // the banner's Retry reconnects and the device kept the restored preset.
+        inner.stop_worker();
+        let other = targets[0].id.to_string();
+        click_preset(&ui, &other);
+        let error = state.get_error_label().to_string();
+        println!("  after a stopped worker: error-label {error:?}");
+        assert!(error.contains("Equalizer"), "{error:?} names the setting");
+        // Give the stopped worker time to drop its socket: a real Retry click
+        // comes much later than this line.
+        std::thread::sleep(Duration::from_millis(1000));
+        ui.global::<Actions>().invoke_retry();
+        assert!(
+            wait_for_connection(&inner, &ui, Connection::Connected, Duration::from_secs(20)),
+            "the banner's Retry reconnects"
+        );
+        println!(
+            "  retry: connected={:?} sound-pages={} eq-preset={:?} error-label={:?}",
+            state.get_connection(),
+            state.get_sound_pages().row_count(),
+            state.get_eq_preset(),
+            state.get_error_label()
+        );
+        assert_eq!(state.get_sound_pages().row_count(), 2, "the pages are back");
+        assert_eq!(state.get_error_label().as_str(), "", "the banner is gone");
+        assert_eq!(
+            state.get_eq_preset().as_str(),
+            initial,
+            "the device kept the restored preset"
+        );
+        disconnect(&ui, &inner);
+    }
+
     /// The battery tiles of an Overview, as plain values for test output.
     fn shown_batteries(state: &AppState<'_>) -> Vec<(i32, String)> {
         state
@@ -2578,7 +3917,9 @@ mod tests {
         }
     }
 
-    fn masked_mac(mac: &str) -> String {
-        format!("{} __:__", &mac[..12])
+    /// A Bluetooth address for test output. Every octet is replaced: no part of
+    /// a real address may reach a log, a terminal transcript or a ticket.
+    fn masked_mac(_mac: &str) -> String {
+        "<address masked>".to_owned()
     }
 }

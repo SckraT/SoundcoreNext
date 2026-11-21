@@ -1,5 +1,5 @@
-//! Adapter from the clean-room model catalog (`soundcore_models::catalog`) to
-//! the data the vendored Add Device dialog expects.
+//! Adapter from the model catalog (`soundcore_models::catalog`) to the data the
+//! vendored Add Device dialog expects.
 //!
 //! The dialog's chips are the five categories below, in the order the vendored
 //! UI lists them. `CatalogEntry` is the pure layer; `filter_models` only converts
