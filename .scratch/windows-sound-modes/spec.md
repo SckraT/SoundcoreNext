@@ -15,7 +15,7 @@ This is the second Windows functional slice: one real setting, end to end, with 
 ## In scope
 
 - Core sound-mode model: enum, A3062 state offset, A3062 command body for `06 81`.
-- Session write path: send the mode command, wait for ACK/state, re-read state.
+- Session write path: write one `06 81` mode frame; the controller then re-reads `01 01`, and that poll may consume the mode acknowledgement first (the session itself never reads the ACK).
 - Controller: populate `AppState.modes`, `mode-index`, mode labels, expose `Page.sound-modes`, handle `Actions.set-option("ambientSoundMode", index)`.
 - Read current mode on connect; update after writes; readable errors.
 - Real hardware acceptance on Space One Pro; P20i has no ANC modes and must show no Sound mode page.
@@ -41,9 +41,9 @@ This is the second Windows functional slice: one real setting, end to end, with 
 2. Space One Pro connects and the sidebar shows **Sound mode**; the page shows the current mode and can switch between noise canceling, transparency and normal.
 3. Each switch writes exactly one `06 81` frame and the UI reflects the new state from a subsequent `01 01`.
 4. P20i connects but has no Sound mode page and no mode commands are sent.
-5. A failed write/read shows a readable error, never a raw MAC/serial.
+5. A failed write/read shows a readable error, never a raw MAC/serial. Evidence: the failure mapping is unit-tested and the worker-failure banner was exercised; a live device-off during a mode change was not reproduced.
 6. A screenshot of the Sound mode page is stored in `desktop/` and linked from `desktop/README.md`.
-7. No case/strength/EQ behavior is invented; unsupported controls stay hidden.
+7. No case/strength/EQ behavior is invented; unsupported controls stay hidden. This branch adds no strength, wind or EQ controls or behavior; the vendored page's explanatory aside about a remembered strength is unchanged and out of scope (no `.slint` edits).
 
 ## Closure
 

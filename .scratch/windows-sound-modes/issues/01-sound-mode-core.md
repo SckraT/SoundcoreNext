@@ -93,3 +93,19 @@ was reverted and never committed; its only output was sanitized frames.
 - [x] Measured offsets and mapping recorded in the ticket.
 - [x] No identifiers committed.
 - [x] Ticket status done.
+
+## Review fixes
+
+Resolved on `ticket/sm-04-review-fixes`:
+
+- The protocol constant keeps its pre-existing name
+  `Command::ACK_AMBIENT_SOUND_MODE` (the same `06 81` command carries the mode
+  body outbound and the empty acknowledgement inbound); the rename that this
+  slice had introduced is reverted with no functional change, and its
+  references and tests were updated.
+- The session module doc now counts the four platform-neutral jobs (state
+  request, frame assembly, model parsing and the `06 81` write) instead of
+  three.
+- The spec now states the write path accurately: the session writes one frame
+  and never reads the ACK; the controller's `01 01` re-poll re-reads the state
+  and may consume that ACK first.

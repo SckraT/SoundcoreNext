@@ -1,7 +1,7 @@
 //! Platform-independent device session.
 //!
 //! The session sits between a byte transport (Bluetooth RFCOMM on Windows, or a
-//! test double) and the model-specific state parser. It owns three
+//! test double) and the model-specific state parser. It owns four
 //! platform-neutral jobs:
 //!
 //! - frame the outbound `01 01` state request;
@@ -218,7 +218,7 @@ impl<T: Transport> DeviceSession<T> {
             .ok_or(SessionError::UnsupportedSoundMode)?;
         self.transport.write_all(&encode(
             Direction::Outbound,
-            Command::AMBIENT_SOUND_MODE,
+            Command::ACK_AMBIENT_SOUND_MODE,
             &body,
         ))?;
         Ok(())

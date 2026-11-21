@@ -79,6 +79,7 @@ desktop/                  # Slint shell vendored from OpenSCL4 (GPL-3.0)
 .scratch/
   openscl4-2.0/           # spec and tickets for this 2.0 slice
   windows-mvp/            # spec and tickets for the Windows MVP
+  windows-sound-modes/    # spec and tickets for the Windows sound-modes slice
 ```
 
 The desktop crate depends on `core/crates/models` and `core/crates/session` by
