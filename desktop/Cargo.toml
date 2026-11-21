@@ -16,3 +16,8 @@ windows = { version = "0.62", features = [
 
 [build-dependencies]
 slint-build = "1.18"
+
+[dev-dependencies]
+# The controller tests rebuild fixture frames, so they use the core's checksum
+# instead of a hand-written copy of the protocol rule.
+soundcore-protocol = { path = "../core/crates/protocol" }

@@ -28,7 +28,7 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 | A3949 real state | parsed, battery 5/4, firmware 14.43, masked serial |
 | A3062 real single-battery state | parsed, one battery tile, firmware 04.39, masked serial |
 | A3062 sound modes | parsed at state body offset 69 and writable through a measured `06 81` body (0 = noise canceling, 1 = transparency, 2 = normal); sanitized fixture per mode |
-| A3062 equalizer presets | parsed at state body offset 23 (preset id + ten bands); the read-only page shows the eight visible bands (100 Hz…12.8 kHz, −12.0…+13.4 dB) and the 22 built-in presets adapted from OpenSCL4, and writes one measured `03 87` preset body; sanitized post-write fixtures |
+| A3062 equalizer | parsed at state body offset 23 (preset id + ten bands); the page shows the eight visible bands (100 Hz…12.8 kHz, −12.0…+13.4 dB), the 22 built-in presets adapted from OpenSCL4 and editable custom bands (fields, sliders, Reset), writes one measured `03 87` preset or custom (`0xFEFE`) body and re-reads `01 01`; sanitized post-write fixtures |
 | A3949 equalizer | deliberately deferred: the committed A3949 state carries an equalizer block at body 32..44, but its write body is unverified, so the page is hidden and no `03 87` is sent |
 | A3954 100-step state | synthetic test, battery 100/75 |
 | Other single-battery layouts | intentionally unimplemented (`UnsupportedLayout`) |
@@ -68,7 +68,8 @@ core/
     a3949-state.json      # real capture, serial masked, checksum recalculated
     a3062-state.json      # real capture, serial masked, checksum recalculated
     a3062-sound-modes.json # real captures, one per sound mode, serial masked
-    a3062-eq-presets.json # real captures, one per switched preset, serial masked
+    a3062-eq-presets.json  # real captures, one per switched preset, serial masked
+    a3062-eq-custom.json   # real custom-write captures (found/custom/restored), serial masked
   crates/
     protocol/             # framing, checksum, request builders
     models/               # registry, catalog taxonomy and state parsers
@@ -86,11 +87,13 @@ desktop/                  # Slint shell vendored from OpenSCL4 (GPL-3.0)
   windows-mvp/            # spec and tickets for the Windows MVP
   windows-sound-modes/    # spec and tickets for the Windows sound-modes slice
   windows-eq-presets/     # spec and tickets for the Windows equalizer-presets slice
+  windows-eq-custom/      # spec and tickets for the Windows custom-equalizer slice
 ```
 
 The desktop crate depends on `core/crates/models` and `core/crates/session` by
-path (`soundcore-models`, `soundcore-session`); the protocol and diagnostics
-crates stay core-side.
+path (`soundcore-models`, `soundcore-session`); its tests also use
+`soundcore-protocol` for the frame checksum, and the diagnostics crate stays
+core-side.
 
 ## Boundaries
 
