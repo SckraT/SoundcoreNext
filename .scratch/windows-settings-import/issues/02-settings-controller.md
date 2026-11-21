@@ -92,8 +92,11 @@ refilling `panels`/About from the device's answer; the worker never runs on the
 UI thread. A failed write stops the worker (like a failed mode or equalizer
 change) and the banner shows the setting's name and reason, e.g. "Side tone (no
 answer)", which the vendored banner wraps as “Could not change …”; Retry
-reconnects. A click superseded by a newer click is dropped, except a failure
-like the other writes.
+reconnects. The banner means the write or its confirmation poll failed, not that
+the device kept the old value: its second sentence (“The device kept its
+previous value.”) is fixed vendored wording and is not a device report, so the
+device's actual state is unknown until Retry re-polls it. A click superseded by a
+newer click is dropped, except a failure like the other writes.
 
 `Actions.set-toggle`, `set-option`, `set-number` are wired: unknown ids and
 values outside a control's choices produce no command (so no frame); the Sound
@@ -160,4 +163,3 @@ manual_settings_pages_and_writes -- --ignored --nocapture` passed:
 - the final printed settings block is field-for-field the one found on
   connect, so the device was left as found. Addresses were masked and no
   serial was printed or committed.
-

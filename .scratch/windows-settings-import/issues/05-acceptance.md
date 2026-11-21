@@ -114,8 +114,11 @@ observes the re-polled state.
 the page drew it off) and then back on. The restore write once lost the RFCOMM
 link: the page showed the readable banner **“Could not change “Dual
 connections (connection lost)”. The device kept its previous value.”**, with
-**Retry**. Retry reconnected; the device then reported the toggle **off** (the
-off write had taken, only the confirmation read had failed), and the restore
+**Retry**. The banner means the write or its confirmation poll failed — not that
+the device kept the old value: its second sentence is the vendored fixed wording
+and is not a device report, so the device's state is unknown until **Retry**
+re-polls it. Retry reconnected, the re-poll reported the toggle **off** (the off
+write had taken and only the confirmation read had failed), and the restore
 click wrote it back on and re-polled **on**. No error banner remained and later
 writes worked normally. This is the idle-link behaviour noted under Deviations.
 
@@ -344,4 +347,3 @@ integration/windows-settings-import` reported “Already up to date”, so no me
 commit was needed and the gates above were re-run on that same tree (desktop
 165 passed/10 ignored; core 119 passed; fmt, clippy and build clean). The ticket
 branch is ready for the lead to merge into the integration branch.
-

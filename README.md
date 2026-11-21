@@ -30,7 +30,7 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 | A3062 sound modes | parsed at state body offset 69 and writable through a measured `06 81` body (0 = noise canceling, 1 = transparency, 2 = normal); sanitized fixture per mode |
 | A3062 equalizer | parsed at state body offset 23 (preset id + ten bands); the page shows the eight visible bands (100 Hz…12.8 kHz, −12.0…+13.4 dB), the 22 built-in presets adapted from OpenSCL4 and editable custom bands (fields, sliders, Reset), writes one measured `03 87` preset or custom (`0xFEFE`) body and re-reads `01 01`; sanitized post-write fixtures |
 | A3062 saved equalizer profiles | named profiles of the eight visible bands, saved/applied/deleted on the Equalizer page; applied through one measured `03 87` custom body and a `01 01` re-poll; persisted in `%APPDATA%\OpenSCL4\equalizer-profiles.json` (schema v1, atomic write) and reloaded at startup; duplicate/empty names rejected in the dialog, out-of-range bands clamped by the page edits and rejected by the model/load, a failed document write reported in the page banner and rolled back; import is implemented through the same profile set (see the profile-import row), export stays inert, legacy migration and A3949 profiles are deferred |
-| A3062 remaining settings | parsed from the `01 01` state body 67..87 (button double press and ambient cycle, low-battery prompt, Dolby and LDAC, dual connections, auto power off, limit high volume enable/dB/refresh, side tone, voice prompt, charging/battery/firmware); the Controls, Comfort, Power and prompts, Sound and effects, Connections and About pages show the device's own values; each change writes exactly one measured settings frame and re-reads `01 01`, a failed write shows a readable banner with Retry; dual-connections remembered-device list deferred |
+| A3062 remaining settings | parsed from the `01 01` state body 67..87 (button double press and ambient cycle, low-battery prompt, Dolby and LDAC, dual connections, auto power off, limit high volume enable/dB/refresh, side tone, voice prompt, charging/battery/firmware); the Controls, Comfort, Power and prompts, Sound and effects, Connections and About pages show the device's own values; each change writes exactly one measured settings frame and re-reads `01 01`, a failed write shows a readable banner with Retry that means the write or its confirmation poll failed, so the device's state is unknown until Retry re-polls it; dual-connections remembered-device list deferred |
 | A3062 profile import | OpenSCL4 transfer-profile JSON (`name` + eight `volumeAdjustments` dB values) pasted from the clipboard or picked with a native JSON dialog (1 MiB cap); the vendored Import profiles dialog previews New/Replaces/wrong-band-count/out-of-range; confirming re-validates the whole file all-or-nothing, merges it into the saved profiles (same names replaced) and persists; blocked files write nothing; no legacy migration, export out of scope |
 | A3949 equalizer and settings | deliberately deferred: the committed A3949 state carries an equalizer block at body 32..44, but its write bodies are unverified, so the Equalizer, Effects and section pages are hidden and no `03 87` or settings frame is sent |
 | A3954 100-step state | synthetic test, battery 100/75 |
@@ -87,13 +87,13 @@ desktop/                  # Slint shell vendored from OpenSCL4 (GPL-3.0)
   src/transport_windows.rs # paired devices, SDP services and RFCOMM transport
   ui/                     # vendored OpenSCL4 Slint tree, not edited
 .scratch/
-  openscl4-2.0/           # spec and tickets for this 2.0 slice
-  windows-mvp/            # spec and tickets for the Windows MVP
-  windows-sound-modes/    # spec and tickets for the Windows sound-modes slice
-  windows-eq-presets/     # spec and tickets for the Windows equalizer-presets slice
-  windows-eq-custom/      # spec and tickets for the Windows custom-equalizer slice
-  windows-eq-profiles/    # spec and tickets for the Windows saved-equalizer-profiles slice
-  windows-settings-import/# spec and tickets for the Windows remaining-settings and profile-import slice
+  openscl4-2.0/            # spec and tickets for this 2.0 slice
+  windows-mvp/             # spec and tickets for the Windows MVP
+  windows-sound-modes/     # spec and tickets for the Windows sound-modes slice
+  windows-eq-presets/      # spec and tickets for the Windows equalizer-presets slice
+  windows-eq-custom/       # spec and tickets for the Windows custom-equalizer slice
+  windows-eq-profiles/     # spec and tickets for the Windows saved-equalizer-profiles slice
+  windows-settings-import/ # spec and tickets for the Windows remaining-settings and profile-import slice
 ```
 
 The desktop crate depends on `core/crates/models` and `core/crates/session` by

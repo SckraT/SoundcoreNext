@@ -329,16 +329,29 @@ fn rejects_a_short_body() {
 #[test]
 fn single_battery_layout_is_only_implemented_for_the_measured_a3062() {
     // The layout was measured on A3062 only; A3035/A3040 share the enum but
-    // their frames were not captured on this branch.
-    let a3035 = model_by_code("A3035").expect("A3035");
-    assert_eq!(a3035.layout, Layout::SingleCmm2);
-    assert!(matches!(
-        parse_state_body(a3035, &[0; 64]),
-        Err(StateError::UnsupportedLayout(Layout::SingleCmm2))
-    ));
+    // their frames were not captured on this branch. They are rejected before
+    // parsing, so they keep the earlier behaviour: no single-battery state and
+    // no charging flag.
+    let a3062_body = single_battery_body(5);
+    for code in ["A3035", "A3040"] {
+        let model = model_by_code(code).expect("the catalog lists the model");
+        assert_eq!(model.layout, Layout::SingleCmm2, "{code}");
+        assert!(
+            matches!(
+                parse_state_body(model, &a3062_body),
+                Err(StateError::UnsupportedLayout(Layout::SingleCmm2))
+            ),
+            "{code} has no measured single-battery frame"
+        );
+    }
 
     let a3062 = model_by_code("A3062").expect("A3062");
-    assert!(parse_state_body(a3062, &single_battery_body(5)).is_ok());
+    let state = parse_state_body(a3062, &a3062_body).expect("parse");
+    assert!(state.single_battery.is_some());
+    assert_eq!(
+        state.single_battery.expect("single battery").charging,
+        Some(false)
+    );
 }
 
 #[test]
@@ -371,8 +384,9 @@ fn synthetic_body(
 }
 
 /// The measured A3062 prefix, mode byte and a valid settings block: battery,
-/// reserved `0xFF`, single firmware, serial, the mode at the capability's
-/// measured offset, and the remaining settings through body 86.
+/// the charging byte (`0xFF`, not charging), single firmware, serial, the mode
+/// at the capability's measured offset, and the remaining settings through
+/// body 86.
 fn single_battery_body(battery: u8) -> Vec<u8> {
     let mode = SoundMode::NoiseCanceling;
     let model = model_by_code("A3062").expect("A3062");
