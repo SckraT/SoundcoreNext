@@ -502,6 +502,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "soundcore-profiles"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "soundcore-models",
+]
+
+[[package]]
 name = "soundcore-protocol"
 version = "0.1.0"
 dependencies = [
