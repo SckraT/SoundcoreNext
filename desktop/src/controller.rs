@@ -2007,10 +2007,15 @@ fn drain_events(inner: &Rc<Inner>) {
             }
             Ok(Event::ImportFilePicked { result }) => {
                 inner.picking_import_file.set(false);
-                if let (Some(result), Some(window)) = (result, inner.ui.upgrade()) {
+                if let Some(window) = inner.ui.upgrade() {
                     let state = window.global::<AppState>();
                     let mut import_text = inner.import_text.borrow_mut();
-                    preview_import_file(&state, &inner.profiles.borrow(), &mut import_text, result);
+                    answer_import_file_picked(
+                        &state,
+                        &inner.profiles.borrow(),
+                        &mut import_text,
+                        result,
+                    );
                 }
             }
             // Both an empty queue and a closed channel mean nothing more will
@@ -3820,20 +3825,25 @@ fn import_from_clipboard(
     }
 }
 
-/// Answers `Actions.eq-import-file` through the [`ImportIo`] seam: previews the
-/// file the user picked. A cancelled dialog changes nothing.
-#[cfg(test)]
-fn import_from_file(
+/// Picks the import file and reads it through the [`ImportIo`] seam. This is the
+/// work `Actions.eq-import-file` runs on its worker thread; `None` means the
+/// dialog was cancelled.
+fn pick_and_read_import_file(io: &dyn ImportIo) -> Option<Result<String, ImportFileError>> {
+    io.pick_file().map(|path| io.read_import_file(&path))
+}
+
+/// Answers the import-file worker's [`Event::ImportFilePicked`]: previews the
+/// picked file, or does nothing when the dialog was cancelled. The rows, the
+/// blocked flag and the file's note come from [`preview_import_file`].
+fn answer_import_file_picked(
     page: &impl ImportPage,
     saved: &ProfileSet,
     import_text: &mut Option<String>,
-    io: &dyn ImportIo,
+    result: Option<Result<String, ImportFileError>>,
 ) {
-    let Some(path) = io.pick_file() else {
-        return;
-    };
-    let result = io.read_import_file(&path);
-    preview_import_file(page, saved, import_text, result);
+    if let Some(result) = result {
+        preview_import_file(page, saved, import_text, result);
+    }
 }
 
 /// What an `Actions.eq-import` click did.
@@ -3928,7 +3938,7 @@ fn begin_import_file(inner: &Rc<Inner>) {
     let io = Arc::clone(&inner.import_io);
     let sender = inner.sender.clone();
     std::thread::spawn(move || {
-        let result = io.pick_file().map(|path| io.read_import_file(&path));
+        let result = pick_and_read_import_file(&*io);
         // A closed channel means the window is gone; nothing is left to report.
         let _ = sender.send(Event::ImportFilePicked { result });
     });
@@ -4677,6 +4687,19 @@ mod tests {
             }
             read_import_file(path)
         }
+    }
+
+    /// Runs the two shipped halves of `Actions.eq-import-file` — the worker's
+    /// pick-and-read step and the event handler's preview step — against a fake
+    /// [`ImportIo`], so the file-dialog tests drive the same code the window
+    /// runs without opening a native dialog.
+    fn import_from_file(
+        page: &impl ImportPage,
+        saved: &ProfileSet,
+        import_text: &mut Option<String>,
+        io: &dyn ImportIo,
+    ) {
+        answer_import_file_picked(page, saved, import_text, pick_and_read_import_file(io));
     }
 
     #[test]

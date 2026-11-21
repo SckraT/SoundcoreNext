@@ -82,12 +82,15 @@ settings tests assert the settings ranges only.
 ### About: charging at body 1
 
 `SingleBatteryState::charging` now parses body byte 1 (`1` charging, anything
-else not; every committed capture carries `0xFF`, i.e. not charging). That is
-how OpenSCL4's A3062 `SingleBattery` parser reads it and what this ticket's data
-section records as the About charging source; the earlier single-battery ticket
-had conservatively left it `None`. Charging changes still also arrive as a
-separate `01 04` notification, which this poll does not request. Battery and
-firmware parsing are unchanged.
+else not; every committed capture carries `0xFF`, i.e. not charging) for the
+A3062 only. That is how OpenSCL4's A3062 `SingleBattery` parser reads it and what
+this ticket's data section records as the About charging source; the earlier
+single-battery ticket had conservatively left it `None`. A3035/A3040 share the
+`SingleCmm2` layout enum but their frames were never captured, so they keep the
+earlier `None` instead of reading an unmeasured byte as a flag (and
+`parse_state_body` still rejects them as unsupported). Charging changes still
+also arrive as a separate `01 04` notification, which this poll does not
+request. Battery and firmware parsing are unchanged.
 
 ### Commands (`SettingCommand`, exact frames)
 

@@ -41,7 +41,7 @@ Complete the A3062 Windows settings surface in the vendored UI: Controls, Comfor
 
 1. Gates pass (desktop/core test, fmt, clippy, build).
 2. A3062 shows Controls, Comfort, Power, Connections, About and Sound effects pages, populated from `01 01`.
-3. Each scalar control writes exactly one frame and re-polls; UI reflects the device answer; failed writes show a readable banner.
+3. Each scalar control writes exactly one frame and re-polls; UI reflects the device answer; failed writes show a readable banner with Retry. The banner means the write or its confirmation poll failed, not that the device kept the old value: the device's state is unknown until Retry re-polls it.
 4. Controls: double-press select and cycle toggles work. Comfort: side tone, limit high volume enable/dB/refresh. Power: auto-off select, low battery prompt, voice prompt. Effects: LDAC and Dolby. Connections: dual-connections toggle + working “open Bluetooth settings” link. About: charging/battery/firmware; serial hidden or masked.
 5. Profile import: paste/file parses OpenSCL4 format; preview shows new/replace/wrong-band/out-of-range; blocked imports do not write; valid import adds/replaces and persists; no legacy banner/migration.
 6. A3949 has no equalizer/settings pages beyond the existing deferred behavior.

@@ -161,6 +161,16 @@ impl ImportPreview {
     ///
     /// [`ImportError::Blocked`] when [`Self::is_blocked`] is true; nothing is
     /// merged.
+    ///
+    /// # Panics
+    ///
+    /// Panics only when a preview is internally inconsistent: an importable item
+    /// without its rounded bands, a blocked item reaching the rebuild, a band
+    /// outside the measured range, or a saved name that changed between the
+    /// duplicate check and the merge. [`preview_import`] is the only way to build
+    /// an [`ImportPreview`], and it validates every item, so the API cannot
+    /// produce such a preview; these are invariant assertions, not an input
+    /// error the caller can trigger.
     pub fn merge_into(&self, saved: &mut ProfileSet) -> Result<(), ImportError> {
         if self.is_blocked() {
             return Err(ImportError::Blocked);

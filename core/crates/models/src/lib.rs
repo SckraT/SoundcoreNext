@@ -719,11 +719,15 @@ pub struct SingleBatteryState {
     pub scale: BatteryScale,
     /// The charging flag, when the state frame carries one.
     ///
-    /// The measured A3062 `01 01` body has it at byte 1: `1` means charging and
-    /// any other value means not charging, which is how OpenSCL4's A3062
-    /// `SingleBattery` parser reads it. Every committed capture carries `0xFF`
-    /// there, so they report not charging. Charging changes also arrive as a
-    /// separate `01 04` notification, which this state poll does not read.
+    /// Only the measured A3062 `01 01` body carries it, at byte 1: `1` means
+    /// charging and any other value means not charging, which is how OpenSCL4's
+    /// A3062 `SingleBattery` parser reads it. Every committed capture carries
+    /// `0xFF` there, so they report not charging. Charging changes also arrive
+    /// as a separate `01 04` notification, which this state poll does not read.
+    ///
+    /// The other single-battery models (A3035/A3040) share the layout enum but
+    /// their frames were never captured, so the parser leaves this `None` for
+    /// them instead of reading an unmeasured byte as a flag.
     pub charging: Option<bool>,
     /// The single firmware string, when the body holds a valid `MM.mm` pair.
     pub firmware: Option<String>,
@@ -1134,7 +1138,7 @@ fn parse_tws_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState, S
 /// | offset | field |
 /// |---:|---|
 /// | 0 | battery step, [`BatteryScale::Ten`] |
-/// | 1 | charging: `1` charging, every other value (the captures carry `0xFF`) not charging |
+/// | 1 | charging on the measured A3062: `1` charging, every other value (the captures carry `0xFF`) not charging; the A3035/A3040 bytes were not measured, so they stay `None` |
 /// | 2..7 | firmware, ASCII `MM.mm` |
 /// | 7..23 | serial, 16 ASCII characters |
 /// | 23..25 | equalizer preset id, little-endian, [`EqualizerState`] |
@@ -1181,10 +1185,13 @@ fn parse_single_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState
         single_battery: Some(SingleBatteryState {
             value,
             scale,
-            // Body 1 is the charging flag: `1` is charging, anything else (the
-            // measured captures carry `0xFF`) is not. A `01 04` notification may
-            // carry a newer value, but this poll does not read it.
-            charging: Some(body[1] == 1),
+            // Body 1 is the A3062's charging flag: `1` is charging, anything
+            // else (the measured captures carry `0xFF`) is not. Only the A3062
+            // byte was measured; the A3035/A3040 frames were never captured, so
+            // they keep the earlier `None` instead of reading an unmeasured byte
+            // as a flag. `parse_state_body` also rejects those models before
+            // they reach this parser.
+            charging: (model.code == A3062.code).then(|| body[1] == 1),
             firmware: parse_firmware(&body[2..7]),
         }),
         // The equalizer block starts at body offset 23, before the mode byte;
@@ -1369,5 +1376,52 @@ fn parse_serial(bytes: &[u8]) -> Option<String> {
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only the A3062's `01 01` body has a measured charging byte. A3035/A3040
+    /// share the `SingleCmm2` layout enum but were never captured, so the parser
+    /// must leave their `charging` as the earlier `None` instead of reading an
+    /// unmeasured byte as a flag.
+    #[test]
+    fn only_the_a3062_reads_the_single_battery_charging_byte() {
+        // The body is long enough for the A3062's equalizer and settings blocks;
+        // A3035/A3040 stop reading after the 23-byte prefix.
+        let mut body = vec![0u8; 87];
+        body[0] = 5;
+        body[1] = 1;
+        body[2..7].copy_from_slice(b"04.39");
+        body[7..23].copy_from_slice(b"0123456789ABCDEF");
+        // The measured A3062 settings block needs a valid double-press byte and
+        // dB limit even though this test only looks at the battery prefix.
+        body[67] = NO_BUTTON_ACTION;
+        body[83] = DbLimit::MIN;
+
+        for code in [A3035.code, A3040.code] {
+            let model = model_by_code(code).expect("the catalog lists the model");
+            assert_eq!(
+                parse_single_cmm2_body(model, &body)
+                    .expect("the measured prefix parses")
+                    .single_battery
+                    .expect("single battery")
+                    .charging,
+                None,
+                "{code} has no measured charging byte"
+            );
+        }
+
+        let a3062 = model_by_code(A3062.code).expect("A3062");
+        assert_eq!(
+            parse_single_cmm2_body(a3062, &body)
+                .expect("the measured frame parses")
+                .single_battery
+                .expect("single battery")
+                .charging,
+            Some(true)
+        );
     }
 }

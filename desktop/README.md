@@ -100,7 +100,9 @@ layout, components, pages, icons, fonts and art.
   and About follow the device's answer; a control dragged or selected more than
   once only keeps the newest write. A failed write shows the readable page
   banner (“Could not change …”, with **Retry** to reconnect) instead of leaving
-  a stale value.
+  a stale value. The banner means the write or its confirmation poll failed, not
+  that the device kept the old value: the vendored second sentence is fixed
+  wording, so the device's state is unknown until **Retry** re-polls it.
 - The P20i (A3949) equalizer is deliberately deferred in this slice: the
   committed A3949 state carries an equalizer block at body 32..44, but no A3949
   `03 87` write body is verified, so the page stays hidden and no equalizer

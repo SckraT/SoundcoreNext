@@ -35,11 +35,30 @@ project, under GPL-3.0-or-later:
   the eight visible band frequencies, adapted from
   `lib/src/devices/soundcore/a3062/modules/equalizer.rs` and
   `lib/i18n/en/openscq30-lib.ftl`;
+- the A3062 remaining-settings block at `01 01` state body 67..87 and the
+  settings write command bodies (`04 81` button double press, `06 82` ambient
+  sound mode cycle, `10 82` low battery prompt, `02 86` Dolby audio, `01 FF`
+  LDAC, `0B 84` dual connections, `01 86` auto power off, `20 82` limit high
+  volume, `20 81` limit high volume refresh rate, `01 84` side tone and
+  `01 AE` ambient sound mode voice prompt), adapted from
+  `lib/src/devices/soundcore/a3062/packets/inbound/state_update.rs`,
+  `lib/src/devices/soundcore/a3062/packets/outbound.rs`,
+  `lib/src/devices/soundcore/a3062/modules/flag.rs`,
+  `lib/src/devices/soundcore/common/modules/flag.rs`,
+  `lib/src/devices/soundcore/common/packet/outbound.rs` and
+  `lib/src/devices/soundcore/common/packet/outbound/set_ambient_sound_mode_cycle.rs`,
+  `.../dual_connections.rs`, `.../set_auto_power_off.rs` and
+  `.../set_limit_high_volume.rs`;
+- the OpenSCL4 transfer-profile format (`name` plus `volumeAdjustments`) and its
+  `scaled_to_device` decibel-to-band rounding rule for profile import, adapted
+  from `lib/src/api/equalizer_profiles.rs`, and the import preview statuses
+  (new, replaces, wrong band count, out of range) from
+  `lib/src/client/equalizer.rs`;
 - the A3949 equalizer block at state body 32..44, which is recorded as a
   deferred limitation (not implemented), from
   `lib/src/devices/soundcore/a3949/packets/inbound/state_update.rs` and
   `lib/src/devices/soundcore/a3949/state.rs`.
 
 The Rust implementations in `core/` are this project's own; the adapted data and
-its evidence are recorded in `.scratch/windows-eq-presets/` and in the commits
-that introduce them.
+its evidence are recorded in `.scratch/windows-eq-presets/`,
+`.scratch/windows-settings-import/` and in the commits that introduce them.
