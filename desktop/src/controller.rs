@@ -33,10 +33,12 @@ use soundcore_session::{DeviceSession, SessionError, Transport};
 use windows::core::GUID;
 
 use crate::catalog_adapter::{self, Chip};
+use crate::single_instance::ShowRequest;
 use crate::transport_windows::{
     BluetoothError, VENDOR_SERVICE_PREFIX, WindowsRfcommTransport, format_mac, installed_services,
     list_paired_devices, parse_mac, pick_service, vendor_service,
 };
+use crate::tray::{TrayActions, TrayContent, TraySettings, TrayShell};
 use crate::{
     Actions, AppState, AppWindow, Battery, Connection, DeviceCard, EqBand, EqLine, EqProfile,
     FailureKind, ImportItem, ModeOption, Page, PairedOption, PanelKind, RowKind, SettingRow,
@@ -249,6 +251,18 @@ pub fn app_data_profiles_path(app_data: &Path) -> PathBuf {
 /// roaming app-data directory the spec names.
 pub fn default_profiles_path() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|app_data| app_data_profiles_path(Path::new(&app_data)))
+}
+
+/// The app's own directory, `%APPDATA%\OpenSCL4`, which also names this app's
+/// single instance so the mutex is one per app-data folder.
+///
+/// The temporary directory stands in when Windows gives no app data, so two
+/// starts of the same build still share one instance instead of each running
+/// with no lock at all.
+pub fn default_config_dir() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .map(|app_data| Path::new(&app_data).join(APP_DATA_DIR_NAME))
+        .unwrap_or_else(|| std::env::temp_dir().join(APP_DATA_DIR_NAME))
 }
 
 /// The temporary sibling file an atomic save writes before renaming it over the
@@ -1560,6 +1574,17 @@ struct Inner {
     /// Whether the export save-dialog worker is running, so a second click does
     /// not open a second save dialog. UI thread only.
     picking_export_file: Cell<bool>,
+    /// A later start's request to show this window; `None` when this start did
+    /// not claim the app (tests) or runs it alone.
+    show_request: Option<ShowRequest>,
+    /// The notification-area icon. `None` in tests, which never create a real
+    /// icon; the desktop start fills it before the event loop runs.
+    tray: RefCell<Option<TrayShell>>,
+    /// The Settings page's tray choices, in memory only.
+    tray_settings: RefCell<TraySettings>,
+    /// What the tray currently shows, kept on the UI thread so the icon can be
+    /// created again with the last content and so the tests can read it.
+    tray_content: RefCell<TrayContent>,
 }
 
 impl Inner {
@@ -1574,6 +1599,15 @@ impl Inner {
         let rows = profile_rows(&profiles, &bands, &chosen);
         state.set_eq_profiles(ModelRc::new(VecModel::from(rows)));
         state.set_eq_export_count(export_count(&profiles, &chosen));
+    }
+
+    /// Whether the shell has hosted a notification-area icon on this platform:
+    /// `app-tray-available` on the Settings page.
+    fn tray_available(&self) -> bool {
+        self.tray
+            .borrow()
+            .as_ref()
+            .is_some_and(TrayShell::available)
     }
 
     /// Enumerates paired devices on a worker thread for a model, or for every
@@ -1680,7 +1714,11 @@ impl Controller {
     /// The saved profiles are loaded here, before the first window is filled, so
     /// the panel already has them when a device connects. A missing or malformed
     /// document loads as no profiles and is only logged to stderr.
-    pub fn new(ui: &AppWindow) -> Self {
+    ///
+    /// The notification-area icon is created here as well, before the event loop
+    /// runs: a close hides the window while the icon keeps the program alive, and
+    /// a later start asks this one to show the window through `show_request`.
+    pub fn new(ui: &AppWindow, show_request: Option<ShowRequest>) -> Self {
         let profiles_path = default_profiles_path();
         let profiles = match profiles_path.as_deref() {
             Some(path) => load_profiles(path),
@@ -1710,9 +1748,19 @@ impl Controller {
             picking_import_file: Cell::new(false),
             export_selection: RefCell::new(Vec::new()),
             picking_export_file: Cell::new(false),
+            show_request,
+            tray: RefCell::new(None),
+            tray_settings: RefCell::new(TraySettings::default()),
+            tray_content: RefCell::new(TrayContent::default()),
         });
         initial_state(ui);
-        inner.refresh_saved_profiles(&ui.global::<AppState>());
+        let shell = TrayShell::new(ui, tray_actions(&inner));
+        *inner.tray.borrow_mut() = Some(shell);
+        let state = ui.global::<AppState>();
+        let tray_settings = *inner.tray_settings.borrow();
+        show_tray_settings(&state, &tray_settings, inner.tray_available());
+        refresh_tray(&inner, &state);
+        inner.refresh_saved_profiles(&state);
         wire_actions(ui, &inner);
         let timer = Timer::default();
         let polling = Rc::clone(&inner);
@@ -1999,6 +2047,178 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
             }
         }
     });
+
+    actions.on_set_tray({
+        let inner = Rc::clone(inner);
+        move |on| {
+            if let Some(window) = inner.ui.upgrade() {
+                set_tray(&window, &inner, on);
+            }
+        }
+    });
+
+    actions.on_set_close_to_tray({
+        let inner = Rc::clone(inner);
+        move |on| {
+            if let Some(window) = inner.ui.upgrade() {
+                set_close_to_tray(&window, &inner, on);
+            }
+        }
+    });
+
+    actions.on_set_tray_item({
+        let inner = Rc::clone(inner);
+        move |index, on| {
+            if let Some(window) = inner.ui.upgrade() {
+                set_tray_item(&window, &inner, index, on);
+            }
+        }
+    });
+
+    // The Settings page's Quit button ends the app exactly as the tray's Quit.
+    actions.on_quit_app({
+        let inner = Rc::clone(inner);
+        move || crate::tray::quit(&inner.ui)
+    });
+}
+
+/// A tray menu item the controller answers: every one goes through the same
+/// path as the window's own control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayRequest {
+    /// The Connect item: reconnect the saved card, exactly as the banner's Retry.
+    Connect,
+    /// A Sound mode submenu choice, by its index in [`TrayContent::modes`].
+    ChooseMode(i32),
+    /// The LDAC item's next value.
+    SetLdac(bool),
+}
+
+/// The setting ids the tray's device choices name: the same ones the Sound mode
+/// tiles and the Effects page's LDAC row use.
+const SOUND_MODE_SETTING_ID: &str = "ambientSoundMode";
+const LDAC_SETTING_ID: &str = "ldac";
+
+/// Answers a tray menu item through the same handler the window's control uses:
+/// the saved card's reconnect, the existing sound-mode write, the existing LDAC
+/// write. Nothing is written for a state that cannot take the write, exactly as
+/// for the window's controls.
+fn answer_tray_request(window: &AppWindow, inner: &Rc<Inner>, request: TrayRequest) {
+    match request {
+        TrayRequest::Connect => retry(window, inner),
+        TrayRequest::ChooseMode(index) => set_option(window, inner, SOUND_MODE_SETTING_ID, index),
+        TrayRequest::SetLdac(on) => set_toggle(window, inner, LDAC_SETTING_ID, on),
+    }
+}
+
+/// The menu items the controller answers, as the shell's callbacks. The
+/// closures hold the controller weakly, so the icon does not keep it alive.
+fn tray_actions(inner: &Rc<Inner>) -> TrayActions {
+    TrayActions {
+        connect: Rc::new({
+            let inner = Rc::downgrade(inner);
+            move || {
+                if let Some(inner) = inner.upgrade()
+                    && let Some(window) = inner.ui.upgrade()
+                {
+                    answer_tray_request(&window, &inner, TrayRequest::Connect);
+                }
+            }
+        }),
+        choose_mode: Rc::new({
+            let inner = Rc::downgrade(inner);
+            move |index| {
+                if let Some(inner) = inner.upgrade()
+                    && let Some(window) = inner.ui.upgrade()
+                {
+                    answer_tray_request(&window, &inner, TrayRequest::ChooseMode(index));
+                }
+            }
+        }),
+        set_ldac: Rc::new({
+            let inner = Rc::downgrade(inner);
+            move |on| {
+                if let Some(inner) = inner.upgrade()
+                    && let Some(window) = inner.ui.upgrade()
+                {
+                    answer_tray_request(&window, &inner, TrayRequest::SetLdac(on));
+                }
+            }
+        }),
+    }
+}
+
+/// Fills the Settings page's tray fields from the in-memory choices and whether
+/// this platform can host the icon.
+fn show_tray_settings(state: &AppState<'_>, settings: &TraySettings, available: bool) {
+    state.set_app_tray(settings.icon);
+    state.set_app_tray_available(available);
+    state.set_app_close_to_tray(settings.close_to_tray);
+    state.set_tray_battery(settings.battery);
+    state.set_tray_modes(settings.modes);
+    state.set_tray_presets(settings.presets);
+    state.set_tray_ldac(settings.ldac);
+}
+
+/// Fills the tray from the window's state and the state the controller last
+/// read. Called on every change the menu reflects: the connect outcome and its
+/// re-polls, a sound-mode or settings write, and a tray setting toggle.
+fn refresh_tray(inner: &Rc<Inner>, state: &AppState<'_>) {
+    let settings = *inner.tray_settings.borrow();
+    let device = inner.device.borrow();
+    let content = TrayContent::from_state(state, device.as_deref(), &settings);
+    *inner.tray_content.borrow_mut() = content.clone();
+    if let Some(shell) = inner.tray.borrow().as_ref() {
+        shell.render(&content);
+    }
+}
+
+/// Refills the Settings panel's tray fields from the in-memory choices and
+/// whether the icon is hosted on this platform.
+fn show_tray_choices(window: &AppWindow, inner: &Rc<Inner>) {
+    let state = window.global::<AppState>();
+    let settings = *inner.tray_settings.borrow();
+    show_tray_settings(&state, &settings, inner.tray_available());
+}
+
+/// Answers the Settings panel's "Notification area icon" switch: shows or takes
+/// away the icon and records the choice in memory.
+fn set_tray(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
+    inner.tray_settings.borrow_mut().icon = on;
+    if let Some(shell) = inner.tray.borrow().as_ref() {
+        shell.set_icon(on);
+    }
+    show_tray_choices(window, inner);
+    refresh_tray(inner, &window.global::<AppState>());
+}
+
+/// Answers the Settings panel's "Close to notification area" switch; the
+/// window's close handler reads the same in-memory choice.
+fn set_close_to_tray(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
+    inner.tray_settings.borrow_mut().close_to_tray = on;
+    if let Some(shell) = inner.tray.borrow().as_ref() {
+        shell.set_close_to_tray(on);
+    }
+    show_tray_choices(window, inner);
+}
+
+/// Answers one of the Settings panel's tray section switches: 0 the battery
+/// line, 1 the Sound mode submenu, 2 quick presets, 3 LDAC. The quick-preset
+/// switch is kept in memory like the others; this app has no quick presets, so
+/// the menu has no such section to show either way.
+fn set_tray_item(window: &AppWindow, inner: &Rc<Inner>, index: i32, on: bool) {
+    {
+        let mut settings = inner.tray_settings.borrow_mut();
+        match index {
+            0 => settings.battery = on,
+            1 => settings.modes = on,
+            2 => settings.presets = on,
+            3 => settings.ldac = on,
+            _ => return,
+        }
+    }
+    show_tray_choices(window, inner);
+    refresh_tray(inner, &window.global::<AppState>());
 }
 
 /// Whether a finished sound-mode change still updates the page.
@@ -2046,6 +2266,16 @@ fn setting_result_applies(
 /// Slint thread. Stale results (from a superseded enumeration or a cancelled
 /// connect attempt) are dropped.
 fn drain_events(inner: &Rc<Inner>) {
+    // A second start asks this one to show its window. The request is taken
+    // here, on the Slint thread, so the single-instance watcher never touches
+    // the window itself.
+    if inner
+        .show_request
+        .as_ref()
+        .is_some_and(ShowRequest::take_requested)
+    {
+        crate::tray::open_window(&inner.ui);
+    }
     loop {
         let event = inner.receiver.borrow_mut().try_recv();
         match event {
@@ -2568,6 +2798,7 @@ fn begin_connecting(state: &AppState<'_>, inner: &Rc<Inner>, request: ConnectReq
     show_sound_mode(state, None, false, false);
     show_equalizer(state, &EqualizerDisplay::default());
     clear_section_pages(state);
+    refresh_tray(inner, state);
     inner.request_connect(request);
 }
 
@@ -2590,6 +2821,7 @@ fn cancel_connect(window: &AppWindow, inner: &Rc<Inner>) {
     show_sound_mode(&state, None, false, false);
     show_equalizer(&state, &EqualizerDisplay::default());
     clear_section_pages(&state);
+    refresh_tray(inner, &state);
 }
 
 /// Drops the current device and returns to My Devices.
@@ -2621,6 +2853,7 @@ fn disconnect(window: &AppWindow, inner: &Rc<Inner>) {
     show_equalizer(&state, &EqualizerDisplay::default());
     clear_section_pages(&state);
     state.set_page(Page::Devices);
+    refresh_tray(inner, &state);
 }
 
 /// Sets the saved cards to `card` as their only current one.
@@ -2687,6 +2920,7 @@ fn apply_outcome(window: &AppWindow, inner: &Rc<Inner>, outcome: ConnectOutcome)
         }
         ConnectOutcome::Failed(failure) => apply_failure(inner, &state, failure),
     }
+    refresh_tray(inner, &state);
 }
 
 /// Shows a failed connection: no battery tiles, the mapped state, and the
@@ -2702,6 +2936,7 @@ fn apply_failure(inner: &Rc<Inner>, state: &AppState<'_>, failure: ConnectFailur
     state.set_failure_kind(failure.kind());
     state.set_failure_text(failure.text().into());
     state.set_error_label("".into());
+    refresh_tray(inner, state);
 }
 
 /// Fills the vendored Sound mode page from a parsed state.
@@ -3172,6 +3407,7 @@ fn apply_mode_outcome(
             state.set_error_label(failure.label().into());
         }
     }
+    refresh_tray(inner, &state);
 }
 
 /// Applies a finished settings change: the re-polled state replaces the
@@ -3197,6 +3433,7 @@ fn apply_setting_outcome(
             state.set_error_label(failure.label(setting).into());
         }
     }
+    refresh_tray(inner, &state);
 }
 
 /// Applies a finished equalizer preset change: the preset and curve the device
@@ -3248,7 +3485,7 @@ fn show_equalizer_state(state: &AppState<'_>, equalizer: &EqualizerState) {
 /// and an id or index this slice does not write is ignored, so no other frame
 /// can be written.
 fn set_option(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, index: i32) {
-    if setting_id == "ambientSoundMode" {
+    if setting_id == SOUND_MODE_SETTING_ID {
         set_ambient_sound_mode(window, inner, index);
         return;
     }
@@ -4380,6 +4617,7 @@ fn reset_models(state: &AppState<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_ui_window;
     use soundcore_models::{
         BatteryScale, BatteryState, FirmwareVersions, HostDevice, Layout, SoundMode,
     };
@@ -8729,6 +8967,10 @@ mod tests {
             picking_import_file: Cell::new(false),
             export_selection: RefCell::new(Vec::new()),
             picking_export_file: Cell::new(false),
+            show_request: None,
+            tray: RefCell::new(None),
+            tray_settings: RefCell::new(TraySettings::default()),
+            tray_content: RefCell::new(TrayContent::default()),
         })
     }
 
@@ -9910,7 +10152,7 @@ mod tests {
         // before the first device connects: the fresh shell already lists it.
         let restarted = AppWindow::new().expect("a second shell window builds");
         {
-            let _controller = Controller::new(&restarted);
+            let _controller = Controller::new(&restarted, None);
             let reloaded: Vec<EqProfile> = restarted
                 .global::<AppState>()
                 .get_eq_profiles()
@@ -10697,5 +10939,298 @@ mod tests {
     /// a real address may reach a log, a terminal transcript or a ticket.
     fn masked_mac(_mac: &str) -> String {
         "<address masked>".to_owned()
+    }
+
+    /// Puts a saved "Space One Pro" card into the window state.
+    fn show_saved_card(state: &AppState<'_>) {
+        state.set_device_name("Space One Pro".into());
+        state.set_devices(ModelRc::new(VecModel::from(vec![card(
+            "AA",
+            "Space One Pro",
+            true,
+        )])));
+    }
+
+    /// Applies a real A3062 state through the same path a finished connect
+    /// attempt uses, and returns it for assertions.
+    fn show_connected_tray(ui: &AppWindow, inner: &Rc<Inner>) -> DeviceState {
+        let state = ui.global::<AppState>();
+        show_saved_card(&state);
+        let device = a3062_state();
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        apply_outcome(
+            ui,
+            inner,
+            ConnectOutcome::Connected(model, Box::new(device.clone())),
+        );
+        device
+    }
+
+    #[test]
+    fn the_tray_starts_with_no_device() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            refresh_tray(&inner, &ui.global::<AppState>());
+            let content = inner.tray_content.borrow().clone();
+            assert!(!content.has_device);
+            assert!(!content.connected);
+            assert!(!content.connecting);
+            assert_eq!(content.battery, "");
+            assert!(content.modes.is_empty());
+            assert_eq!(content.mode_index, -1);
+            assert!(!content.has_ldac);
+            assert!(!content.ldac);
+            assert_eq!(crate::tray::tooltip(&content), "OpenSCL4");
+            assert_eq!(
+                crate::tray::menu_lines(&content),
+                ["No devices", "Open OpenSCL4", "Quit"]
+            );
+        });
+    }
+
+    #[test]
+    fn the_tray_shows_the_connected_device_state() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let device = show_connected_tray(ui, &inner);
+            let content = inner.tray_content.borrow().clone();
+            assert!(content.has_device);
+            assert_eq!(content.device_name, "Space One Pro");
+            assert!(content.connected);
+            assert!(!content.connecting);
+            assert_eq!(
+                content.battery,
+                crate::tray::battery_line(&batteries(&device))
+            );
+            assert!(!content.battery.is_empty(), "the A3062 reports a battery");
+            assert_eq!(
+                content.modes.len(),
+                3,
+                "the A3062 has the three measured modes"
+            );
+            assert_eq!(content.mode_index, mode_index(device.sound_mode));
+            let settings = device.settings.expect("the A3062 reports settings");
+            assert!(content.has_ldac);
+            assert_eq!(content.ldac, settings.ldac);
+            assert!(!content.show_presets, "this app has no quick presets");
+            assert_eq!(
+                crate::tray::tooltip(&content),
+                format!("OpenSCL4 · Space One Pro\n{}", content.battery)
+            );
+            let menu = crate::tray::menu_lines(&content);
+            assert!(menu.contains(&"Sound mode".to_string()));
+            assert!(menu.contains(&"LDAC".to_string()) || menu.contains(&"✓ LDAC".to_string()));
+            assert!(!menu.contains(&"Connect".to_string()), "already connected");
+        });
+    }
+
+    #[test]
+    fn the_tray_asks_for_a_reconnect_after_a_failure() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            show_saved_card(&state);
+            apply_failure(&inner, &state, ConnectFailure::TimedOut);
+            let content = inner.tray_content.borrow().clone();
+            assert!(content.has_device);
+            assert!(!content.connected);
+            assert!(!content.connecting);
+            assert_eq!(content.battery, "");
+            assert!(content.modes.is_empty());
+            assert_eq!(content.mode_index, -1);
+            assert!(!content.ldac);
+            assert!(
+                crate::tray::menu_lines(&content).contains(&"Connect".to_string()),
+                "the disconnected device offers Connect"
+            );
+
+            // A connection attempt in flight does not offer it again.
+            state.set_connection(Connection::Connecting);
+            refresh_tray(&inner, &state);
+            let content = inner.tray_content.borrow().clone();
+            assert!(content.connecting);
+            assert!(!crate::tray::menu_lines(&content).contains(&"Connect".to_string()));
+        });
+    }
+
+    #[test]
+    fn a_mode_change_updates_the_trays_current_mode() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            show_connected_tray(ui, &inner);
+            apply_mode_outcome(ui, &inner, Ok(SoundMode::Transparency));
+            let content = inner.tray_content.borrow().clone();
+            assert_eq!(
+                content.mode_index,
+                mode_index(Some(SoundMode::Transparency))
+            );
+            assert!(
+                crate::tray::menu_lines(&content).contains(&"✓ Transparency".to_string()),
+                "the re-polled mode is checked in the menu"
+            );
+        });
+    }
+
+    #[test]
+    fn the_ldac_repoll_updates_the_tray() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            show_connected_tray(ui, &inner);
+            let mut device = a3062_state();
+            device
+                .settings
+                .as_mut()
+                .expect("the A3062 reports settings")
+                .ldac = true;
+            apply_setting_outcome(ui, &inner, SettingCommand::Ldac(true), Ok(Box::new(device)));
+            let content = inner.tray_content.borrow().clone();
+            assert!(content.has_ldac);
+            assert!(
+                content.ldac,
+                "the re-polled LDAC value is what the menu checks"
+            );
+            assert!(crate::tray::menu_lines(&content).contains(&"✓ LDAC".to_string()));
+        });
+    }
+
+    #[test]
+    fn the_settings_panel_tray_choices_are_kept_in_memory() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            show_tray_settings(&state, &TraySettings::default(), inner.tray_available());
+            assert!(state.get_app_tray());
+            assert!(!state.get_app_tray_available(), "no icon exists in tests");
+            assert!(state.get_app_close_to_tray());
+            assert!(state.get_tray_battery());
+            assert!(state.get_tray_modes());
+            assert!(!state.get_tray_presets());
+            assert!(state.get_tray_ldac());
+
+            set_tray(ui, &inner, false);
+            assert!(!state.get_app_tray());
+            assert!(!inner.tray_settings.borrow().icon);
+            set_tray(ui, &inner, true);
+            assert!(state.get_app_tray());
+
+            set_close_to_tray(ui, &inner, false);
+            assert!(!state.get_app_close_to_tray());
+            assert!(!inner.tray_settings.borrow().close_to_tray);
+
+            set_tray_item(ui, &inner, 0, false);
+            assert!(!state.get_tray_battery());
+            set_tray_item(ui, &inner, 1, false);
+            assert!(!state.get_tray_modes());
+            set_tray_item(ui, &inner, 3, false);
+            assert!(!state.get_tray_ldac());
+            set_tray_item(ui, &inner, 2, true);
+            assert!(state.get_tray_presets());
+            set_tray_item(ui, &inner, 9, false);
+            assert!(
+                state.get_tray_presets(),
+                "an unknown switch changes nothing"
+            );
+        });
+    }
+
+    #[test]
+    fn a_tray_section_switch_changes_the_menu() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            show_connected_tray(ui, &inner);
+            set_tray_item(ui, &inner, 0, false);
+            set_tray_item(ui, &inner, 1, false);
+            set_tray_item(ui, &inner, 3, false);
+            let content = inner.tray_content.borrow().clone();
+            assert!(!content.show_battery);
+            assert!(!content.show_modes);
+            assert!(!content.show_ldac);
+            assert_eq!(
+                crate::tray::menu_lines(&content),
+                ["Space One Pro · Connected", "Open OpenSCL4", "Quit"],
+                "the switched-off sections leave the menu"
+            );
+        });
+    }
+
+    #[test]
+    fn a_tray_mode_choice_writes_the_sound_mode() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            let (commands, queued) = mpsc::channel();
+            *inner.commands.borrow_mut() = Some(commands);
+            state.set_connection(Connection::Connected);
+            state.set_modes(ModelRc::new(VecModel::from(mode_options(Some(
+                SoundMode::Normal,
+            )))));
+            answer_tray_request(ui, &inner, TrayRequest::ChooseMode(1));
+            let command = queued
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the tray choice queued a write");
+            assert!(
+                matches!(
+                    command,
+                    DeviceCommand::ChangeSoundMode {
+                        mode: SoundMode::Transparency,
+                        ..
+                    }
+                ),
+                "the submenu index is the same mode tile index the page writes: {command:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn the_tray_ldac_item_writes_the_setting() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            let (commands, queued) = mpsc::channel();
+            *inner.commands.borrow_mut() = Some(commands);
+            state.set_connection(Connection::Connected);
+            *inner.device.borrow_mut() = Some(Box::new(a3062_state()));
+            answer_tray_request(ui, &inner, TrayRequest::SetLdac(true));
+            let command = queued
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the LDAC item queued a write");
+            assert!(
+                matches!(
+                    command,
+                    DeviceCommand::SetSetting {
+                        setting: SettingCommand::Ldac(true),
+                        ..
+                    }
+                ),
+                "the item goes through the Effects page's LDAC write: {command:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn the_tray_connect_item_reconnects_the_saved_card() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            // An address that is not a Bluetooth address: Retry picks the saved
+            // card and reports the failure without opening a device worker.
+            state.set_devices(ModelRc::new(VecModel::from(vec![card(
+                "not-an-address",
+                "Space One Pro",
+                true,
+            )])));
+            answer_tray_request(ui, &inner, TrayRequest::Connect);
+            assert_eq!(state.get_connection(), Connection::Failed);
+            assert!(
+                state
+                    .get_failure_text()
+                    .contains("saved device's Bluetooth address cannot be read"),
+                "{:?} names the saved card",
+                state.get_failure_text()
+            );
+            let content = inner.tray_content.borrow().clone();
+            assert!(content.has_device);
+            assert!(!content.connected);
+        });
     }
 }
