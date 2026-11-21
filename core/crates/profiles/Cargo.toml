@@ -1,0 +1,11 @@
+[package]
+name = "soundcore-profiles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Saved equalizer profiles: validation and JSON schema v1"
+
+[dependencies]
+soundcore-models = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
