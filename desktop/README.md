@@ -85,9 +85,24 @@ layout, components, pages, icons, fonts and art.
   writes the document and closes the dialog with the **Imported** note and toast;
   blocked files write nothing and leave the dialog open. A parse failure shows
   “This is not an equalizer profiles file” and an empty clipboard “The clipboard
-  is empty”. Export and legacy migration stay out of scope: **Save to file**,
-  **Copy** and the export checkboxes stay inert, and the legacy migration banner
+  is empty”. Legacy migration stays out of scope: the legacy migration banner
   stays hidden because `eq-legacy` is always empty. HearID is out of scope too.
+- **Profile export** is implemented in the same panel. The Export block lists
+  the saved profiles with a checkbox each plus **Select all**, and the number of
+  chosen profiles (the same count that checks **Select all**) enables **Save to
+  file** and **Copy**; the profile row menu's **Save to file** item chooses that
+  profile alone. **Save to file** opens the native Windows save dialog with the
+  default name `openscl4-equalizer-profiles.json` and writes the chosen profiles
+  as OpenSCL4 transfer JSON — one compact array of `name` plus the eight
+  `volumeAdjustments` dB values with one decimal, e.g.
+  `[{"name":"Warm","volumeAdjustments":[3.0,-3.0,6.0,0.0,-6.0,2.0,0.0,-2.0]}]`.
+  A written file shows the **Saved to the file** note and toast; cancelling the
+  dialog changes nothing (no note, no toast, no file) and a failed write shows
+  “Could not save the file”. **Copy** puts exactly the same JSON on the Windows
+  clipboard and shows the **Copied** toast. The exported file or pasted text
+  re-imports through the import path above, so it previews as **New** (or
+  **Replaces** for names already saved) with the same bands. The deferred A3949
+  has no saved-profile panel and therefore no export either.
 - The **Controls**, **Comfort**, **Power and prompts**, **Sound and effects**,
   **Connections** and **About the device** pages are implemented for the
   A3062: they are filled from the settings block of the `01 01` state (body
@@ -107,8 +122,8 @@ layout, components, pages, icons, fonts and art.
   committed A3949 state carries an equalizer block at body 32..44, but no A3949
   `03 87` write body is verified, so the page stays hidden and no equalizer
   frame is sent for that model — the P20i therefore also has no saved-profile
-  panel, no profile writes, and no section pages or settings writes: it keeps
-  only Overview and My devices as before.
+  panel, no profile writes and no import or export controls, and no section
+  pages or settings writes: it keeps only Overview and My devices as before.
 - Connecting shows “Connecting…”, and Bluetooth off, not found, timeout and
   unsupported-layout failures each show a readable message instead of a crash.
   Cancel and Retry are wired. The vendored UI has no disconnect control; the
@@ -122,10 +137,10 @@ layout, components, pages, icons, fonts and art.
   never changes it.
 - ANC strength, wind noise, adaptive ANC and the 1-to-11 strength scale are not
   part of this slice, so the Sound mode page shows only the three mode tiles.
-  Export, legacy migration and HearID are out of scope as well: their vendored
-  controls keep their empty or inert state, as described above. The
-  dual-connections remembered-device list (connect, disconnect, forget) is a
-  follow-up too, so Connections shows the toggle and the Windows links only.
+  Legacy migration and HearID are out of scope: their vendored controls keep
+  their empty or hidden state, as described above. The dual-connections
+  remembered-device list (connect, disconnect, forget) is a follow-up too, so
+  Connections shows the toggle and the Windows links only.
 - The shell keeps the RFCOMM link open between writes rather than polling, so a
   link that Windows or the device drops while the window sits idle is noticed on
   the next write: the page shows the readable “connection lost” banner (after
@@ -167,8 +182,9 @@ value or letting go of a drag writes one `03 87` custom frame (`0xFEFE`), then
 re-reads the `01 01` state; Reset writes a flat custom curve. That capture was
 taken before the saved-profile panel was wired; the current page also shows the
 My profiles panel, its Save profile button and the Import and export panel (see
-the next two captures). Export, legacy migration and HearID stay out of scope.
-No Bluetooth address or serial number appears on this page or in the capture.
+the saved-profiles, import and export captures). Legacy migration and HearID stay
+out of scope. No Bluetooth address or serial number appears on this page or in
+the capture.
 
 ![Saved equalizer profiles with a connected Space One Pro](equalizer-profiles.png)
 
@@ -183,8 +199,8 @@ apply it as one `03 87` custom frame and a `01 01` re-poll, the app was closed
 and restarted, and the profile came back from the file. Deleting it afterwards
 through the row menu and the confirmation dialog removed the row and left `[]`
 in the document. The vendored **Import and export** panel at the bottom is
-visible but was not wired when this capture was taken; import is implemented now
-(see the import capture) and export stays inert. No Bluetooth address or serial
+visible; import and export are implemented now (see the import and export
+captures). No Bluetooth address or serial
 number appears on this page or in the capture.
 
 ![Remaining settings on a connected Space One Pro](settings-a3062.png)
@@ -214,8 +230,21 @@ and a `01 01` re-poll (the chart and the **Applied** tag follow the device). A
 file the device cannot take — a 7-band profile or a value outside the measured
 range — previews in red with **Import** unavailable, and confirming writes
 nothing. The legacy migration banner stays hidden (the legacy list is always
-empty); export is out of scope and its controls stay inert. No Bluetooth address
-or serial number appears in the capture.
+empty). No Bluetooth address or serial number appears in the capture.
+
+![Exporting equalizer profiles](export-profiles.png)
+
+The Equalizer page from the running app on Windows with two saved profiles,
+**Exp one** and **Exp two**, chosen for export in the vendored **Import and
+export** panel: **Select all** and both row checkboxes are checked and **Save to
+file** and **Copy** are enabled (`eq-export-count` is 2). The green **Saved to
+the file** note is the panel's answer to a real native save-dialog export of
+both profiles (150 bytes of OpenSCL4 transfer JSON); **Copy** put exactly the
+same JSON on the Windows clipboard. The exported file then re-imported through
+the shipped import path — **Replaces the saved profile** while the two profiles
+were still saved, **New** after they were deleted — and the profiles applied to
+the device as one custom `03 87` frame and a `01 01` re-poll. No Bluetooth
+address or serial number appears in the capture.
 
 ![Add device](add-device.png)
 

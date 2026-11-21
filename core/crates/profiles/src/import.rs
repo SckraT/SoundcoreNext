@@ -70,9 +70,9 @@
 
 use std::collections::HashSet;
 
-use serde::Deserialize;
 use soundcore_models::{EQ_BAND_MAX, EQ_BAND_MIN, VISIBLE_EQ_BANDS};
 
+use crate::transfer::RawTransferProfile;
 use crate::{EqualizerProfile, ProfileError, ProfileSet, normalize_name};
 
 /// What importing one transfer profile would do.
@@ -250,18 +250,6 @@ pub fn preview_import(text: &str, saved: &ProfileSet) -> Result<ImportPreview, I
         });
     }
     Ok(ImportPreview { items })
-}
-
-/// The wire shape of one OpenSCL4 transfer profile.
-///
-/// Deserialization goes through this type so a malformed document is a single
-/// typed [`ImportError::NotProfiles`]; unknown fields are ignored by serde's
-/// default behavior.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawTransferProfile {
-    name: String,
-    volume_adjustments: Vec<f64>,
 }
 
 /// Converts the file's dB values to rounded dB×10 bands, or `None` when a band
