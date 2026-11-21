@@ -52,9 +52,10 @@ screenshot shows only the device's user-facing name.
   firmware **04.39**, battery **40 %**, not charging (re-read from the `01 01`
   state on this run); the connection found preset `0` **Soundcore Signature**
   with flat bands `[0, 0, 0, 0, 0, 0, 0, 0]`.
-- **Other paired devices:** soundcore P20i (A3949) was off/unreachable — its
-  RFCOMM open ended in the readable “did not answer in time” failure. No pairing
-  change was made.
+- **Other paired devices:** soundcore P20i (A3949) was off/unreachable during
+  the main run — its first RFCOMM open ended in the readable “did not answer in
+  time” failure. It came on later in the acceptance, and the A3949 deferral
+  check below then ran live on it. No pairing change was made.
 - **Build:** `cd desktop; cargo build` → `Finished dev profile` (~2m15s; only
   the pre-existing vendored-Slint layout warnings), then
   `desktop/target/debug/soundcore-desktop.exe` was started for the in-app run.
@@ -181,19 +182,45 @@ The export texts were fed back through the shipped import paths.
 
 ### A3949 (P20i) deferred
 
-- Live check: **Add Device** → `A3949` → the **P20i / P25i / R50i** card → the
-  paired row **soundcore P20i**. The P20i was off/unreachable, so the attempt
-  ended in the readable **“Could not connect / The device did not answer in
-  time. Try again.”** state; the only visible tabs were **My devices** and
-  **Settings** — no Equalizer page, no **Import and export** panel and no export
-  checkboxes or buttons. Pairing was not changed.
+- First live attempt (during the main run): **Add Device** → `A3949` → the
+  **P20i / P25i / R50i** card → the paired row **soundcore P20i**. The P20i was
+  off/unreachable then, so that attempt ended in the readable **“Could not
+  connect / The device did not answer in time. Try again.”** state with only
+  **My devices** and **Settings** visible.
+- Live check with the device on (later in the acceptance): the same flow
+  connected over RFCOMM. The window showed **Overview**, **My devices** and
+  **Settings** only — the Overview tile read **SOUNDCORE · A3949**,
+  `soundcore P20i`, **Connected**, **Left: 100 %** and **Right: 100 %** — and
+  there was no Equalizer page, no **Import and export** panel, no profile panel
+  and no export checkbox or button anywhere in the accessibility tree (a search
+  of all elements found none of “Export”, “Import”, “Select all”, “Save to
+  file”, “Copy” or “Equalizer”). Pairing was not changed and the P20i was left
+  untouched; no A3949 write path was taken.
 - Automated: `only_the_editable_a3062_page_offers_saved_profiles` asserts that the
   deferred A3949 page is read-only, has no saved-profile panel, and every export
-  action is refused; the exported panel's `band_edit_allowed` gate and the
-  model's missing equalizer data mean the A3949 has no export path. The
-  `manual_p20i_has_no_sound_mode` hardware check (which also invokes every
-  export action on a real A3949) could not be run this time because the device
-  did not answer.
+  action is refused; the panel's `band_edit_allowed` gate and the model's
+  missing equalizer data mean the A3949 has no export path.
+- The ignored `manual_p20i_has_no_sound_mode` hardware check ran on the reachable
+  P20i and passed: it connects the real A3949, asserts no sound pages and no mode
+  write path, invokes every export action (choose, one, copy, file) and asserts
+  that no save dialog opens, the export count stays 0 and no note or toast is
+  shown:
+
+  ```text
+  == A3949 P20i / P25i / R50i ==
+    candidate soundcore Liberty 4 Pro suggested=false (<address masked>)
+    candidate soundcore P20i suggested=true (<address masked>)
+    candidate soundcore Space One Pro suggested=false (<address masked>)
+    connected via <address masked>
+    sound-pages: 0 modes: 0 mode-index: -1
+    ambientSoundMode click ignored: no page, no 06 81 path
+    export actions ignored: no panel, no save dialog
+  test result: ok. 1 passed; 0 failed; ...
+  ```
+
+  (`cargo test -p soundcore-desktop manual_p20i_has_no_sound_mode -- --ignored
+  --nocapture`; the user's profile document was not touched, and the P20i was
+  disconnected afterwards.)
 
 ### Screenshot and docs
 
@@ -233,7 +260,10 @@ cargo build                                 # ok
 
 The 11 ignored desktop tests are the manual hardware checks (including
 `manual_export_profiles` and `manual_p20i_has_no_sound_mode`); they are not part
-of the automated suite. The new export unit tests (`choosing_profiles_fills_the_export_flags_and_count`,
+of the automated suite. `manual_p20i_has_no_sound_mode` was additionally run on
+the reachable P20i and passed (see the A3949 section); `manual_export_profiles`
+was run in ticket 02. The new export unit tests
+(`choosing_profiles_fills_the_export_flags_and_count`,
 `the_row_menu_chooses_only_that_profile_for_export`,
 `exporting_to_a_file_writes_exactly_the_chosen_profiles`,
 `a_cancelled_save_dialog_changes_nothing`,
