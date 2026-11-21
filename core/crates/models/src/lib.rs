@@ -100,6 +100,19 @@ pub const EQUALIZER_COMMAND_BODY_LEN: usize = 53;
 /// measured bands minus the two the Soundcore app never exposes.
 pub const VISIBLE_EQ_BANDS: usize = 8;
 
+/// The A3062 band conversion offset: a `01 01` band byte is `value + 120`.
+const BAND_BYTE_OFFSET: i16 = 120;
+
+/// The measured A3062 band-value range in raw dB×10: `-12.0..=+13.4 dB`, the
+/// full `0..=254` band-byte range shifted by the measured 120 offset.
+///
+/// The `03 87` body builder clamps to this range, and the desktop Equalizer page
+/// shows and clamps to these same two values, so the page cannot offer a value
+/// the device encodes differently.
+pub const EQ_BAND_MIN: i16 = -BAND_BYTE_OFFSET;
+/// See [`EQ_BAND_MIN`].
+pub const EQ_BAND_MAX: i16 = 254 - BAND_BYTE_OFFSET;
+
 /// The two A3062 bands the Soundcore app fixes and never shows, in the same raw
 /// dB×10 units as every other band: `0` (0 dB) and `-120` (-12.0 dB).
 ///
@@ -131,7 +144,9 @@ pub struct EqualizerPreset {
 /// OpenSCL4 lists twenty-two presets for A3062: the ids `0`, `1` and `3..=21`,
 /// plus Bass Booster under the unusual id `0x7E7E`. Id `2` is not in the A3062
 /// list. Custom bands are reported as [`CUSTOM_EQUALIZER_PRESET_ID`] and are
-/// deliberately not a preset here: this app can only select built-ins.
+/// deliberately not a preset here: they are not a chip, because the Equalizer
+/// page edits and writes them as a custom curve
+/// ([`DeviceModel::custom_equalizer_body`]).
 ///
 /// The names are OpenSCL4's English localized names, which are what its UI
 /// shows; its internal settings names have no spaces (for example
@@ -319,8 +334,6 @@ pub struct EqualizerCapability {
     pub band_count: usize,
 }
 
-/// The A3062 band conversion offset: a state byte is `value + 120`.
-const BAND_BYTE_OFFSET: i16 = 120;
 /// Bytes of the A3062 HearID block inside the state, from the end of the two
 /// unknown bytes after the bands to the end of the favorite music genre.
 const HEAR_ID_BLOCK_LEN: usize = 28;
@@ -530,9 +543,9 @@ impl DeviceModel {
     }
 }
 
-/// The `01 01` byte of a raw band value in dB×10.
+/// The `01 01` byte of a raw band value in dB×10, clamped to the measured range.
 fn band_byte(value: i16) -> u8 {
-    let clamped = value.clamp(-BAND_BYTE_OFFSET, 254 - BAND_BYTE_OFFSET);
+    let clamped = value.clamp(EQ_BAND_MIN, EQ_BAND_MAX);
     u8::try_from(clamped + BAND_BYTE_OFFSET).expect("a clamped band value fits the state byte")
 }
 

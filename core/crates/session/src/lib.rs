@@ -30,8 +30,8 @@
 use std::io;
 
 use soundcore_models::{
-    DeviceModel, DeviceState, EqualizerPreset, EqualizerState, SoundMode, StateError,
-    VISIBLE_EQ_BANDS, parse_state_frame,
+    DeviceModel, DeviceState, EQUALIZER_COMMAND_BODY_LEN, EqualizerPreset, EqualizerState,
+    SoundMode, StateError, VISIBLE_EQ_BANDS, parse_state_frame,
 };
 use soundcore_protocol::{
     Command, Direction, INBOUND_PREFIX, MIN_FRAME_LEN, ParseError, encode, parse, request,
@@ -261,13 +261,8 @@ impl<T: Transport> DeviceSession<T> {
         current: &EqualizerState,
         preset: &EqualizerPreset,
     ) -> Result<(), SessionError> {
-        let body = self
-            .model
-            .equalizer_preset_body(current, preset)
-            .ok_or(SessionError::UnsupportedEqualizer)?;
-        self.transport
-            .write_all(&encode(Direction::Outbound, Command::EQUALIZER, &body))?;
-        Ok(())
+        let body = self.model.equalizer_preset_body(current, preset);
+        self.write_equalizer_body(body)
     }
 
     /// Write this model's `03 87` custom equalizer frame exactly once and
@@ -294,10 +289,18 @@ impl<T: Transport> DeviceSession<T> {
         current: &EqualizerState,
         visible_bands: [i16; VISIBLE_EQ_BANDS],
     ) -> Result<(), SessionError> {
-        let body = self
-            .model
-            .custom_equalizer_body(current, visible_bands)
-            .ok_or(SessionError::UnsupportedEqualizer)?;
+        let body = self.model.custom_equalizer_body(current, visible_bands);
+        self.write_equalizer_body(body)
+    }
+
+    /// Encodes and writes one measured 53-byte `03 87` body, the single
+    /// body-to-frame step every equalizer write shares; `None` means this
+    /// model has no equalizer support in this slice, so nothing is written.
+    fn write_equalizer_body(
+        &mut self,
+        body: Option<[u8; EQUALIZER_COMMAND_BODY_LEN]>,
+    ) -> Result<(), SessionError> {
+        let body = body.ok_or(SessionError::UnsupportedEqualizer)?;
         self.transport
             .write_all(&encode(Direction::Outbound, Command::EQUALIZER, &body))?;
         Ok(())
