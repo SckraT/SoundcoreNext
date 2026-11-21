@@ -195,10 +195,11 @@ impl ModeFailure {
             SessionError::Io(_) => Self::Disconnected,
             // A change is only written for a model whose state reported a sound
             // mode, so the session always has a `06 81` body to write; the
-            // write-only variant keeps the mapping total.
+            // write-only variants keep the mapping total.
             SessionError::Protocol(_)
             | SessionError::UnsupportedLayout
-            | SessionError::UnsupportedSoundMode => Self::Unreadable,
+            | SessionError::UnsupportedSoundMode
+            | SessionError::UnsupportedEqualizer => Self::Unreadable,
         }
     }
 
@@ -272,8 +273,11 @@ impl ConnectFailure {
             SessionError::Timeout => Self::TimedOut,
             SessionError::Io(error) => Self::Transport(error.to_string()),
             // A connection attempt only polls `01 01`; `UnsupportedSoundMode`
-            // only comes from a mode write, so it cannot reach this mapping.
-            SessionError::Protocol(_) | SessionError::UnsupportedSoundMode => Self::Protocol,
+            // only comes from a mode write and `UnsupportedEqualizer` only from
+            // an equalizer write, so they cannot reach this mapping.
+            SessionError::Protocol(_)
+            | SessionError::UnsupportedSoundMode
+            | SessionError::UnsupportedEqualizer => Self::Protocol,
             SessionError::UnsupportedLayout => Self::UnsupportedLayout,
         }
     }
@@ -1425,6 +1429,7 @@ mod tests {
             }),
             single_battery: None,
             sound_mode: None,
+            equalizer: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,
@@ -1445,6 +1450,7 @@ mod tests {
                 firmware: Some("04.39".into()),
             }),
             sound_mode: None,
+            equalizer: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,

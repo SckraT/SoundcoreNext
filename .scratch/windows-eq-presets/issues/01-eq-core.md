@@ -1,7 +1,7 @@
 # 01 — Equalizer presets core
 
 **Type:** task
-**Status:** ready-for-agent
+**Status:** done
 **Blocked by:** —
 
 ## Goal
@@ -36,9 +36,104 @@ OpenSCL4 A3062 equalizer module is permitted:
 5. Tests: real A3062 state parses preset/bands; each preset command hex; A3949 no EQ; session writes one frame; sanitized fixtures no serial/MAC.
 6. No UI code.
 
+## Measured offsets and command shape (2026-11-21)
+
+Measured on the real Space One Pro (**A3062**, firmware **04.39**) over the
+Windows RFCOMM transport with a temporary ignored test in the desktop crate. The
+test was reverted and never committed; its only output was sanitized frames.
+No MAC address or serial number is recorded here.
+
+- `01 01` response: **105 bytes** = 9 header + **95 body** + 1 checksum, as in
+  the sound-mode ticket.
+- **Equalizer block: body offset 23**, immediately after
+  battery(2: level + charging/reserved)+firmware(5)+serial(16):
+
+  | body offset | field | live evidence |
+  |---:|---|---|
+  | 23..25 | preset id, u16 LE | `00 00` = Soundcore Signature |
+  | 25..35 | 10 band bytes, value = byte - 120 (dB×10) | `78 78 78 78 78 78 78 78 78 00` = `[0,0,0,0,0,0,0,0,0,-120]` |
+  | 35..37 | unknown | live `1E 00`; the write sends `00 00` and all three preset writes were accepted |
+  | 37..65 | HearID block (enabled, 10 volume bytes, time, type, 10 custom bytes, 2 music-genre bytes) | kept verbatim by the write; `00 FF… 00… 00 FF… 00 00` on the found state |
+
+  The mode byte at body offset 69 and the prefix are unchanged by this slice.
+- Starting state: preset id 0, signature bands. The initial and final captures
+  below are byte-identical after serial masking.
+- The write was accepted for three presets: **Soundcore Signature (0)**,
+  **Bass Reducer (3)** and **Podcast (5)**. After each write the next `01 01`
+  reported exactly that preset id and the catalog's band values, at body
+  offsets 23..25 and 25..35.
+- Each write is acknowledged with the empty inbound frame
+  `09 FF 00 00 01 03 87 0A 00 9D`; the session write does not read it, and the
+  next `01 01` poll skips it (unit-tested with a scripted ack).
+- The original preset was restored by running the same body builder with the
+  original id and bands; the final `01 01` equalizer block equalled the first
+  one, so the device was left as found.
+
+### Command bytes
+
+The body is `preset(2) genre(2) bands(10) 00 00 enabled(0) hear-id-volume(10)
+time(4) type(1) custom(10) active-bands(10) 00` = 53 bytes. The three writes
+captured on the device:
+
+| preset | body hex | full `03 87` frame |
+|---|---|---|
+| Soundcore Signature (0) | `00 00 00 00 78 78 78 78 78 78 78 78 78 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 78 78 78 78 78 78 78 78 78 00 00` | `08 EE 00 00 00 03 87 3F 00` + body + `1B` |
+| Bass Reducer (3) | `03 00 00 00 50 5A 6E 78 78 78 78 78 78 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 50 5A 6E 78 78 78 78 78 78 00 00` | `08 EE 00 00 00 03 87 3F 00` + body + `7E` |
+| Podcast (5) | `05 00 00 00 5A 8C A0 A0 96 8C 78 64 78 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 5A 8C A0 A0 96 8C 78 64 78 00 00` | `08 EE 00 00 00 03 87 3F 00` + body + `E8` |
+
+The HearID `type` byte is copied from the state: the found state reported type
+`0` (Initial), so the measured bodies carry `00`; OpenSCL4's A3062 test uses `2`
+for FavoriteMusicGenre. The HearID enabled byte is always `0` in a preset write,
+and the HearID sibling fields are copied from the state, as OpenSCL4's A3062
+equalizer does. The two band regions are the selected preset's curve (current
+and active).
+
+### Preset table source
+
+The catalog is OpenSCL4's
+`lib/src/devices/soundcore/a3062/modules/equalizer.rs` list, names taken from
+OpenSCL4's English display strings in `lib/i18n/en/openscq30-lib.ftl`. It
+contains **22 built-in presets, not 13**: ids `0`, `1`, `3..=21` and `0x7E7E`
+(Bass Booster; id `2` is absent for this model). The ticket's "(13 presets)"
+matches only ids `0..=13`, so all 22 OpenSCL4 entries are implemented. Every
+preset has 10 raw band values; the last two bands are invisible on this model
+and fixed at `0` and `-120`, as in OpenSCL4.
+
+Custom bands are reported as preset id **0xFEFE**; the parser exposes
+`EqualizerState::is_custom()` and no catalog entry exists for 0xFEFE, so the UI
+can show no selected preset while the read-only curve still follows the device.
+Selecting a custom preset was not exercised on hardware (the device was found
+on a built-in preset); parsing the id is covered by unit tests.
+
+## Verification
+
+- New `core/crates/models/tests/equalizer.rs`:
+  - the three real sanitized frames parse preset id and bands at body offsets
+    23..25 and 25..35; the parser's declared offsets match the fixture, and the
+    serial is absent;
+  - the restored real frame parses back to the original preset;
+  - the catalog is the 22-entry OpenSCL4 list (ids, signature bands, spot-checks
+    for Bass Reducer/Podcast/Bass Booster, invisible last bands, A3949 empty);
+  - the exact 53-byte bodies and full `03 87` frames above match the captures;
+  - the state's HearID fields are copied and its enabled flag is cleared;
+  - custom `0xFEFE` parses as custom and is not a built-in preset;
+  - A3949 has no equalizer state, catalog or body;
+  - a body truncated at the HearID block, and band bytes at both ends of the
+    range, are tested.
+- New session tests: exactly one measured `03 87` frame is written and no read
+  is attempted; A3949 writes nothing and reports
+  `SessionError::UnsupportedEqualizer`; the `01 01` re-poll skips the empty
+  `03 87` ack and a battery notification; a failed write is an I/O error.
+- Hardware evidence came from `manual_equalizer_preset_switch` and
+  `manual_equalizer_ack_shape` in the desktop crate; both were removed after the
+  run (the state and ack captures are in `core/data/a3062-eq-presets.json`).
+- Sanitized fixture: `core/data/a3062-eq-presets.json` (three post-write
+  `01 01` frames plus the restored frame; serial bytes zero, checksums
+  recalculated, no address).
+
 ## Acceptance
 
-- [ ] core tests/fmt/clippy pass.
-- [ ] Real A3062 state parse and one preset write verified in an ignored hardware test (device left as found).
-- [ ] Ticket records offsets, preset table source, command bytes.
-- [ ] No identifiers committed.
+- [x] core tests/fmt/clippy pass.
+- [x] Real A3062 state parse and preset writes verified in an ignored hardware test (device left as found).
+- [x] Ticket records offsets, preset table source, command bytes.
+- [x] No identifiers committed.

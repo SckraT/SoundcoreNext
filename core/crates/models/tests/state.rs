@@ -228,14 +228,16 @@ fn rejects_an_unknown_sound_mode_byte() {
 }
 
 #[test]
-fn a_truncated_a3062_body_is_short_of_the_mode_byte() {
+fn a_truncated_a3062_body_is_short_of_the_equalizer_block() {
     let model = model_by_code("A3062").expect("A3062");
     let body = single_battery_body(5);
+    // The equalizer block starts at body offset 23 and runs to the end of the
+    // HearID block at offset 65, before the sound-mode byte at 69.
     assert!(matches!(
         parse_state_body(model, &body[..23]),
         Err(StateError::ShortBody {
             actual: 23,
-            minimum: 70
+            minimum: 65
         })
     ));
 }
