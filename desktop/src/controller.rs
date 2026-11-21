@@ -987,7 +987,8 @@ impl ModeFailure {
             | SessionError::UnsupportedLayout
             | SessionError::UnsupportedSoundMode
             | SessionError::UnsupportedEqualizer
-            | SessionError::UnsupportedSetting => Self::Unreadable,
+            | SessionError::UnsupportedSetting
+            | SessionError::UnsupportedDualConnections => Self::Unreadable,
         }
     }
 
@@ -1040,7 +1041,8 @@ impl EqFailure {
             | SessionError::UnsupportedLayout
             | SessionError::UnsupportedSoundMode
             | SessionError::UnsupportedEqualizer
-            | SessionError::UnsupportedSetting => Self::Unreadable,
+            | SessionError::UnsupportedSetting
+            | SessionError::UnsupportedDualConnections => Self::Unreadable,
         }
     }
 
@@ -1137,7 +1139,8 @@ impl SettingFailure {
             | SessionError::UnsupportedLayout
             | SessionError::UnsupportedSoundMode
             | SessionError::UnsupportedEqualizer
-            | SessionError::UnsupportedSetting => Self::Unreadable,
+            | SessionError::UnsupportedSetting
+            | SessionError::UnsupportedDualConnections => Self::Unreadable,
         }
     }
 
@@ -1236,12 +1239,14 @@ impl ConnectFailure {
             SessionError::Io(error) => Self::Transport(error.to_string()),
             // A connection attempt only polls `01 01`; `UnsupportedSoundMode`
             // only comes from a mode write, `UnsupportedEqualizer` only from an
-            // equalizer write and `UnsupportedSetting` only from a setting
-            // write, so they cannot reach this mapping.
+            // equalizer write, `UnsupportedSetting` only from a setting write
+            // and `UnsupportedDualConnections` only from a dual-connections list
+            // read or write, so none can reach this mapping.
             SessionError::Protocol(_)
             | SessionError::UnsupportedSoundMode
             | SessionError::UnsupportedEqualizer
-            | SessionError::UnsupportedSetting => Self::Protocol,
+            | SessionError::UnsupportedSetting
+            | SessionError::UnsupportedDualConnections => Self::Protocol,
             SessionError::UnsupportedLayout => Self::UnsupportedLayout,
         }
     }

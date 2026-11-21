@@ -30,10 +30,14 @@
 //! transport, which closes the connection.
 
 use std::io;
+use std::time::{Duration, Instant};
 
 use soundcore_models::{
-    DeviceModel, DeviceState, EQUALIZER_COMMAND_BODY_LEN, EqualizerPreset, EqualizerState,
-    SettingCommand, SoundMode, StateError, VISIBLE_EQ_BANDS, parse_state_frame,
+    DUAL_CONNECTIONS_LIST, DeviceModel, DeviceState, DualConnectionDevice, DualConnectionsError,
+    DualConnectionsList, EQUALIZER_COMMAND_BODY_LEN, EqualizerPreset, EqualizerState,
+    SettingCommand, SoundMode, StateError, VISIBLE_EQ_BANDS, dual_connections_connect_frame,
+    dual_connections_disconnect_frame, dual_connections_forget_frame, dual_connections_request,
+    parse_dual_connections_body, parse_state_frame,
 };
 use soundcore_protocol::{
     Command, Direction, INBOUND_PREFIX, MIN_FRAME_LEN, ParseError, encode, parse, request,
@@ -44,6 +48,15 @@ const READ_CHUNK: usize = 1024;
 
 /// Prefix (5) + command (2) + total length (2).
 const HEADER_LEN: usize = INBOUND_PREFIX.len() + 4;
+
+/// The maximum number of frames a dual-connections list reply may span.
+pub const DUAL_CONNECTIONS_MAX_FRAMES: usize = 20;
+
+/// How long the next dual-connections frame may take before the read fails.
+pub const DUAL_CONNECTIONS_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long the whole dual-connections list reply may take.
+pub const DUAL_CONNECTIONS_TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Blocking byte transport.
 ///
@@ -78,6 +91,9 @@ pub enum ProtocolError {
     Frame(ParseError),
     /// The frame is valid but the model parser rejected its body.
     State(StateError),
+    /// The frame is a valid `0B 01` frame but its dual-connections body is
+    /// malformed (frame count, device length or a cut-off device record).
+    DualConnections(DualConnectionsError),
 }
 
 impl std::fmt::Display for ProtocolError {
@@ -85,6 +101,9 @@ impl std::fmt::Display for ProtocolError {
         match self {
             Self::Frame(error) => write!(formatter, "invalid frame: {error}"),
             Self::State(error) => write!(formatter, "invalid state: {error}"),
+            Self::DualConnections(error) => {
+                write!(formatter, "invalid dual-connections response: {error}")
+            }
         }
     }
 }
@@ -94,6 +113,7 @@ impl std::error::Error for ProtocolError {
         match self {
             Self::Frame(error) => Some(error),
             Self::State(error) => Some(error),
+            Self::DualConnections(error) => Some(error),
         }
     }
 }
@@ -118,6 +138,9 @@ pub enum SessionError {
     /// The model has no measured settings block, so there is no settings frame
     /// to write (for example the A3949).
     UnsupportedSetting,
+    /// The model's dual-connections list and writes were not measured in this
+    /// slice, so nothing is read or written (for example the A3949).
+    UnsupportedDualConnections,
 }
 
 impl std::fmt::Display for SessionError {
@@ -144,6 +167,12 @@ impl std::fmt::Display for SessionError {
             Self::UnsupportedSetting => {
                 write!(formatter, "settings are not supported for this model")
             }
+            Self::UnsupportedDualConnections => {
+                write!(
+                    formatter,
+                    "dual connections are not supported for this model"
+                )
+            }
         }
     }
 }
@@ -157,7 +186,8 @@ impl std::error::Error for SessionError {
             | Self::UnsupportedLayout
             | Self::UnsupportedSoundMode
             | Self::UnsupportedEqualizer
-            | Self::UnsupportedSetting => None,
+            | Self::UnsupportedSetting
+            | Self::UnsupportedDualConnections => None,
         }
     }
 }
@@ -272,6 +302,111 @@ impl<T: Transport> DeviceSession<T> {
             .model
             .setting_frame(setting)
             .ok_or(SessionError::UnsupportedSetting)?;
+        self.transport.write_all(&frame)?;
+        Ok(())
+    }
+
+    /// Ask for the device's dual-connections list by writing the empty `0B 01`
+    /// frame, then collect the reply frames until the last one arrives.
+    ///
+    /// Blocking. The budgets follow OpenSCL4's packet controller: at most
+    /// [`DUAL_CONNECTIONS_MAX_FRAMES`] reply frames, a
+    /// [`DUAL_CONNECTIONS_FRAME_TIMEOUT`] wait for the next frame and
+    /// [`DUAL_CONNECTIONS_TOTAL_TIMEOUT`] for the whole exchange. Running out of
+    /// any budget, including the transport's read deadline when the device says
+    /// nothing, is [`SessionError::Timeout`]; partial data is discarded.
+    ///
+    /// Frames of other commands that arrive before or between the reply frames
+    /// are consumed and skipped. A reply frame the parser rejects fails with a
+    /// [`SessionError::Protocol`] error instead of returning a partial list.
+    ///
+    /// Fails with [`SessionError::UnsupportedDualConnections`] and writes
+    /// nothing when the model has no measured dual-connections support (for
+    /// example the A3949).
+    pub fn read_dual_connections_devices(
+        &mut self,
+    ) -> Result<Vec<DualConnectionDevice>, SessionError> {
+        if !self.model.dual_connections {
+            return Err(SessionError::UnsupportedDualConnections);
+        }
+        self.transport.write_all(&dual_connections_request())?;
+        let exchange_started = Instant::now();
+        let mut frame_started = exchange_started;
+        let mut list = DualConnectionsList::new();
+        let mut frames = 0usize;
+        loop {
+            if frames >= DUAL_CONNECTIONS_MAX_FRAMES
+                || exchange_started.elapsed() >= DUAL_CONNECTIONS_TOTAL_TIMEOUT
+                || frame_started.elapsed() >= DUAL_CONNECTIONS_FRAME_TIMEOUT
+            {
+                // A command that returns nothing still has to terminate the
+                // exchange: silence and a reply that never reaches its last
+                // frame are timeouts, never an empty success.
+                return Err(SessionError::Timeout);
+            }
+            let Some(raw) = self.next_frame() else {
+                self.fill()?;
+                continue;
+            };
+            let frame =
+                parse(&raw).map_err(|error| SessionError::Protocol(ProtocolError::Frame(error)))?;
+            if frame.command != DUAL_CONNECTIONS_LIST {
+                continue;
+            }
+            let frame = parse_dual_connections_body(&frame.body)
+                .map_err(|error| SessionError::Protocol(ProtocolError::DualConnections(error)))?;
+            frames += 1;
+            frame_started = Instant::now();
+            if list.push_frame(frame) {
+                return Ok(list.into_devices());
+            }
+        }
+    }
+
+    /// Write the exact `0B 82` connect frame for a device's six address bytes
+    /// and return once every byte of it is written.
+    ///
+    /// Fire-and-forget, exactly like OpenSCL4: the device does not acknowledge
+    /// connect (or disconnect), so this never reads. Re-read
+    /// [`Self::read_dual_connections_devices`] afterwards to see the outcome.
+    ///
+    /// Fails with [`SessionError::UnsupportedDualConnections`] and writes
+    /// nothing when the model has no measured dual-connections support.
+    pub fn connect_dual_connection(&mut self, mac: [u8; 6]) -> Result<(), SessionError> {
+        self.write_dual_connection_frame(dual_connections_connect_frame(mac))
+    }
+
+    /// Write the exact `0B 81` disconnect frame for a device's six address bytes
+    /// and return once every byte of it is written.
+    ///
+    /// Fire-and-forget like [`Self::connect_dual_connection`]: it never reads.
+    ///
+    /// Fails with [`SessionError::UnsupportedDualConnections`] and writes
+    /// nothing when the model has no measured dual-connections support.
+    pub fn disconnect_dual_connection(&mut self, mac: [u8; 6]) -> Result<(), SessionError> {
+        self.write_dual_connection_frame(dual_connections_disconnect_frame(mac))
+    }
+
+    /// Write the exact `0B 83` forget frame for a device's six address bytes and
+    /// return once every byte of it is written.
+    ///
+    /// The device acknowledges forget with an empty same-command frame, but this
+    /// method does not read it: the caller re-reads the list, which is also what
+    /// the controller does after every dual-connections write. Forgetting does
+    /// not disconnect the device; disconnect first when it is connected.
+    ///
+    /// Fails with [`SessionError::UnsupportedDualConnections`] and writes
+    /// nothing when the model has no measured dual-connections support.
+    pub fn forget_dual_connection(&mut self, mac: [u8; 6]) -> Result<(), SessionError> {
+        self.write_dual_connection_frame(dual_connections_forget_frame(mac))
+    }
+
+    /// Writes one dual-connections frame, after checking the model supports the
+    /// feature; the one gate every dual-connections write shares.
+    fn write_dual_connection_frame(&mut self, frame: Vec<u8>) -> Result<(), SessionError> {
+        if !self.model.dual_connections {
+            return Err(SessionError::UnsupportedDualConnections);
+        }
         self.transport.write_all(&frame)?;
         Ok(())
     }
