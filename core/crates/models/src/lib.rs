@@ -32,6 +32,59 @@ impl BatteryScale {
     }
 }
 
+/// The ambient-sound mode of a model with a measured `06 81` control.
+///
+/// The variants are the three modes the vendored Sound mode page offers. ANC
+/// strength, wind noise and adaptive ANC are separate controls and are not
+/// modelled here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoundMode {
+    NoiseCanceling,
+    Transparency,
+    Normal,
+}
+
+impl SoundMode {
+    /// Every measured mode, in the order the Sound mode page shows them.
+    pub const ALL: [Self; 3] = [Self::NoiseCanceling, Self::Transparency, Self::Normal];
+
+    /// The mode's `06 81` command value, which is also its `01 01` state byte.
+    ///
+    /// Measured on A3062 (2026-11-21): `0` noise canceling, `1` transparency,
+    /// `2` normal.
+    pub const fn value(self) -> u8 {
+        match self {
+            Self::NoiseCanceling => 0,
+            Self::Transparency => 1,
+            Self::Normal => 2,
+        }
+    }
+
+    /// The mode a `06 81` or `01 01` value names, or `None` for a value that is
+    /// not one of the measured modes.
+    pub const fn from_value(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::NoiseCanceling),
+            1 => Some(Self::Transparency),
+            2 => Some(Self::Normal),
+            _ => None,
+        }
+    }
+}
+
+/// A measured sound-mode control.
+///
+/// The mode value is the first byte of the `06 81` command body and the only
+/// part of it that changes; the rest of the body was measured on A3062 and is
+/// recorded here so the command builder has no per-model code branches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SoundModeCapability {
+    /// Body offset of the mode byte in the `01 01` state response.
+    pub state_offset: usize,
+    /// The five fixed bytes of the `06 81` body that follow the mode byte.
+    pub command_tail: [u8; 5],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostDevice {
     Left,
@@ -89,6 +142,9 @@ pub struct DeviceState {
     pub battery: Option<BatteryState>,
     /// The single battery of the single-battery layout; `None` for TWS layouts.
     pub single_battery: Option<SingleBatteryState>,
+    /// The measured environmental sound mode; `None` for models without a
+    /// measured sound-mode control (for example the P20i).
+    pub sound_mode: Option<SoundMode>,
     /// The two TWS firmware versions. Single-battery layouts report their one
     /// firmware string in [`SingleBatteryState::firmware`] instead.
     pub firmware: FirmwareVersions,
@@ -110,11 +166,22 @@ pub struct DeviceModel {
     pub name: &'static str,
     pub battery_scale: BatteryScale,
     pub layout: Layout,
+    /// The measured sound-mode control, or `None` when the model's sound modes
+    /// were not measured (or it has none, like the P20i).
+    pub sound_mode: Option<SoundModeCapability>,
 }
 
 impl DeviceModel {
     pub const fn is_tws(self) -> bool {
         matches!(self.layout, Layout::TwsCmm2)
+    }
+
+    /// The exact six-byte `06 81` body for a sound mode, or `None` when this
+    /// model has no measured sound-mode control.
+    pub fn sound_mode_body(self, mode: SoundMode) -> Option<[u8; 6]> {
+        let capability = self.sound_mode?;
+        let [a, b, c, d, e] = capability.command_tail;
+        Some([mode.value(), a, b, c, d, e])
     }
 }
 
@@ -123,6 +190,7 @@ pub const A3949: DeviceModel = DeviceModel {
     name: "Soundcore P20i / P25i / R50i",
     battery_scale: BatteryScale::Five,
     layout: Layout::TwsCmm2,
+    sound_mode: None,
 };
 
 pub const A3947: DeviceModel = DeviceModel {
@@ -130,6 +198,7 @@ pub const A3947: DeviceModel = DeviceModel {
     name: "Soundcore Liberty 4 NC",
     battery_scale: BatteryScale::Five,
     layout: Layout::TwsCmm2,
+    sound_mode: None,
 };
 
 pub const A3954: DeviceModel = DeviceModel {
@@ -137,6 +206,7 @@ pub const A3954: DeviceModel = DeviceModel {
     name: "Soundcore Liberty 4 Pro",
     battery_scale: BatteryScale::Hundred,
     layout: Layout::TwsCmm2,
+    sound_mode: None,
 };
 
 pub const A3035: DeviceModel = DeviceModel {
@@ -144,6 +214,7 @@ pub const A3035: DeviceModel = DeviceModel {
     name: "Soundcore Space One",
     battery_scale: BatteryScale::Five,
     layout: Layout::SingleCmm2,
+    sound_mode: None,
 };
 
 pub const A3040: DeviceModel = DeviceModel {
@@ -151,6 +222,7 @@ pub const A3040: DeviceModel = DeviceModel {
     name: "Soundcore Space Q45",
     battery_scale: BatteryScale::Five,
     layout: Layout::SingleCmm2,
+    sound_mode: None,
 };
 
 pub const A3062: DeviceModel = DeviceModel {
@@ -158,6 +230,12 @@ pub const A3062: DeviceModel = DeviceModel {
     name: "Soundcore Space One Pro",
     battery_scale: BatteryScale::Ten,
     layout: Layout::SingleCmm2,
+    // Measured on the real device on 2026-11-21: the mode is body byte 69 and
+    // the command body is `[mode, 0x51, 0x01, 0x01, 0x00, 0x05]`.
+    sound_mode: Some(SoundModeCapability {
+        state_offset: 69,
+        command_tail: [0x51, 0x01, 0x01, 0x00, 0x05],
+    }),
 };
 
 pub const SUPPORTED_MODELS: &[DeviceModel] = &[A3035, A3040, A3062, A3947, A3949, A3954];
@@ -176,6 +254,7 @@ pub enum StateError {
     UnsupportedLayout(Layout),
     InvalidHostDevice(u8),
     InvalidTwsFlag(u8),
+    InvalidSoundMode(u8),
     BatteryAboveScale { value: u8, maximum: u8 },
 }
 
@@ -189,6 +268,7 @@ impl std::fmt::Display for StateError {
             Self::UnsupportedLayout(layout) => write!(f, "layout {layout:?} is not implemented"),
             Self::InvalidHostDevice(value) => write!(f, "invalid host device {value}"),
             Self::InvalidTwsFlag(value) => write!(f, "invalid TWS flag {value}"),
+            Self::InvalidSoundMode(value) => write!(f, "invalid sound mode {value}"),
             Self::BatteryAboveScale { value, maximum } => {
                 write!(f, "battery {value} is above scale {maximum}")
             }
@@ -260,6 +340,7 @@ fn parse_tws_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState, S
             scale,
         }),
         single_battery: None,
+        sound_mode: parse_sound_mode(model, body)?,
         firmware: FirmwareVersions {
             left: parse_firmware(&body[6..11]),
             right: parse_firmware(&body[11..16]),
@@ -276,8 +357,10 @@ fn parse_tws_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState, S
 /// | 1 | constant `0xFF`; not a host or charging field |
 /// | 2..7 | firmware, ASCII `MM.mm` |
 /// | 7..23 | serial, 16 ASCII characters |
+/// | 69 | sound mode, [`SoundMode`] |
 ///
-/// Everything after offset 23 is model-specific and is not interpreted here.
+/// Everything after offset 23 except the measured mode byte is model-specific
+/// and is not interpreted here. The measured body is 95 bytes.
 fn parse_single_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState, StateError> {
     if body.len() < MIN_SINGLE_CMM2_BODY {
         return Err(StateError::ShortBody {
@@ -306,12 +389,31 @@ fn parse_single_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState
             charging: None,
             firmware: parse_firmware(&body[2..7]),
         }),
+        sound_mode: parse_sound_mode(model, body)?,
         firmware: FirmwareVersions {
             left: None,
             right: None,
         },
         serial: parse_serial(&body[7..23]),
     })
+}
+
+/// Parses the mode byte of a model whose sound-mode control was measured.
+///
+/// `None` when the model has no measured control. A body too short to hold the
+/// measured byte, or a value outside the measured mapping, is an error: the
+/// parser does not invent a default mode.
+fn parse_sound_mode(model: DeviceModel, body: &[u8]) -> Result<Option<SoundMode>, StateError> {
+    let Some(capability) = model.sound_mode else {
+        return Ok(None);
+    };
+    let offset = capability.state_offset;
+    let value = body.get(offset).copied().ok_or(StateError::ShortBody {
+        actual: body.len(),
+        minimum: offset + 1,
+    })?;
+    let mode = SoundMode::from_value(value).ok_or(StateError::InvalidSoundMode(value))?;
+    Ok(Some(mode))
 }
 
 fn parse_firmware(bytes: &[u8]) -> Option<String> {

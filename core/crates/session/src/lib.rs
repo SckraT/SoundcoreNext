@@ -7,7 +7,8 @@
 //! - frame the outbound `01 01` state request;
 //! - accumulate inbound bytes until one complete, checksum-valid frame is
 //!   available, tolerating leading garbage and several frames per read;
-//! - hand that frame to [`soundcore_models::parse_state_frame`].
+//! - hand that frame to [`soundcore_models::parse_state_frame`];
+//! - write the measured `06 81` sound-mode frame for models that have one.
 //!
 //! Nothing here knows about Windows, sockets, threads or timers.
 //!
@@ -26,8 +27,10 @@
 
 use std::io;
 
-use soundcore_models::{DeviceModel, DeviceState, StateError, parse_state_frame};
-use soundcore_protocol::{Command, INBOUND_PREFIX, MIN_FRAME_LEN, ParseError, parse, request};
+use soundcore_models::{DeviceModel, DeviceState, SoundMode, StateError, parse_state_frame};
+use soundcore_protocol::{
+    Command, Direction, INBOUND_PREFIX, MIN_FRAME_LEN, ParseError, encode, parse, request,
+};
 
 /// Bytes requested from the transport in a single read.
 const READ_CHUNK: usize = 1024;
@@ -99,6 +102,9 @@ pub enum SessionError {
     Protocol(ProtocolError),
     /// The device answered, but this model's battery layout has no parser yet.
     UnsupportedLayout,
+    /// The model has no measured sound-mode control, so there is no `06 81`
+    /// frame to write.
+    UnsupportedSoundMode,
 }
 
 impl std::fmt::Display for SessionError {
@@ -113,6 +119,9 @@ impl std::fmt::Display for SessionError {
                     "battery layout is not implemented for this model"
                 )
             }
+            Self::UnsupportedSoundMode => {
+                write!(formatter, "sound modes were not measured for this model")
+            }
         }
     }
 }
@@ -122,7 +131,7 @@ impl std::error::Error for SessionError {
         match self {
             Self::Io(error) => Some(error),
             Self::Protocol(error) => Some(error),
-            Self::Timeout | Self::UnsupportedLayout => None,
+            Self::Timeout | Self::UnsupportedLayout | Self::UnsupportedSoundMode => None,
         }
     }
 }
@@ -190,6 +199,29 @@ impl<T: Transport> DeviceSession<T> {
             }
             self.fill()?;
         }
+    }
+
+    /// Write this model's `06 81` sound-mode frame and return once every byte
+    /// of it is written.
+    ///
+    /// This method never reads. The device acknowledges with an empty inbound
+    /// `06 81` frame and may also push notifications, but neither is a state
+    /// response: call [`Self::poll_state`] afterwards to read the new mode, and
+    /// it will skip those frames.
+    ///
+    /// Fails with [`SessionError::UnsupportedSoundMode`] when the model has no
+    /// measured sound-mode control, and writes nothing in that case.
+    pub fn set_sound_mode(&mut self, mode: SoundMode) -> Result<(), SessionError> {
+        let body = self
+            .model
+            .sound_mode_body(mode)
+            .ok_or(SessionError::UnsupportedSoundMode)?;
+        self.transport.write_all(&encode(
+            Direction::Outbound,
+            Command::AMBIENT_SOUND_MODE,
+            &body,
+        ))?;
+        Ok(())
     }
 
     /// Read one chunk from the transport into the assembly buffer.

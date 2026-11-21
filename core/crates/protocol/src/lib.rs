@@ -25,7 +25,9 @@ impl Command {
     pub const STATE: Self = Self::new(0x01, 0x01);
     pub const BATTERY: Self = Self::new(0x01, 0x03);
     pub const CHARGING: Self = Self::new(0x01, 0x04);
-    pub const ACK_AMBIENT_SOUND_MODE: Self = Self::new(0x06, 0x81);
+    /// The ambient sound mode: an outbound `06 81` carries the six-byte mode
+    /// body, and the device acknowledges it with an empty inbound `06 81`.
+    pub const AMBIENT_SOUND_MODE: Self = Self::new(0x06, 0x81);
 
     pub const fn new(group: u8, opcode: u8) -> Self {
         Self { group, opcode }
