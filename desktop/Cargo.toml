@@ -5,6 +5,9 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 
 [dependencies]
+# The About rows' copy button puts their text on the Windows clipboard; the
+# image half of arboard is not needed.
+arboard = { version = "3.7", default-features = false }
 slint = "1.18"
 soundcore-models = { path = "../core/crates/models" }
 # The pure saved-profile model (name + eight bands, validation, JSON schema v1);
@@ -15,6 +18,9 @@ windows = { version = "0.62", features = [
     "Win32_Devices_Bluetooth",
     "Win32_Foundation",
     "Win32_Networking_WinSock",
+    # The Connections page's links open the Windows settings pages.
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [build-dependencies]
