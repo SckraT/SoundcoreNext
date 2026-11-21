@@ -38,10 +38,8 @@
 //! is a new profile against an empty set or a replacement against a set that
 //! already has its name, with exactly the exported bands.
 
-use serde::Serialize;
-use soundcore_models::VISIBLE_EQ_BANDS;
-
 use crate::EqualizerProfile;
+use crate::transfer::RawTransferProfile;
 
 /// Serializes `profiles` as an OpenSCL4 transfer-profile JSON array.
 ///
@@ -50,12 +48,19 @@ use crate::EqualizerProfile;
 /// `volumeAdjustments`, and exactly one decimal per dB value (`30 -> 3.0`,
 /// `-120 -> -12.0`). An empty slice writes `[]`. The text re-imports through
 /// [`crate::preview_import`] with the same bands.
+///
+/// # Panics
+///
+/// Panics only if `serde_json` reports a serialization error, which it cannot
+/// here: the document is a plain array of objects with a string `name` and eight
+/// finite `f64` bands (`i16 / 10.0` is always finite), so no value these
+/// profiles carry has a failing serialization.
 pub fn export_json(profiles: &[EqualizerProfile]) -> String {
-    let transfer: Vec<RawTransferProfile<'_>> = profiles
+    let transfer: Vec<RawTransferProfile> = profiles
         .iter()
         .map(|profile| RawTransferProfile {
-            name: &profile.name,
-            volume_adjustments: profile.bands.map(decibels),
+            name: profile.name.clone(),
+            volume_adjustments: profile.bands.map(decibels).to_vec(),
         })
         .collect();
     serde_json::to_string(&transfer).expect("transfer profiles always serialize")
@@ -69,17 +74,4 @@ pub fn export_json(profiles: &[EqualizerProfile]) -> String {
 /// keeps exactly one decimal (`-120 -> -12.0`, `31 -> 3.1`).
 fn decibels(band: i16) -> f64 {
     f64::from(band) / 10.0
-}
-
-/// The wire shape of one exported profile: the inverse of the reader in the
-/// import module.
-///
-/// [`EqualizerProfile`] serializes as schema v1 (`bands` in dB×10), so the
-/// transfer document needs its own shape with the camelCase
-/// `volumeAdjustments` field and dB values.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RawTransferProfile<'a> {
-    name: &'a str,
-    volume_adjustments: [f64; VISIBLE_EQ_BANDS],
 }

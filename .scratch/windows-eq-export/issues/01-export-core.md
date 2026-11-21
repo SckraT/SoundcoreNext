@@ -40,10 +40,10 @@ dependency.
   as one compact transfer-profile JSON array in the given order; `&[]` writes
   `[]`. There is no error type: serializing a validated name and eight finite dB
   values cannot fail, and the model has already validated the profiles.
-- Serialization goes through a private wire struct, the inverse of the import
-  reader: `#[serde(rename_all = "camelCase")] name: &str, volume_adjustments:
-  [f64; VISIBLE_EQ_BANDS]`, so serde_json owns the JSON structure and the name
-  escaping.
+- Serialization goes through the private wire struct the import reader uses
+  too: `#[serde(rename_all = "camelCase")] name: String, volume_adjustments:
+  Vec<f64>`, so serde_json owns the JSON structure and the name escaping, and
+  the read and write shapes cannot drift apart.
 
 ### Format and conversion
 

@@ -49,7 +49,8 @@ project, under GPL-3.0-or-later:
   `lib/src/devices/soundcore/common/packet/outbound/set_ambient_sound_mode_cycle.rs`,
   `.../dual_connections.rs`, `.../set_auto_power_off.rs` and
   `.../set_limit_high_volume.rs`;
-- the OpenSCL4 transfer-profile format (`name` plus `volumeAdjustments`) and its
+- the OpenSCL4 transfer-profile format (`name` plus `volumeAdjustments`), its
+  serialization in both directions (profile import and export) and its
   `scaled_to_device` decibel-to-band rounding rule for profile import, adapted
   from `lib/src/api/equalizer_profiles.rs`, and the import preview statuses
   (new, replaces, wrong band count, out of range) from

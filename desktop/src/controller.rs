@@ -361,14 +361,20 @@ fn export_chosen(chosen: &[String], name: &str) -> bool {
     chosen.iter().any(|candidate| candidate == name)
 }
 
+/// Iterates the chosen profiles that are still saved, in the saved order.
+fn chosen_profiles_iter<'a>(
+    profiles: &'a ProfileSet,
+    chosen: &'a [String],
+) -> impl Iterator<Item = &'a EqualizerProfile> {
+    profiles
+        .iter()
+        .filter(move |profile| export_chosen(chosen, &profile.name))
+}
+
 /// The chosen profiles that are still saved, in the saved order: the slice the
 /// transfer file and the clipboard carry.
 fn chosen_profiles(profiles: &ProfileSet, chosen: &[String]) -> Vec<EqualizerProfile> {
-    profiles
-        .iter()
-        .filter(|profile| export_chosen(chosen, &profile.name))
-        .cloned()
-        .collect()
+    chosen_profiles_iter(profiles, chosen).cloned().collect()
 }
 
 /// The OpenSCL4 transfer JSON of the chosen profiles, or `None` when none of the
@@ -381,10 +387,7 @@ fn chosen_profiles_json(profiles: &ProfileSet, chosen: &[String]) -> Option<Stri
 /// The `AppState.eq-export-count` of a choice: the chosen profiles that are
 /// still saved. A name that is no longer saved is not counted.
 fn export_count(profiles: &ProfileSet, chosen: &[String]) -> i32 {
-    let count = profiles
-        .iter()
-        .filter(|profile| export_chosen(chosen, &profile.name))
-        .count();
+    let count = chosen_profiles_iter(profiles, chosen).count();
     i32::try_from(count).unwrap_or(i32::MAX)
 }
 
