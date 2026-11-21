@@ -684,6 +684,249 @@ impl SettingCommand {
     }
 }
 
+/// The dual-connections `0B` command group of the A3062.
+///
+/// The command bytes and layout are OpenSCL4's
+/// `common/packet/{inbound/dual_connections_device,outbound/dual_connections}.rs`
+/// for the A3062 module: an empty-body `0B 01` asks for the list of remembered
+/// devices, and `0B 82`/`0B 81`/`0B 83` connect, disconnect and forget the
+/// device whose six address bytes follow.
+pub const DUAL_CONNECTIONS_LIST: Command = Command::new(0x0B, 0x01);
+
+/// The `0B 82` connect command.
+const DUAL_CONNECTIONS_CONNECT: Command = Command::new(0x0B, 0x82);
+/// The `0B 81` disconnect command.
+const DUAL_CONNECTIONS_DISCONNECT: Command = Command::new(0x0B, 0x81);
+/// The `0B 83` forget command.
+const DUAL_CONNECTIONS_FORGET: Command = Command::new(0x0B, 0x83);
+
+/// The `0B 01` list request: an empty body, so the frame is ten bytes.
+pub fn dual_connections_request() -> Vec<u8> {
+    encode(Direction::Outbound, DUAL_CONNECTIONS_LIST, &[])
+}
+
+/// The exact `0B 82` connect frame for a device's six address bytes.
+///
+/// The bytes travel in the order the `0B 01` reply reported them: this is not
+/// the byte-reversed Windows Bluetooth address representation.
+pub fn dual_connections_connect_frame(mac: [u8; 6]) -> Vec<u8> {
+    encode(Direction::Outbound, DUAL_CONNECTIONS_CONNECT, &mac)
+}
+
+/// The exact `0B 81` disconnect frame; the address bytes travel as the reply
+/// reported them, like [`dual_connections_connect_frame`].
+pub fn dual_connections_disconnect_frame(mac: [u8; 6]) -> Vec<u8> {
+    encode(Direction::Outbound, DUAL_CONNECTIONS_DISCONNECT, &mac)
+}
+
+/// The exact `0B 83` forget frame; the address bytes travel as the reply
+/// reported them, like [`dual_connections_connect_frame`].
+pub fn dual_connections_forget_frame(mac: [u8; 6]) -> Vec<u8> {
+    encode(Direction::Outbound, DUAL_CONNECTIONS_FORGET, &mac)
+}
+
+/// One device of the dual-connections list: a name the earbuds remember and
+/// whether it is currently connected.
+///
+/// The address bytes are kept exactly as the reply sent them (six bytes, reply
+/// order) so a connect/disconnect/forget write can send them back unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DualConnectionDevice {
+    /// The name with its NUL padding removed, and with an incomplete trailing
+    /// UTF-8 character dropped; see [`parse_dual_connections_body`].
+    pub name: String,
+    /// The six Bluetooth address bytes in reply order, never byte-reversed.
+    pub mac: [u8; 6],
+    /// Whether the device is connected now (`is_connected` byte exactly `1`;
+    /// every other value reads as not connected).
+    pub connected: bool,
+}
+
+/// One `0B 01` reply frame.
+///
+/// A reply spans one or more frames: `total` counts the frames, `current` is
+/// the one-based index of this frame, and there is no terminator. Several
+/// devices can share one frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DualConnectionsFrame {
+    /// The number of frames in the whole reply, at least 1.
+    pub total: u8,
+    /// This frame's one-based index, in `1..=total`.
+    pub current: u8,
+    /// The devices carried by this frame, in reply order.
+    pub devices: Vec<DualConnectionDevice>,
+}
+
+/// Why a `0B 01` reply frame could not be parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DualConnectionsError {
+    /// The frame is not an inbound `0B 01` frame.
+    NotADualConnectionsFrame,
+    /// The body is shorter than its frame-count prefix.
+    ShortBody { actual: usize, minimum: usize },
+    /// `total` or `current` is outside the measured `1..=total` range.
+    BadFrameCount { total: u8, current: u8 },
+    /// A device record claims a length below its fixed eight bytes.
+    BadDeviceLength { offset: usize, length: u8 },
+    /// A device record is cut off before its fixed eight bytes.
+    ShortDevice { offset: usize, remaining: usize },
+}
+
+impl std::fmt::Display for DualConnectionsError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotADualConnectionsFrame => {
+                write!(formatter, "frame is not a dual-connections 0B 01 response")
+            }
+            Self::ShortBody { actual, minimum } => {
+                write!(formatter, "body is {actual} bytes, need at least {minimum}")
+            }
+            Self::BadFrameCount { total, current } => {
+                write!(
+                    formatter,
+                    "bad dual-connections frame count {current}/{total}"
+                )
+            }
+            Self::BadDeviceLength { offset, length } => {
+                write!(
+                    formatter,
+                    "device at body offset {offset} has length {length}, need at least 8"
+                )
+            }
+            Self::ShortDevice { offset, remaining } => {
+                write!(
+                    formatter,
+                    "device at body offset {offset} needs 8 bytes, only {remaining} remain"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for DualConnectionsError {}
+
+/// Parse one complete inbound `0B 01` frame into a [`DualConnectionsFrame`].
+pub fn parse_dual_connections_frame(
+    raw: &[u8],
+) -> Result<DualConnectionsFrame, DualConnectionsError> {
+    let frame: Frame = parse(raw).map_err(|_| DualConnectionsError::NotADualConnectionsFrame)?;
+    if frame.command != DUAL_CONNECTIONS_LIST {
+        return Err(DualConnectionsError::NotADualConnectionsFrame);
+    }
+    parse_dual_connections_body(&frame.body)
+}
+
+/// Parse the body of one `0B 01` reply frame.
+///
+/// The body is `[total, current, devices...]`. A device is its own length byte
+/// (`0x28` = eight fixed bytes plus a 32-byte name field), the `is_connected`
+/// flag, the six address bytes as-is and `length - 8` name bytes right-padded
+/// with NULs. There is no terminator: the reply ends at `current == total`.
+///
+/// A name is cut at its first NUL and decoded as UTF-8. The device pads the
+/// name field to 32 bytes and can cut a multibyte character in half; that
+/// keeps the valid prefix instead of dropping the whole list. A final record
+/// padded shorter than its declared length is clamped to what is present, as
+/// observed on a real device in OpenSCL4.
+pub fn parse_dual_connections_body(
+    body: &[u8],
+) -> Result<DualConnectionsFrame, DualConnectionsError> {
+    if body.len() < 2 {
+        return Err(DualConnectionsError::ShortBody {
+            actual: body.len(),
+            minimum: 2,
+        });
+    }
+    let (total, current) = (body[0], body[1]);
+    if total == 0 || current == 0 || current > total {
+        return Err(DualConnectionsError::BadFrameCount { total, current });
+    }
+
+    let mut devices = Vec::new();
+    let mut offset = 2;
+    while offset < body.len() {
+        let length = body[offset];
+        if length < 8 {
+            return Err(DualConnectionsError::BadDeviceLength { offset, length });
+        }
+        let remaining = body.len() - offset;
+        if remaining < 8 {
+            return Err(DualConnectionsError::ShortDevice { offset, remaining });
+        }
+        let connected = body[offset + 1] == 1;
+        let mut mac = [0u8; 6];
+        mac.copy_from_slice(&body[offset + 2..offset + 8]);
+
+        let name_start = offset + 8;
+        let declared_name_length = usize::from(length - 8);
+        let available = body.len() - name_start;
+        let name_length = declared_name_length.min(available);
+        let name = dual_connection_name(&body[name_start..name_start + name_length]);
+
+        devices.push(DualConnectionDevice {
+            name,
+            mac,
+            connected,
+        });
+        offset = name_start + name_length;
+    }
+
+    Ok(DualConnectionsFrame {
+        total,
+        current,
+        devices,
+    })
+}
+
+/// A device name: the bytes before the first NUL, decoded as UTF-8 with an
+/// incomplete trailing character dropped.
+fn dual_connection_name(bytes: &[u8]) -> String {
+    let bytes = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .map_or(bytes, |nul| &bytes[..nul]);
+    match std::str::from_utf8(bytes) {
+        Ok(name) => name.to_owned(),
+        Err(error) => String::from_utf8_lossy(&bytes[..error.valid_up_to()]).into_owned(),
+    }
+}
+
+/// The devices collected from the frames of one `0B 01` reply.
+///
+/// `current == 1` starts a new list, every frame appends its devices (so an
+/// out-of-order reply still parses) and the reply completes on the frame whose
+/// `current == total`: there is no terminator byte.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DualConnectionsList {
+    devices: Vec<DualConnectionDevice>,
+}
+
+impl DualConnectionsList {
+    /// An empty list, ready for the first reply frame.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append one frame's devices and report whether it was the last frame.
+    pub fn push_frame(&mut self, frame: DualConnectionsFrame) -> bool {
+        if frame.current == 1 {
+            self.devices.clear();
+        }
+        self.devices.extend(frame.devices);
+        frame.current == frame.total
+    }
+
+    /// The devices collected so far, in reply order.
+    pub fn devices(&self) -> &[DualConnectionDevice] {
+        &self.devices
+    }
+
+    /// The complete list, in reply order.
+    pub fn into_devices(self) -> Vec<DualConnectionDevice> {
+        self.devices
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostDevice {
     Left,
@@ -788,6 +1031,14 @@ pub struct DeviceModel {
     /// The measured remaining-settings block, or `None` when this slice does
     /// not implement the model's settings (the whole catalog except A3062).
     pub settings: Option<SettingsCapability>,
+    /// Whether this slice implements the model's dual-connections list and its
+    /// connect/disconnect/forget writes.
+    ///
+    /// Only the A3062 was measured (OpenSCL4 uses the same commands for every
+    /// model that has the feature). The A3949's dual support stays deferred, so
+    /// its session list read and writes fail as unsupported and nothing is
+    /// written.
+    pub dual_connections: bool,
 }
 
 impl DeviceModel {
@@ -935,6 +1186,7 @@ pub const A3949: DeviceModel = DeviceModel {
     sound_mode: None,
     equalizer: None,
     settings: None,
+    dual_connections: false,
 };
 
 pub const A3947: DeviceModel = DeviceModel {
@@ -945,6 +1197,7 @@ pub const A3947: DeviceModel = DeviceModel {
     sound_mode: None,
     equalizer: None,
     settings: None,
+    dual_connections: false,
 };
 
 pub const A3954: DeviceModel = DeviceModel {
@@ -955,6 +1208,7 @@ pub const A3954: DeviceModel = DeviceModel {
     sound_mode: None,
     equalizer: None,
     settings: None,
+    dual_connections: false,
 };
 
 pub const A3035: DeviceModel = DeviceModel {
@@ -965,6 +1219,7 @@ pub const A3035: DeviceModel = DeviceModel {
     sound_mode: None,
     equalizer: None,
     settings: None,
+    dual_connections: false,
 };
 
 pub const A3040: DeviceModel = DeviceModel {
@@ -975,6 +1230,7 @@ pub const A3040: DeviceModel = DeviceModel {
     sound_mode: None,
     equalizer: None,
     settings: None,
+    dual_connections: false,
 };
 
 pub const A3062: DeviceModel = DeviceModel {
@@ -998,6 +1254,10 @@ pub const A3062: DeviceModel = DeviceModel {
     // A3062 state parser: the settings block starts at body byte 67 (the
     // button double press) and runs through byte 86 (the voice prompt).
     settings: Some(SettingsCapability { state_offset: 67 }),
+    // OpenSCL4 enables the dual-connections module for A3062; the list and the
+    // connect/disconnect/forget writes were captured on the real device in this
+    // ticket (2026-11-21).
+    dual_connections: true,
 };
 
 pub const SUPPORTED_MODELS: &[DeviceModel] = &[A3035, A3040, A3062, A3947, A3949, A3954];

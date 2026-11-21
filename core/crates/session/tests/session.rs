@@ -7,10 +7,13 @@ use std::rc::Rc;
 
 use soundcore_models::{
     AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, BatteryScale, ButtonAction, DbLimit,
-    DecibelReadingRefreshRate, SettingCommand, SoundMode, model_by_code,
+    DecibelReadingRefreshRate, DualConnectionDevice, SettingCommand, SoundMode,
+    dual_connections_request, model_by_code,
 };
 use soundcore_protocol::{Command, Direction, ParseError, encode, request};
-use soundcore_session::{DeviceSession, ProtocolError, SessionError, Transport};
+use soundcore_session::{
+    DUAL_CONNECTIONS_MAX_FRAMES, DeviceSession, ProtocolError, SessionError, Transport,
+};
 
 fn hex(text: &str) -> Vec<u8> {
     text.split_whitespace()
@@ -745,6 +748,315 @@ fn reports_a_failed_setting_write_as_an_io_error() {
         .expect_err("write failure");
     assert!(
         matches!(error, SessionError::Io(ref io_error) if io_error.kind() == io::ErrorKind::ConnectionReset),
+        "unexpected error: {error}"
+    );
+}
+
+#[derive(serde::Deserialize)]
+struct DualConnectionsFixture {
+    frames: Vec<DualConnectionsFrameFixture>,
+    expected: DualConnectionsExpected,
+}
+
+#[derive(serde::Deserialize)]
+struct DualConnectionsFrameFixture {
+    frame_hex: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DualConnectionsExpected {
+    devices: Vec<DualConnectionExpected>,
+}
+
+#[derive(serde::Deserialize)]
+struct DualConnectionExpected {
+    name: String,
+    mac: String,
+    connected: bool,
+}
+
+/// The committed real A3062 `0B 01` reply (sanitized names and addresses).
+fn a3062_dual_connections_fixture() -> DualConnectionsFixture {
+    serde_json::from_str(include_str!("../../../data/a3062-dual-connections.json"))
+        .expect("fixture")
+}
+
+/// Every frame of the real reply as raw bytes.
+fn fixture_frames(fixture: &DualConnectionsFixture) -> Vec<Vec<u8>> {
+    fixture
+        .frames
+        .iter()
+        .map(|entry| hex(&entry.frame_hex))
+        .collect()
+}
+
+fn fixture_expected_devices(fixture: &DualConnectionsFixture) -> Vec<DualConnectionDevice> {
+    fixture
+        .expected
+        .devices
+        .iter()
+        .map(|device| DualConnectionDevice {
+            name: device.name.clone(),
+            mac: colon_mac(&device.mac),
+            connected: device.connected,
+        })
+        .collect()
+}
+
+fn colon_mac(text: &str) -> [u8; 6] {
+    let bytes: Vec<u8> = text
+        .split(':')
+        .map(|octet| u8::from_str_radix(octet, 16).expect("hex octet"))
+        .collect();
+    bytes.try_into().expect("six address bytes")
+}
+
+#[test]
+fn reads_the_real_a3062_dual_connections_list() {
+    let fixture = a3062_dual_connections_fixture();
+    let mut chunk = Vec::new();
+    for frame in fixture_frames(&fixture) {
+        chunk.extend_from_slice(&frame);
+    }
+    let model = model_by_code("A3062").expect("A3062");
+    let transport = FakeTransport::chunks([chunk]);
+    let mut session = DeviceSession::new(model, transport.clone());
+
+    let devices = session
+        .read_dual_connections_devices()
+        .expect("the real list");
+
+    assert_eq!(devices, fixture_expected_devices(&fixture));
+    assert_eq!(
+        transport.writes(),
+        vec![dual_connections_request()],
+        "one empty 0B 01 frame"
+    );
+}
+
+#[test]
+fn assembles_the_dual_connections_reply_split_across_reads() {
+    let fixture = a3062_dual_connections_fixture();
+    let mut all = Vec::new();
+    let mut cuts = vec![1, 4, 5, 9];
+    for frame in fixture_frames(&fixture) {
+        all.extend_from_slice(&frame);
+        cuts.push(all.len() - 1);
+        cuts.push(all.len());
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts.retain(|cut| *cut > 0 && *cut < all.len());
+
+    let mut chunks = Vec::new();
+    let mut previous = 0;
+    for cut in cuts {
+        chunks.push(all[previous..cut].to_vec());
+        previous = cut;
+    }
+    chunks.push(all[previous..].to_vec());
+
+    let model = model_by_code("A3062").expect("A3062");
+    let transport = FakeTransport::chunks(chunks);
+    let mut session = DeviceSession::new(model, transport);
+
+    let devices = session
+        .read_dual_connections_devices()
+        .expect("the split real list");
+
+    assert_eq!(devices, fixture_expected_devices(&fixture));
+}
+
+#[test]
+fn skips_other_frames_before_the_dual_connections_reply() {
+    let fixture = a3062_dual_connections_fixture();
+    // An empty same-command acknowledgement and a battery notification may
+    // arrive before the list frames.
+    let ack = encode(Direction::Inbound, Command::new(0x0B, 0x84), &[]);
+    let notification = encode(Direction::Inbound, Command::BATTERY, &[5]);
+    let mut chunk = ack;
+    chunk.extend_from_slice(&notification);
+    for frame in fixture_frames(&fixture) {
+        chunk.extend_from_slice(&frame);
+    }
+
+    let model = model_by_code("A3062").expect("A3062");
+    let transport = FakeTransport::chunks([chunk]);
+    let mut session = DeviceSession::new(model, transport);
+
+    let devices = session
+        .read_dual_connections_devices()
+        .expect("the list after unrelated frames");
+
+    assert_eq!(devices, fixture_expected_devices(&fixture));
+}
+
+#[test]
+fn a_dual_connections_read_times_out_on_silence() {
+    for kind in [io::ErrorKind::TimedOut, io::ErrorKind::WouldBlock] {
+        let model = model_by_code("A3062").expect("A3062");
+        let transport =
+            FakeTransport::scripted([Err(io::Error::new(kind, "read deadline expired"))]);
+        let mut session = DeviceSession::new(model, transport.clone());
+
+        let error = session
+            .read_dual_connections_devices()
+            .expect_err("silence");
+        assert!(
+            matches!(error, SessionError::Timeout),
+            "unexpected error: {error}"
+        );
+        assert_eq!(transport.writes(), vec![dual_connections_request()]);
+    }
+}
+
+#[test]
+fn a_dual_connections_reply_that_never_ends_times_out() {
+    let model = model_by_code("A3062").expect("A3062");
+    // The only frame arrives, says two frames are coming, and the next read
+    // expires: the partial list must not be returned.
+    let first = encode(Direction::Inbound, Command::new(0x0B, 0x01), &[2, 1]);
+    let transport = FakeTransport::scripted([
+        Ok(first),
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "read deadline expired",
+        )),
+    ]);
+    let mut session = DeviceSession::new(model, transport);
+
+    let error = session
+        .read_dual_connections_devices()
+        .expect_err("the reply never ends");
+    assert!(
+        matches!(error, SessionError::Timeout),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn the_dual_connections_frame_budget_stops_an_unterminated_reply() {
+    let model = model_by_code("A3062").expect("A3062");
+    // One more frame than the budget, and none of them claims to be the last.
+    let mut chunk = Vec::new();
+    for current in 1..=u8::try_from(DUAL_CONNECTIONS_MAX_FRAMES + 1).expect("budget") {
+        chunk.extend_from_slice(&encode(
+            Direction::Inbound,
+            Command::new(0x0B, 0x01),
+            &[0xFF, current],
+        ));
+    }
+    let transport = FakeTransport::chunks([chunk]);
+    let mut session = DeviceSession::new(model, transport);
+
+    let error = session
+        .read_dual_connections_devices()
+        .expect_err("the frame budget");
+    assert!(
+        matches!(error, SessionError::Timeout),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn reports_a_malformed_dual_connections_reply_as_a_protocol_error() {
+    use soundcore_models::DualConnectionsError;
+
+    let model = model_by_code("A3062").expect("A3062");
+    let bad_count = encode(Direction::Inbound, Command::new(0x0B, 0x01), &[0, 1]);
+    let transport = FakeTransport::chunks([bad_count]);
+    let mut session = DeviceSession::new(model, transport);
+
+    let error = session
+        .read_dual_connections_devices()
+        .expect_err("bad frame count");
+    assert!(
+        matches!(
+            error,
+            SessionError::Protocol(ProtocolError::DualConnections(
+                DualConnectionsError::BadFrameCount {
+                    total: 0,
+                    current: 1
+                }
+            ))
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn writes_the_exact_dual_connections_frames() {
+    let model = model_by_code("A3062").expect("A3062");
+    // The address bytes are the neutral ones of the committed fixture and must
+    // travel unchanged, in reply order.
+    let address = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+    let cases: &[(&str, &str)] = &[
+        ("connect", "08 EE 00 00 00 0B 82 10 00 02 00 00 00 00 01 96"),
+        (
+            "disconnect",
+            "08 EE 00 00 00 0B 81 10 00 02 00 00 00 00 01 95",
+        ),
+        ("forget", "08 EE 00 00 00 0B 83 10 00 02 00 00 00 00 01 97"),
+    ];
+    for (kind, expected) in cases {
+        // No reads are scripted: every dual-connections write is fire-and-forget.
+        let transport = FakeTransport::default();
+        let mut session = DeviceSession::new(model, transport.clone());
+        match *kind {
+            "connect" => session.connect_dual_connection(address),
+            "disconnect" => session.disconnect_dual_connection(address),
+            "forget" => session.forget_dual_connection(address),
+            other => panic!("unknown dual-connections write {other}"),
+        }
+        .expect("write the dual-connections frame");
+        assert_eq!(transport.writes(), vec![hex(expected)], "{kind}");
+    }
+}
+
+#[test]
+fn a_model_without_dual_connections_reads_and_writes_nothing() {
+    let model = model_by_code("A3949").expect("A3949");
+    let transport = FakeTransport::default();
+    let mut session = DeviceSession::new(model, transport.clone());
+
+    let error = session
+        .read_dual_connections_devices()
+        .expect_err("the P20i has no measured dual connections");
+    assert!(
+        matches!(error, SessionError::UnsupportedDualConnections),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "dual connections are not supported for this model"
+    );
+
+    let address = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+    for write in [
+        session.connect_dual_connection(address),
+        session.disconnect_dual_connection(address),
+        session.forget_dual_connection(address),
+    ] {
+        let error = write.expect_err("the P20i has no dual-connections writes");
+        assert!(
+            matches!(error, SessionError::UnsupportedDualConnections),
+            "unexpected error: {error}"
+        );
+    }
+    assert!(transport.writes().is_empty(), "nothing may be written");
+}
+
+#[test]
+fn reports_a_failed_dual_connections_write_as_an_io_error() {
+    let model = model_by_code("A3062").expect("A3062");
+    let transport = FakeTransport::failing_writes(io::ErrorKind::BrokenPipe);
+    let mut session = DeviceSession::new(model, transport);
+
+    let error = session
+        .connect_dual_connection([0x02, 0x00, 0x00, 0x00, 0x00, 0x01])
+        .expect_err("write failure");
+    assert!(
+        matches!(error, SessionError::Io(ref io_error) if io_error.kind() == io::ErrorKind::BrokenPipe),
         "unexpected error: {error}"
     );
 }

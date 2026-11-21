@@ -73,6 +73,7 @@ core/
     a3062-sound-modes.json # real captures, one per sound mode, serial masked
     a3062-eq-presets.json  # real captures, one per switched preset, serial masked
     a3062-eq-custom.json   # real custom-write captures (found/custom/restored), serial masked
+    a3062-dual-connections.json # real 0B 01 list capture, names/addresses masked
   crates/
     protocol/             # framing, checksum, request builders
     models/               # registry, catalog taxonomy and state parsers
