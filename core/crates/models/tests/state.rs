@@ -1,8 +1,8 @@
 //! State parser tests against real and synthetic frames.
 
 use soundcore_models::{
-    A3954, BatteryScale, HostDevice, Layout, SoundMode, StateError, model_by_code,
-    parse_state_body, parse_state_frame,
+    A3954, AmbientSoundModeCycle, BatteryScale, DbLimit, HostDevice, Layout, NO_BUTTON_ACTION,
+    SoundMode, StateError, model_by_code, parse_state_body, parse_state_frame,
 };
 use soundcore_protocol::{Command, Direction, encode};
 
@@ -115,9 +115,10 @@ fn parses_the_real_a3062_single_battery_state() {
     assert_eq!(single.value, fixture.expected.battery);
     assert_eq!(single.scale, BatteryScale::Ten);
     assert_eq!(single.scale.maximum(), fixture.expected.scale);
-    // The state frame has no charging byte; charging is a separate `01 04`
-    // notification and is not part of this poll.
-    assert_eq!(single.charging, None);
+    // Body byte 1 is the charging flag: the capture carries `0xFF`, which
+    // OpenSCL4's A3062 parser reads as not charging. A `01 04` notification may
+    // later report a newer value, but this poll does not request it.
+    assert_eq!(single.charging, Some(false));
     assert_eq!(
         single.firmware.as_deref(),
         Some(fixture.expected.firmware.as_str())
@@ -250,7 +251,23 @@ fn a_single_battery_at_five_of_ten_is_fifty_percent() {
     assert_eq!(single.value, 5);
     assert_eq!(single.scale, BatteryScale::Ten);
     assert_eq!(single.scale.maximum(), 10);
+    assert_eq!(single.charging, Some(false));
     assert_eq!(single.firmware.as_deref(), Some("04.39"));
+}
+
+#[test]
+fn the_a3062_charging_byte_is_one_only_when_charging() {
+    let model = model_by_code("A3062").expect("A3062");
+    for (byte, expected) in [(1, true), (0, false), (0xFF, false), (2, false)] {
+        let mut body = single_battery_body(5);
+        body[1] = byte;
+        let state = parse_state_body(model, &body).expect("parse");
+        assert_eq!(
+            state.single_battery.expect("single battery").charging,
+            Some(expected),
+            "charging byte {byte:#04X}"
+        );
+    }
 }
 
 #[test]
@@ -312,16 +329,29 @@ fn rejects_a_short_body() {
 #[test]
 fn single_battery_layout_is_only_implemented_for_the_measured_a3062() {
     // The layout was measured on A3062 only; A3035/A3040 share the enum but
-    // their frames were not captured on this branch.
-    let a3035 = model_by_code("A3035").expect("A3035");
-    assert_eq!(a3035.layout, Layout::SingleCmm2);
-    assert!(matches!(
-        parse_state_body(a3035, &[0; 64]),
-        Err(StateError::UnsupportedLayout(Layout::SingleCmm2))
-    ));
+    // their frames were not captured on this branch. They are rejected before
+    // parsing, so they keep the earlier behaviour: no single-battery state and
+    // no charging flag.
+    let a3062_body = single_battery_body(5);
+    for code in ["A3035", "A3040"] {
+        let model = model_by_code(code).expect("the catalog lists the model");
+        assert_eq!(model.layout, Layout::SingleCmm2, "{code}");
+        assert!(
+            matches!(
+                parse_state_body(model, &a3062_body),
+                Err(StateError::UnsupportedLayout(Layout::SingleCmm2))
+            ),
+            "{code} has no measured single-battery frame"
+        );
+    }
 
     let a3062 = model_by_code("A3062").expect("A3062");
-    assert!(parse_state_body(a3062, &single_battery_body(5)).is_ok());
+    let state = parse_state_body(a3062, &a3062_body).expect("parse");
+    assert!(state.single_battery.is_some());
+    assert_eq!(
+        state.single_battery.expect("single battery").charging,
+        Some(false)
+    );
 }
 
 #[test]
@@ -353,8 +383,10 @@ fn synthetic_body(
     body
 }
 
-/// The measured A3062 prefix and mode byte: battery, reserved `0xFF`, single
-/// firmware, serial, and the mode at the capability's measured offset.
+/// The measured A3062 prefix, mode byte and a valid settings block: battery,
+/// the charging byte (`0xFF`, not charging), single firmware, serial, the mode
+/// at the capability's measured offset, and the remaining settings through
+/// body 86.
 fn single_battery_body(battery: u8) -> Vec<u8> {
     let mode = SoundMode::NoiseCanceling;
     let model = model_by_code("A3062").expect("A3062");
@@ -362,10 +394,22 @@ fn single_battery_body(battery: u8) -> Vec<u8> {
         .sound_mode
         .expect("A3062 has a measured sound mode")
         .state_offset;
-    let mut body = vec![0; offset + 1];
+    // The settings block (body 67..87) must parse: no double press, all three
+    // cycle modes, auto power off disabled with the 30 minute index, limit high
+    // volume off at the lowest dB limit with real-time refresh, all flags off.
+    // The measured values are covered in settings.rs.
+    let mut body = vec![0; 87];
     body[0] = battery;
     body[1] = 0xFF;
     body[2..7].copy_from_slice(b"04.39");
     body[offset] = mode.value();
+    body[67] = NO_BUTTON_ACTION;
+    body[68] = AmbientSoundModeCycle {
+        noise_canceling: true,
+        transparency: true,
+        normal: true,
+    }
+    .byte();
+    body[83] = DbLimit::MIN;
     body
 }

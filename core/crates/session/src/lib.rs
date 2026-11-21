@@ -9,6 +9,8 @@
 //!   available, tolerating leading garbage and several frames per read;
 //! - hand that frame to [`soundcore_models::parse_state_frame`];
 //! - write the measured `06 81` sound-mode frame for models that have one;
+//! - write the measured settings frames (double press, ambient cycle, power,
+//!   prompts and effects) for models that have a settings block;
 //! - write the measured `03 87` equalizer preset and custom frames for models
 //!   that have one.
 //!
@@ -31,7 +33,7 @@ use std::io;
 
 use soundcore_models::{
     DeviceModel, DeviceState, EQUALIZER_COMMAND_BODY_LEN, EqualizerPreset, EqualizerState,
-    SoundMode, StateError, VISIBLE_EQ_BANDS, parse_state_frame,
+    SettingCommand, SoundMode, StateError, VISIBLE_EQ_BANDS, parse_state_frame,
 };
 use soundcore_protocol::{
     Command, Direction, INBOUND_PREFIX, MIN_FRAME_LEN, ParseError, encode, parse, request,
@@ -113,6 +115,9 @@ pub enum SessionError {
     /// The model has no equalizer support in this slice, so there is no
     /// `03 87` frame to write.
     UnsupportedEqualizer,
+    /// The model has no measured settings block, so there is no settings frame
+    /// to write (for example the A3949).
+    UnsupportedSetting,
 }
 
 impl std::fmt::Display for SessionError {
@@ -136,6 +141,9 @@ impl std::fmt::Display for SessionError {
                     "equalizer writes are not supported for this model"
                 )
             }
+            Self::UnsupportedSetting => {
+                write!(formatter, "settings are not supported for this model")
+            }
         }
     }
 }
@@ -148,7 +156,8 @@ impl std::error::Error for SessionError {
             Self::Timeout
             | Self::UnsupportedLayout
             | Self::UnsupportedSoundMode
-            | Self::UnsupportedEqualizer => None,
+            | Self::UnsupportedEqualizer
+            | Self::UnsupportedSetting => None,
         }
     }
 }
@@ -238,6 +247,32 @@ impl<T: Transport> DeviceSession<T> {
             Command::ACK_AMBIENT_SOUND_MODE,
             &body,
         ))?;
+        Ok(())
+    }
+
+    /// Write one A3062 settings frame and return once every byte of it is
+    /// written.
+    ///
+    /// The exact command and body come from [`SettingCommand`], so each call
+    /// writes exactly one frame; for example the limit-high-volume enable flag,
+    /// dB limit and refresh rate are three separate [`SettingCommand`]s and
+    /// three calls.
+    ///
+    /// This method never reads. The device acknowledges with an empty inbound
+    /// frame of the same command and may also push a notification (LDAC is
+    /// confirmed by a separate `01 7F` notification); none of those is a state
+    /// response. Call [`Self::poll_state`] afterwards to read the new value, and
+    /// it will skip them.
+    ///
+    /// Fails with [`SessionError::UnsupportedSetting`] when the model has no
+    /// measured settings block (for example the A3949), and writes nothing in
+    /// that case.
+    pub fn set_setting(&mut self, setting: SettingCommand) -> Result<(), SessionError> {
+        let frame = self
+            .model
+            .setting_frame(setting)
+            .ok_or(SessionError::UnsupportedSetting)?;
+        self.transport.write_all(&frame)?;
         Ok(())
     }
 

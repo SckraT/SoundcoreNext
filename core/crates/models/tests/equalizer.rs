@@ -6,7 +6,7 @@
 
 use soundcore_models::{
     A3062_EQUALIZER_PRESETS, CUSTOM_EQUALIZER_PRESET_ID, EQ_BANDS, EQUALIZER_COMMAND_BODY_LEN,
-    EqualizerPreset, EqualizerState, SoundMode, StateError, VISIBLE_EQ_BANDS,
+    EqualizerPreset, EqualizerState, NO_BUTTON_ACTION, SoundMode, StateError, VISIBLE_EQ_BANDS,
     a3062_equalizer_preset, model_by_code, parse_state_body, parse_state_frame,
 };
 use soundcore_protocol::{Command, Direction, checksum, encode};
@@ -567,6 +567,9 @@ fn a_synthetic_body_parses_band_bytes_as_value_minus_120() {
         body[offset] = byte;
     }
     body[69] = 2;
+    // The settings block must parse too: no double press and a valid dB limit.
+    body[67] = NO_BUTTON_ACTION;
+    body[83] = 80;
 
     let state = parse_state_body(model, &body).expect("parse");
     let equalizer = state.equalizer.expect("equalizer");

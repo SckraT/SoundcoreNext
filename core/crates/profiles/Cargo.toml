@@ -3,7 +3,7 @@ name = "soundcore-profiles"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Saved equalizer profiles: validation and JSON schema v1"
+description = "Saved equalizer profiles: validation, JSON schema v1 and OpenSCL4 transfer import"
 
 [dependencies]
 soundcore-models = { workspace = true }
