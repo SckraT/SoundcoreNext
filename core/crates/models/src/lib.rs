@@ -96,6 +96,18 @@ pub const CUSTOM_EQUALIZER_PRESET_ID: u16 = 0xFEFE;
 /// OpenSCL4's A3062 packet builder and verified on the real device.
 pub const EQUALIZER_COMMAND_BODY_LEN: usize = 53;
 
+/// Number of A3062 equalizer bands the vendored Equalizer page shows: the ten
+/// measured bands minus the two the Soundcore app never exposes.
+pub const VISIBLE_EQ_BANDS: usize = 8;
+
+/// The two A3062 bands the Soundcore app fixes and never shows, in the same raw
+/// dB×10 units as every other band: `0` (0 dB) and `-120` (-12.0 dB).
+///
+/// Every measured built-in preset and OpenSCL4's A3062 equalizer fix them at
+/// these values, so a custom write uses them too; see
+/// [`DeviceModel::custom_equalizer_body`].
+pub const FIXED_EQ_BANDS: [i16; EQ_BANDS - VISIBLE_EQ_BANDS] = [0, -120];
+
 /// One built-in equalizer preset of a model: its id, display name and ten raw
 /// band values.
 ///
@@ -281,6 +293,16 @@ impl EqualizerState {
     pub fn preset(&self) -> Option<&'static EqualizerPreset> {
         a3062_equalizer_preset(self.preset_id)
     }
+
+    /// The eight bands the Equalizer page shows, in raw dB×10 units.
+    ///
+    /// The last two measured bands are fixed by every built-in preset and by
+    /// custom writes; see [`FIXED_EQ_BANDS`].
+    pub fn visible_bands(&self) -> [i16; VISIBLE_EQ_BANDS] {
+        let mut visible = [0i16; VISIBLE_EQ_BANDS];
+        visible.copy_from_slice(&self.bands[..VISIBLE_EQ_BANDS]);
+        visible
+    }
 }
 
 /// The measured A3062 equalizer control: where its block starts in the `01 01`
@@ -433,40 +455,76 @@ impl DeviceModel {
     /// |---:|---|
     /// | 0..2 | preset id, little-endian |
     /// | 2..4 | HearID favorite music genre, from the state |
-    /// | 4..14 | the preset's ten band bytes |
+    /// | 4..14 | the curve's ten band bytes |
     /// | 14..16 | unknown, zero |
-    /// | 16 | HearID enabled: always `0` for a preset write |
+    /// | 16 | HearID enabled: always `0` for an equalizer write |
     /// | 17..27 | HearID volume adjustments, from the state |
     /// | 27..31 | HearID time, big-endian, from the state |
     /// | 31 | HearID type, from the state |
     /// | 32..42 | HearID custom volume adjustments, from the state |
-    /// | 42..52 | the preset's ten band bytes again (active curve) |
+    /// | 42..52 | the curve's ten band bytes again (active curve) |
     /// | 52 | unknown, zero |
     ///
     /// The HearID fields are preserved, and its enabled flag is cleared, so the
-    /// selected preset curve is in effect; this is what OpenSCL4's A3062
-    /// equalizer does.
+    /// selected curve is in effect; this is what OpenSCL4's A3062 equalizer
+    /// does.
     pub fn equalizer_preset_body(
         self,
         current: &EqualizerState,
         preset: &EqualizerPreset,
+    ) -> Option<[u8; EQUALIZER_COMMAND_BODY_LEN]> {
+        self.equalizer_body(current, preset.id, preset.bands)
+    }
+
+    /// The full A3062 `03 87` body that applies a custom curve while keeping the
+    /// device's current HearID block, or `None` when this slice does not
+    /// implement the model's equalizer (for example the deferred A3949).
+    ///
+    /// The body has the same 53-byte shape as [`Self::equalizer_preset_body`],
+    /// with [`CUSTOM_EQUALIZER_PRESET_ID`] as the preset id and a ten-band curve
+    /// made of `visible_bands` followed by [`FIXED_EQ_BANDS`].
+    ///
+    /// `visible_bands` are the eight bands the Equalizer page shows, in the same
+    /// raw dB×10 units as [`EqualizerState::bands`]: `0` is `0 dB`, `-120` is
+    /// `-12.0 dB` and `134` is `+13.4 dB`. Values outside the measured
+    /// `-120..=134` range are clamped to it; the packet byte written is
+    /// `value + 120`. The two invisible bands are fixed as measured, so a
+    /// caller cannot select them.
+    pub fn custom_equalizer_body(
+        self,
+        current: &EqualizerState,
+        visible_bands: [i16; VISIBLE_EQ_BANDS],
+    ) -> Option<[u8; EQUALIZER_COMMAND_BODY_LEN]> {
+        let mut bands = [0i16; EQ_BANDS];
+        bands[..VISIBLE_EQ_BANDS].copy_from_slice(&visible_bands);
+        bands[VISIBLE_EQ_BANDS..].copy_from_slice(&FIXED_EQ_BANDS);
+        self.equalizer_body(current, CUSTOM_EQUALIZER_PRESET_ID, bands)
+    }
+
+    /// Builds the measured 53-byte `03 87` body for an arbitrary preset id and
+    /// ten raw band values.
+    fn equalizer_body(
+        self,
+        current: &EqualizerState,
+        preset_id: u16,
+        bands: [i16; EQ_BANDS],
     ) -> Option<[u8; EQUALIZER_COMMAND_BODY_LEN]> {
         let capability = self.equalizer?;
         if capability.band_count != EQ_BANDS {
             return None;
         }
         let mut body = [0u8; EQUALIZER_COMMAND_BODY_LEN];
-        body[0..2].copy_from_slice(&preset.id.to_le_bytes());
+        body[0..2].copy_from_slice(&preset_id.to_le_bytes());
         body[2..4].copy_from_slice(&current.hear_id[26..28]);
-        let bands = preset.bands.map(band_byte);
-        body[4..14].copy_from_slice(&bands);
+        let band_bytes = bands.map(band_byte);
+        body[4..14].copy_from_slice(&band_bytes);
         // 14..16 are unknown zeroes.
         body[16] = 0;
         body[17..27].copy_from_slice(&current.hear_id[1..11]);
         body[27..31].copy_from_slice(&current.hear_id[11..15]);
         body[31] = current.hear_id[15];
         body[32..42].copy_from_slice(&current.hear_id[16..26]);
-        body[42..52].copy_from_slice(&bands);
+        body[42..52].copy_from_slice(&band_bytes);
         // 52 is an unknown zero.
         Some(body)
     }

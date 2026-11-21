@@ -489,6 +489,31 @@ fn writes_the_exact_a3062_equalizer_preset_frame_once() {
 }
 
 #[test]
+fn writes_the_exact_a3062_custom_equalizer_frame_once() {
+    let model = model_by_code("A3062").expect("A3062");
+    let current = a3062_equalizer_state("Soundcore Signature");
+    // +3.0, -3.0, +6.0, 0, -6.0, +2.0, 0, -2.0 dB in raw dB×10 units.
+    let curve = [30, -30, 60, 0, -60, 20, 0, -20];
+    // No reads are scripted: the write must not try to read the ack.
+    let transport = FakeTransport::default();
+    let mut session = DeviceSession::new(model, transport.clone());
+
+    session
+        .set_custom_equalizer(&current, curve)
+        .expect("write the custom curve");
+
+    assert_eq!(
+        transport.writes(),
+        vec![hex(
+            "08 EE 00 00 00 03 87 3F 00 FE FE 00 00 96 5A B4 78 3C 8C 78 64 78 00 00 \
+             00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF \
+             FF FF 96 5A B4 78 3C 8C 78 64 78 00 00 17"
+        )],
+        "exactly one custom 03 87 frame"
+    );
+}
+
+#[test]
 fn a_deferred_equalizer_model_writes_nothing() {
     // The A3949 equalizer is deliberately deferred: its state block is known
     // but its write body is unverified, so the session refuses the write rather
@@ -508,7 +533,15 @@ fn a_deferred_equalizer_model_writes_nothing() {
     );
     assert_eq!(
         error.to_string(),
-        "equalizer presets are not supported for this model"
+        "equalizer writes are not supported for this model"
+    );
+
+    let error = session
+        .set_custom_equalizer(&current, [0; 8])
+        .expect_err("the A3949 custom equalizer is deferred");
+    assert!(
+        matches!(error, SessionError::UnsupportedEqualizer),
+        "unexpected error: {error}"
     );
     assert!(transport.writes().is_empty(), "nothing may be written");
 }

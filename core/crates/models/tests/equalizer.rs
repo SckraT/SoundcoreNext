@@ -6,8 +6,8 @@
 
 use soundcore_models::{
     A3062_EQUALIZER_PRESETS, CUSTOM_EQUALIZER_PRESET_ID, EQ_BANDS, EQUALIZER_COMMAND_BODY_LEN,
-    EqualizerPreset, EqualizerState, SoundMode, StateError, a3062_equalizer_preset, model_by_code,
-    parse_state_body, parse_state_frame,
+    EqualizerPreset, EqualizerState, SoundMode, StateError, VISIBLE_EQ_BANDS,
+    a3062_equalizer_preset, model_by_code, parse_state_body, parse_state_frame,
 };
 use soundcore_protocol::{Command, Direction, checksum, encode};
 
@@ -244,6 +244,73 @@ fn builds_the_exact_a3062_preset_body_and_frame() {
 }
 
 #[test]
+fn builds_the_exact_a3062_custom_body_and_frame() {
+    let fixture = fixture();
+    let model = model_by_code("A3062").expect("A3062");
+    // Every custom write starts from the state the device reported, whose
+    // HearID block is copied into the body.
+    let current = a3062_state(&fixture.presets[0])
+        .equalizer
+        .expect("the parsed equalizer");
+    // The distinctive measured curve encoded as raw dB×10 units:
+    // +3.0, -3.0, +6.0, 0, -6.0, +2.0, 0, -2.0 dB.
+    let curve = [30, -30, 60, 0, -60, 20, 0, -20];
+
+    let body = model
+        .custom_equalizer_body(&current, curve)
+        .expect("the A3062 custom body");
+    assert_eq!(body.len(), EQUALIZER_COMMAND_BODY_LEN);
+    assert_eq!(
+        frame_hex(&body),
+        "FE FE 00 00 96 5A B4 78 3C 8C 78 64 78 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 \
+         00 00 00 00 FF FF FF FF FF FF FF FF FF FF 96 5A B4 78 3C 8C 78 64 78 00 00",
+        "the 53-byte custom equalizer body"
+    );
+    assert_eq!(
+        u16::from_le_bytes([body[0], body[1]]),
+        CUSTOM_EQUALIZER_PRESET_ID,
+        "a custom write reports preset id 0xFEFE"
+    );
+    // Band bytes are value + 120. The last two bands are the measured fixed
+    // ones, [0, -120] raw, and not whatever the current state reports.
+    assert_eq!(
+        &body[4..14],
+        &[0x96, 0x5A, 0xB4, 0x78, 0x3C, 0x8C, 0x78, 0x64, 0x78, 0x00]
+    );
+    assert_eq!(&body[42..52], &body[4..14], "the active curve is repeated");
+
+    let frame = encode(Direction::Outbound, Command::EQUALIZER, &body);
+    assert_eq!(
+        frame_hex(&frame),
+        "08 EE 00 00 00 03 87 3F 00 FE FE 00 00 96 5A B4 78 3C 8C 78 64 78 00 00 00 00 \
+         FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF \
+         96 5A B4 78 3C 8C 78 64 78 00 00 17",
+        "the exact 03 87 frame"
+    );
+    assert_eq!(frame.len(), 63);
+}
+
+#[test]
+fn clamps_custom_bands_to_the_measured_range() {
+    let fixture = fixture();
+    let model = model_by_code("A3062").expect("A3062");
+    let current = a3062_state(&fixture.presets[0])
+        .equalizer
+        .expect("the parsed equalizer");
+
+    // Values at and beyond both ends of the measured -120..=134 range.
+    let body = model
+        .custom_equalizer_body(&current, [135, i16::MAX, -121, i16::MIN, 134, -120, 0, -10])
+        .expect("the A3062 custom body");
+    assert_eq!(
+        &body[4..14],
+        &[254, 254, 0, 0, 254, 0, 120, 110, 120, 0],
+        "out-of-range bands clamp to -120..=134 and then add 120"
+    );
+    assert_eq!(&body[42..52], &body[4..14]);
+}
+
+#[test]
 fn keeps_the_state_hear_id_fields_but_clears_the_enabled_flag() {
     let fixture = fixture();
     let model = model_by_code("A3062").expect("A3062");
@@ -282,6 +349,18 @@ fn keeps_the_state_hear_id_fields_but_clears_the_enabled_flag() {
     assert_eq!(&body[32..42], &[100; 10]);
     // ...but the enabled flag is cleared so the preset curve is in effect.
     assert_eq!(body[16], 0);
+
+    // A custom write preserves the same HearID fields and clears the flag.
+    let custom = model
+        .custom_equalizer_body(&current, [10, 20, 30, 40, 50, 60, 70, 80])
+        .expect("the A3062 custom body");
+    assert_eq!(&custom[0..2], &CUSTOM_EQUALIZER_PRESET_ID.to_le_bytes());
+    assert_eq!(&custom[2..4], &body[2..4]);
+    assert_eq!(&custom[17..27], &body[17..27]);
+    assert_eq!(&custom[27..31], &body[27..31]);
+    assert_eq!(custom[31], 2);
+    assert_eq!(&custom[32..42], &body[32..42]);
+    assert_eq!(custom[16], 0, "HearID is disabled for a custom curve too");
 }
 
 #[test]
@@ -307,6 +386,23 @@ fn custom_preset_id_is_not_a_built_in_preset() {
     assert_eq!(
         equalizer.bands,
         [-120, -110, -100, -90, -80, -70, -60, -50, -40, -30]
+    );
+    assert_eq!(
+        equalizer.visible_bands(),
+        [-120, -110, -100, -90, -80, -70, -60, -50],
+        "only the first eight of the ten parsed bands are visible"
+    );
+
+    // Rebuilding the custom body from this state keeps its visible curve but
+    // writes the measured fixed invisible bands, not the -40/-30 the crafted
+    // state carries.
+    let body = model
+        .custom_equalizer_body(&equalizer, equalizer.visible_bands())
+        .expect("the A3062 custom body");
+    assert_eq!(
+        &body[4..14],
+        &[0, 10, 20, 30, 40, 50, 60, 70, 120, 0],
+        "invisible bands are fixed at 0 dB and -12.0 dB"
     );
 }
 
@@ -355,6 +451,12 @@ fn a3949_equalizer_is_explicitly_deferred() {
         .expect("the parsed A3062 equalizer");
     let preset: &EqualizerPreset = a3062_equalizer_preset(3).expect("a built-in preset");
     assert!(model.equalizer_preset_body(&current, preset).is_none());
+    assert!(
+        model
+            .custom_equalizer_body(&current, [0; VISIBLE_EQ_BANDS])
+            .is_none(),
+        "the deferred model has no custom write body either"
+    );
 }
 
 #[test]
