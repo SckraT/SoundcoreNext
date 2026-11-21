@@ -126,6 +126,8 @@ pub enum ConnectFailure {
     NoService,
     /// The catalog lists the model, but the core has no state parser for it yet.
     NoParser,
+    /// The model has no measured sound-mode control, so no mode can be sent.
+    NoSoundMode,
     /// The device answered, but its battery layout is not implemented yet.
     UnsupportedLayout,
     /// The device answered with bytes that are not a valid state frame.
@@ -154,6 +156,7 @@ impl ConnectFailure {
             SessionError::Io(error) => Self::Transport(error.to_string()),
             SessionError::Protocol(_) => Self::Protocol,
             SessionError::UnsupportedLayout => Self::UnsupportedLayout,
+            SessionError::UnsupportedSoundMode => Self::NoSoundMode,
         }
     }
 
@@ -200,6 +203,9 @@ impl ConnectFailure {
             }
             Self::NoParser => {
                 "The app cannot read this model's state yet, so its battery levels are unavailable.".into()
+            }
+            Self::NoSoundMode => {
+                "This model does not expose the sound mode the app can change.".into()
             }
             Self::UnsupportedLayout => {
                 "This model reports a battery layout the app cannot read yet, so battery levels are unavailable.".into()
@@ -1063,6 +1069,7 @@ mod tests {
                 scale,
             }),
             single_battery: None,
+            sound_mode: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,
@@ -1082,6 +1089,7 @@ mod tests {
                 charging: None,
                 firmware: Some("04.39".into()),
             }),
+            sound_mode: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,
@@ -1229,6 +1237,14 @@ mod tests {
         assert_eq!(failure.kind(), FailureKind::Other);
         assert_eq!(failure.connection(), Connection::Failed);
         assert!(readable(&failure.text()).contains("battery"));
+    }
+
+    #[test]
+    fn a_model_without_a_measured_sound_mode_is_explained() {
+        let failure = ConnectFailure::from_session(SessionError::UnsupportedSoundMode);
+        assert_eq!(failure.kind(), FailureKind::Other);
+        assert_eq!(failure.connection(), Connection::Failed);
+        assert!(readable(&failure.text()).contains("sound mode"));
     }
 
     #[test]

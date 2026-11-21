@@ -6,7 +6,7 @@ use std::io;
 use std::rc::Rc;
 
 use soundcore_models::BatteryScale;
-use soundcore_models::model_by_code;
+use soundcore_models::{SoundMode, model_by_code};
 use soundcore_protocol::{Command, Direction, ParseError, encode, request};
 use soundcore_session::{DeviceSession, ProtocolError, SessionError, Transport};
 
@@ -25,6 +25,30 @@ fn a3949_frame() -> Vec<u8> {
     let fixture: Fixture =
         serde_json::from_str(include_str!("../../../data/a3949-state.json")).expect("fixture");
     hex(&fixture.frame_hex)
+}
+
+#[derive(serde::Deserialize)]
+struct SoundModeFixture {
+    modes: Vec<SoundModeFrame>,
+}
+
+#[derive(serde::Deserialize)]
+struct SoundModeFrame {
+    mode: String,
+    frame_hex: String,
+}
+
+/// The real sanitized `01 01` frame captured right after writing `mode`.
+fn a3062_mode_frame(mode: &str) -> Vec<u8> {
+    let fixture: SoundModeFixture =
+        serde_json::from_str(include_str!("../../../data/a3062-sound-modes.json"))
+            .expect("fixture");
+    fixture
+        .modes
+        .iter()
+        .find(|entry| entry.mode == mode)
+        .map(|entry| hex(&entry.frame_hex))
+        .unwrap_or_else(|| panic!("the fixture records {mode}"))
 }
 
 /// Scripted transport: `reads` are handed out one `read` call at a time.
@@ -310,6 +334,101 @@ fn reports_a_failed_request_write_as_an_io_error() {
     let error = session.poll_state().expect_err("write failure");
     assert!(
         matches!(error, SessionError::Io(ref io_error) if io_error.kind() == io::ErrorKind::BrokenPipe),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn writes_the_exact_measured_a3062_sound_mode_frames() {
+    let model = model_by_code("A3062").expect("A3062");
+    for (mode, expected_frame) in [
+        (
+            SoundMode::NoiseCanceling,
+            "08 EE 00 00 00 06 81 10 00 00 51 01 01 00 05 E5",
+        ),
+        (
+            SoundMode::Transparency,
+            "08 EE 00 00 00 06 81 10 00 01 51 01 01 00 05 E6",
+        ),
+        (
+            SoundMode::Normal,
+            "08 EE 00 00 00 06 81 10 00 02 51 01 01 00 05 E7",
+        ),
+    ] {
+        // No reads are scripted: the write must not try to read the ack.
+        let transport = FakeTransport::default();
+        let mut session = DeviceSession::new(model, transport.clone());
+
+        session.set_sound_mode(mode).expect("write the mode");
+        assert_eq!(transport.writes(), vec![hex(expected_frame)], "{mode:?}");
+    }
+}
+
+#[test]
+fn a_model_without_a_measured_sound_mode_writes_nothing() {
+    let model = model_by_code("A3949").expect("A3949");
+    let transport = FakeTransport::default();
+    let mut session = DeviceSession::new(model, transport.clone());
+
+    let error = session
+        .set_sound_mode(SoundMode::NoiseCanceling)
+        .expect_err("the P20i has no mode");
+    assert!(
+        matches!(error, SessionError::UnsupportedSoundMode),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "sound modes were not measured for this model"
+    );
+    assert!(transport.writes().is_empty(), "nothing may be written");
+}
+
+#[test]
+fn skips_the_mode_ack_and_a_notification_before_the_next_state() {
+    let model = model_by_code("A3062").expect("A3062");
+    // The measured ack is the empty inbound `06 81` frame; a battery
+    // notification may arrive before the state answer, too.
+    let ack = encode(Direction::Inbound, Command::AMBIENT_SOUND_MODE, &[]);
+    assert_eq!(ack, hex("09 FF 00 00 01 06 81 0A 00 9A"));
+    let notification = encode(Direction::Inbound, Command::BATTERY, &[5]);
+    let state_frame = a3062_mode_frame("Transparency");
+    let mut scripted = ack;
+    scripted.extend_from_slice(&notification);
+    scripted.extend_from_slice(&state_frame);
+    let transport = FakeTransport::chunks([scripted]);
+    let mut session = DeviceSession::new(model, transport.clone());
+
+    session
+        .set_sound_mode(SoundMode::Transparency)
+        .expect("write the mode");
+    let state = session.poll_state().expect("state after the ack");
+    assert_eq!(state.sound_mode, Some(SoundMode::Transparency));
+    assert_eq!(
+        transport.writes(),
+        vec![
+            encode(
+                Direction::Outbound,
+                Command::AMBIENT_SOUND_MODE,
+                &[1, 0x51, 0x01, 0x01, 0x00, 0x05],
+            ),
+            request(Command::STATE),
+        ],
+        "one mode frame, then one state request"
+    );
+}
+
+#[test]
+fn reports_a_failed_mode_write_as_an_io_error() {
+    let model = model_by_code("A3062").expect("A3062");
+    let transport = FakeTransport::failing_writes(io::ErrorKind::ConnectionReset);
+    let mut session = DeviceSession::new(model, transport);
+
+    let error = session
+        .set_sound_mode(SoundMode::Normal)
+        .expect_err("write failure");
+    assert!(
+        matches!(error, SessionError::Io(ref io_error) if io_error.kind() == io::ErrorKind::ConnectionReset),
         "unexpected error: {error}"
     );
 }
