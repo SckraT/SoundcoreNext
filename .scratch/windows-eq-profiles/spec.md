@@ -19,7 +19,9 @@ Let the user save the current custom equalizer curve as a named profile, apply i
 
 ## Out of scope
 
-- Import/export file/clipboard, legacy migration, profile export selection.
+- Import/export file/clipboard, legacy migration, profile export selection. The
+  vendored **Import and export** panel is rendered on the editable A3062 page
+  but stays inert: its buttons do nothing (this slice makes no `.slint` edits).
 - Profiles for other models; HearID/DRC.
 - Android/Linux.
 
@@ -38,10 +40,10 @@ Let the user save the current custom equalizer curve as a named profile, apply i
 3. Applying a profile writes one `03 87` custom curve, re-polls, and marks the profile in effect.
 4. Deleting removes it after confirmation.
 5. Profiles persist across app restart (JSON file in app data); invalid/missing file starts empty without crashing.
-6. Duplicate name asks to replace; empty name is rejected; invalid bands are rejected.
-7. No import/export/migration controls are activated; A3949 deferred.
+6. Duplicate name asks to replace; an empty name is rejected in the dialog. Invalid bands are rejected by the profile model and on document load; the page's band edits clamp to the measured range, so the page itself cannot produce an invalid band.
+7. The vendored Import and export panel is visible but inert (its buttons do nothing); A3949 deferred.
 8. Screenshot stored/linked; no MAC/serial.
-9. Failed write/read shows a readable error.
+9. A failed profile write shows the readable page error banner (and a stderr log) and leaves the saved list and document unchanged; an unreadable document at startup is logged to stderr and loads empty.
 
 ## Closure
 

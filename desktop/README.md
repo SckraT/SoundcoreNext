@@ -69,12 +69,18 @@ layout, components, pages, icons, fonts and art.
   missing, unreadable or invalid document starts empty and is logged to stderr
   instead of crashing. A duplicate name asks before replacing, an empty or
   whitespace-only name is rejected with a dialog message, and out-of-range bands
-  are rejected by the core model before they can be stored.
+  are clamped by the page's edits to the measured range and rejected by the core
+  model and on document load before they can be stored. A save or delete whose
+  document cannot be written is not silent: the failed change is rolled back (the
+  list and the file stay as they were), the page error banner says
+  “Could not save equalizer profiles” and the reason is also logged to stderr.
 - Import/export file or clipboard transfer, legacy migration and HearID stay out
-  of scope. The vendored **Import and export** panel is visible but inert: no
-  file or clipboard action is wired, its buttons do nothing, the export
-  selection count stays `0` and no transfer note ever appears; the legacy
-  migration banner stays hidden.
+  of scope. The vendored **Import and export** panel is rendered by the page when
+  it offers saved profiles (the editable A3062 page, with or without saved
+  profiles), so it is visible but inert: no file or clipboard action is wired,
+  its buttons do nothing, the export selection count stays `0` and no transfer
+  note ever appears; the legacy migration banner stays hidden. It is not hidden,
+  because hiding it would need a vendored `.slint` edit.
 - The P20i (A3949) equalizer is deliberately deferred in this slice: the
   committed A3949 state carries an equalizer block at body 32..44, but no A3949
   `03 87` write body is verified, so the page stays hidden and no equalizer
