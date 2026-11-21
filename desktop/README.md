@@ -12,7 +12,7 @@ layout, components, pages, icons, fonts and art.
 - The app is built as crate version `2.0.0`, and `AppState.app-version` is
   filled from that crate version, so the About section says
   “OpenSCL4 2.0.0”.
-- The vendored **Add Device** dialog is populated from the clean-room catalog
+- The vendored **Add Device** dialog is populated from the model catalog
   (`core/crates/models/src/catalog.rs`) through `src/catalog_adapter.rs`: all
   39 supported models as cards with their name, code and device art.
 - The existing category chips filter by form factor: **All**, **Earbuds**
@@ -25,11 +25,11 @@ layout, components, pages, icons, fonts and art.
   and marks the likely match with “looks like the chosen model”.
 - The MVP connects to real paired devices over classic Bluetooth RFCOMM. The
   Windows transport (`src/transport_windows.rs`) opens the model's vendor
-  service with the standard SPP fallback; the clean-room session
+  service with the standard SPP fallback; the session
   (`core/crates/session`) writes the `01 01` state request and parses the
-  answer, and writes the measured A3062 `06 81` sound-mode frame; **Overview**
-  then shows the connected device's name, code and battery tiles
-  (`src/controller.rs`).
+  answer, and writes the measured A3062 `06 81` sound-mode and `03 87`
+  equalizer frames; **Overview** then shows the connected device's name, code
+  and battery tiles (`src/controller.rs`).
 - Battery tiles are left/right for the TWS models. Single-battery models show
   one whole-device tile on their own step scale, e.g. a raw `2/10` reads `20 %`.
 - The **Sound mode** page is implemented for the models the core measures a mode
@@ -39,7 +39,7 @@ layout, components, pages, icons, fonts and art.
   acknowledgement) and selects the mode the device reports. A model without a
   measured sound mode, e.g. the P20i (A3949), gets no Sound mode page and no
   mode frame.
-- The **Equalizer** page is implemented for the models the core measures an
+- The **Equalizer** page is implemented for the models the core reports an
   equalizer for — today the Space One Pro (A3062). On connect the page shows the
   device's current built-in preset and its read-only curve: the 22 catalog
   presets as chips (the current one checked) and the eight visible band values
@@ -48,8 +48,10 @@ layout, components, pages, icons, fonts and art.
   selects the preset, its name and its curve from what the device reports.
   Custom band editing, saved profiles and import/export stay out of scope: the
   page is read-only, so the band sliders/fields and those controls are hidden
-  and no band value can be written. A model without a measured equalizer, e.g.
-  the P20i (A3949), gets no Equalizer page and no preset frame.
+  and no band value can be written. The P20i (A3949) equalizer is deliberately
+  deferred in this slice: the committed A3949 state carries an equalizer block
+  at body 32..44, but no A3949 `03 87` write body is verified, so the page stays
+  hidden and no preset frame is sent for that model.
 - Connecting shows “Connecting…”, and Bluetooth off, not found, timeout and
   unsupported-layout failures each show a readable message instead of a crash.
   Cancel and Retry are wired. The vendored UI has no disconnect control; the
@@ -110,5 +112,6 @@ cargo run
 ## License and attribution
 
 GPL-3.0-or-later. The vendored files keep their upstream copyright; see
-`ui/SOURCE.md` and the root `NOTICE`. Changes to vendored files are recorded in
-the commit that makes them.
+`ui/SOURCE.md` and the root `NOTICE`. The protocol command/response and
+equalizer-preset data adapted from OpenSCL4 is attributed in the root `NOTICE`
+too. Changes to vendored files are recorded in the commit that makes them.

@@ -110,8 +110,8 @@ pub enum SessionError {
     /// The model has no measured sound-mode control, so there is no `06 81`
     /// frame to write.
     UnsupportedSoundMode,
-    /// The model has no measured equalizer control, so there is no `03 87`
-    /// frame to write.
+    /// The model has no equalizer support in this slice, so there is no
+    /// `03 87` frame to write.
     UnsupportedEqualizer,
 }
 
@@ -133,7 +133,7 @@ impl std::fmt::Display for SessionError {
             Self::UnsupportedEqualizer => {
                 write!(
                     formatter,
-                    "equalizer presets were not measured for this model"
+                    "equalizer presets are not supported for this model"
                 )
             }
         }
@@ -253,8 +253,9 @@ impl<T: Transport> DeviceSession<T> {
     /// afterwards to read the preset and bands the device now reports, and it
     /// will skip those frames.
     ///
-    /// Fails with [`SessionError::UnsupportedEqualizer`] when the model has no
-    /// measured equalizer control, and writes nothing in that case.
+    /// Fails with [`SessionError::UnsupportedEqualizer`] when this slice does
+    /// not support the model's equalizer (for example the deliberately deferred
+    /// A3949), and writes nothing in that case.
     pub fn set_equalizer_preset(
         &mut self,
         current: &EqualizerState,
@@ -265,7 +266,7 @@ impl<T: Transport> DeviceSession<T> {
             .equalizer_preset_body(current, preset)
             .ok_or(SessionError::UnsupportedEqualizer)?;
         self.transport
-            .write_all(&encode(Direction::Outbound, Command::ACK_EQUALIZER, &body))?;
+            .write_all(&encode(Direction::Outbound, Command::EQUALIZER, &body))?;
         Ok(())
     }
 

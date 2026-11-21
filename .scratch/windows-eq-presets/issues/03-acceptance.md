@@ -11,8 +11,13 @@ Verify equalizer presets on real A3062 and capture evidence.
 ## Requirements
 
 1. Build/run; connect A3062; open Equalizer.
-2. Verify current preset selected, 10 read-only bands/curve; switch between at least three presets (e.g. Signature, Bass Reducer, Podcast); each writes one `03 87`, re-polls, UI follows.
-3. Verify P20i: no Equalizer page, no `03 87`.
+2. Verify the current preset is selected and the 8 visible read-only bands/curve
+   are shown (the core still parses all 10 band bytes); switch between at least
+   three presets (e.g. Signature, Bass Reducer, Podcast); each writes one
+   `03 87`, re-polls, UI follows.
+3. Verify the A3949 equalizer deferral: no Equalizer page, no `03 87`. This is a
+   limitation, not evidence of absence — the committed A3949 state carries an
+   equalizer block at body 32..44, but no A3949 write body is verified.
 4. Failure path: stopped worker shows readable error; no crash/MAC.
 5. Capture `desktop/equalizer-connected.png`; link from `desktop/README.md`; document out-of-scope custom bands/profiles.
 6. Run all gates.
@@ -21,9 +26,9 @@ Verify equalizer presets on real A3062 and capture evidence.
 ## Acceptance
 
 - [x] Real preset switching verified on A3062.
-- [x] P20i no-page/no-command verified from the real A3949 capture and the
-      controller/session tests; a live re-check was not reproducible this run
-      (device not answering RFCOMM — see Comments).
+- [x] A3949 equalizer deferral (no page/no `03 87`) verified from the real A3949
+      capture and the controller/session unit tests; a live re-check was not
+      reproducible this run (device not answering RFCOMM — see Comments).
 - [x] Screenshot stored/linked; no identifiers.
 - [x] Gates pass; ticket done.
 
@@ -99,14 +104,15 @@ test output and the screenshot mask or omit them.
 
 `cargo test -p soundcore-desktop manual_equalizer_preset_switch -- --ignored --nocapture`
 builds the real `AppWindow`, wires the controller's actions and presses the
-chips through `Actions.eq-preset` on the real device (masked output):
+chips through `Actions.eq-preset` on the real device. Every Bluetooth address is
+masked in full (`<address masked>`); no octet of any address is recorded:
 
 ```
 == A3062 Space One Pro ==
-  candidate soundcore Liberty 4 Pro suggested=false (F4:9D:8A:7C: __:__)
-  candidate soundcore Space One Pro suggested=true (F4:9D:8A:A2: __:__)
-  candidate soundcore P20i suggested=false (A4:C1:39:92: __:__)
-  connected via F4:9D:8A:A2: __:__
+  candidate soundcore Liberty 4 Pro suggested=false (<address masked>)
+  candidate soundcore Space One Pro suggested=true (<address masked>)
+  candidate soundcore P20i suggested=false (<address masked>)
+  connected via <address masked>
   sound-pages: [SoundModes, Equalizer]
   eq-available: true eq-read-only: true
   eq-presets: 22 ids ["0", "1", "3", "4", "5", "6", "7", "8", "9", "10", "11",
@@ -121,7 +127,7 @@ chips through `Actions.eq-preset` on the real device (masked output):
   restored preset "0" bands [0, 0, 0, 0, 0, 0, 0, 0]
   after a stopped worker: error-label "Equalizer profile (connection lost)"
   retry: connected=Connected sound-pages=2 eq-preset="0" error-label=""
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 108 filtered out
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 107 filtered out
 ```
 
 Each switch wrote exactly one measured `03 87` preset frame (53-byte body) and
@@ -129,37 +135,54 @@ re-read the `01 01` state; the committed `FakeTransport` tests assert the exact
 frame, the write-then-poll order, unknown ids writing nothing and a failed
 change stopping the worker.
 
-### P20i (A3949): no page, no preset command — evidence and limitation
+### A3949 (P20i): equalizer deliberately deferred — a limitation, not absence
 
-- **Live re-check not reproducible this run.** `manual_p20i_has_no_equalizer`
-  (three runs) and `manual_paired_connect` (once) enumerated the paired P20i as
-  the suggested A3949 candidate and then failed to open RFCOMM with
-  `The device did not answer in time. Make sure it is turned on and nearby, then
-  try again.` — four ~20 s radio page timeouts across those runs — while the
-  A3062 on the same radio connected and switched presets normally. The P20i was
-  therefore off/in its case or otherwise not pageable, and the live “no
-  Equalizer page” check could not be run. No pairing was changed to work around
-  it. Note that `manual_p20i_has_no_equalizer` returns early when its connect
-  fails, so its own asserts did not run in this state; that early return is
-  ticket 02's test design, not evidence of a pass.
-- **What the no-page/no-command claim rests on (all existing, running tests):**
-  - The committed **real A3949 `01 01` capture** parses with no equalizer block:
-    `sound_pages(A3949 state)` is empty, `EqualizerDisplay::new(Some(A3949), …)`
-    has `available: false`, `preset_count: 0`, no chips and no bands
-    (`the_equalizer_page_is_exposed_only_for_the_a3062`,
-    `the_real_a3949_capture_has_no_sound_mode_page`).
-  - The A3949 model has no equalizer preset catalog, so `preset_options(A3949)`
-    is empty and there is no chip value to click
-    (`the_a3062_equalizer_presets_are_the_twenty_two_catalog_ids_and_names`).
-  - The session refuses the write for a model without a measured equalizer with
-    `SessionError::UnsupportedEqualizer` and writes no frame
-    (`core/crates/session/tests/session.rs::a_model_without_a_measured_equalizer_writes_nothing`).
+- **The A3949 does carry equalizer data.** The committed real A3949 `01 01`
+  capture (`core/data/a3949-state.json`) has an equalizer block at body
+  32..44: preset id `00 00` at body 32..34 and ten band bytes at 34..44
+  (`78 78 78 78 78 78 78 78 78 00` = nine 0 dB bands and a −12.0 dB last band in
+  the same byte = value + 120 mapping as A3062). OpenSCL4's A3949 state parser
+  reads the same block (`CommonEqualizerConfiguration<1, 10>`, right after the
+  16-byte serial), so “the P20i has no equalizer” is **not** a supportable claim
+  and this ticket does not make it.
+- **Why this slice still hides it.** No A3949 `03 87` write body is verified:
+  OpenSCL4 has no A3949 equalizer module (no setting handler and no outbound
+  packet), so an A3949 write would be invented. A3949 equalizer support is
+  therefore deliberately deferred, and the page stays hidden with no `03 87`
+  path. This is a recorded limitation.
+- **What the deferral rests on (unit tests, all running):**
+  - The A3949 model has no equalizer capability, catalog or write body, and its
+    committed capture's block bytes at body 32..44 are asserted as the
+    known-but-deferred data
+    (`core/crates/models/tests/equalizer.rs::a3949_equalizer_is_explicitly_deferred`);
+    the committed capture still parses with `state.equalizer == None` because
+    the capability is deliberately absent.
+  - `sound_pages(A3949 state)` is empty, `preset_options(A3949)` is empty,
+    `EqualizerDisplay::new(Some(A3949), …)` has `available: false`,
+    `preset_count: 0`, no chips and no bands, and no chip value is selectable
+    (`the_equalizer_page_is_exposed_for_the_a3062_and_deferred_for_the_a3949`);
+    the real A3949 capture also has no sound mode page
+    (`the_real_a3949_capture_has_no_sound_mode_page`).
+  - The session refuses the write with `SessionError::UnsupportedEqualizer` and
+    writes no frame
+    (`core/crates/session/tests/session.rs::a_deferred_equalizer_model_writes_nothing`).
   - In the app, `select_equalizer_preset` ignores the click when the model has
     no chips, and the device worker only has a `03 87` path when the connect
-    state reported an equalizer; a P20i worker ends before its command loop.
-- This run therefore confirms the P20i page/command absence from the real
-  device's committed state capture and the controller/session unit tests, not
-  from a live P20i session.
+    state reported an equalizer; an A3949 worker ends before its command loop.
+- **Live re-check not reproducible this run.** The former
+  `manual_p20i_has_no_equalizer` hardware test was removed in the review-fix
+  pass: it returned early when its connect failed, so it could pass without
+  testing anything, and its premise (“no A3949 equalizer”) was wrong. During the
+  acceptance run, `manual_paired_connect` (once) and the old P20i equalizer test
+  (three runs) enumerated the paired P20i as the suggested A3949 candidate and
+  then failed to open RFCOMM with `The device did not answer in time. Make sure
+  it is turned on and nearby, then try again.` — four ~20 s radio page timeouts —
+  while the A3062 on the same radio connected and switched presets normally. The
+  P20i was therefore off/in its case or otherwise not pageable. No pairing was
+  changed to work around it.
+- This run therefore confirms the A3949 page/command deferral from the real
+  device's committed state capture and the core/controller/session unit tests,
+  not from a live P20i session.
 
 ### Failure path
 
@@ -174,14 +197,20 @@ change stopping the worker.
   power-off of the connected Space One Pro during a preset change was not
   reproduced, to avoid changing the user's device state.
 
-### Scope deviations recorded
+### Recorded deviations and limitations
 
-- The spec's AC2 says “10-band read-only curve”; the page shows **8 visible
-  bands** (100 Hz…12.8 kHz) in the −12.0…+13.4 dB range, as measured and already
-  documented in ticket 02: the ten state band bytes exist but the last two are
-  fixed by every preset, OpenSCL4's A3062 equalizer exposes 8 visible bands and
-  the Soundcore app labels the same eight. All ten raw bands still parse in the
-  core. The screenshot and README say “eight visible bands”.
+- **8 visible bands, 10 parsed.** The page shows **8 visible bands**
+  (100 Hz…12.8 kHz) in the −12.0…+13.4 dB range, as measured and documented in
+  ticket 02: the ten state band bytes exist but the last two are fixed by every
+  preset, OpenSCL4's A3062 equalizer exposes 8 visible bands and the Soundcore
+  app labels the same eight. All ten raw bands still parse in the core. The
+  screenshot and README say “eight visible bands”; the review-fix pass corrected
+  the spec's AC2 from “10-band” to “8 visible bands” so the spec, tickets and
+  implementation agree.
+- **A3949 equalizer deferred.** Its equalizer block (body 32..44) is known, but
+  no A3949 write body is verified, so the page is hidden and no `03 87` is sent
+  for that model. This is a limitation, not evidence of absence; see the A3949
+  section above.
 - No `.slint` file, no dependency and no core code changed by this ticket: only
   `desktop/equalizer-connected.png`, `desktop/README.md` and this ticket.
 
@@ -189,7 +218,7 @@ change stopping the worker.
 
 ```
 cd desktop
-cargo test                                  # 102 passed; 0 failed; 7 ignored
+cargo test                                  # 102 passed; 0 failed; 6 ignored
 cargo fmt --all -- --check                  # clean
 cargo clippy --all-targets -- -D warnings   # clean (only vendored-Slint build warnings)
 cargo build                                 # ok
@@ -200,7 +229,40 @@ cargo fmt --all -- --check                  # clean
 cargo clippy --all-targets -- -D warnings   # clean
 ```
 
-The integration tip `integration/windows-eq-presets` was already this branch's
-base (`fb99fe7`), so `git merge integration/windows-eq-presets` reported
-“Already up to date” and no merge commit was needed; the gates were re-run after
-that check.
+The review-fix branch `ticket/eq-04-review-fixes` was based on the integration
+tip `b795c5e`; after the fixes `git merge integration/windows-eq-presets`
+reported “Already up to date”, so no merge commit was needed, and the gates were
+re-run on that tree.
+
+### Review fixes (2026-11-21)
+
+- **Docs/licensing.** README no longer calls the core clean-room and no longer
+  says protocol facts come only from the wiki: the core adapts OpenSCL4's
+  authorized command/response, state-offset and preset data under GPL-3.0, and
+  `NOTICE` now attributes the A3062 `03 87` body layout, the A3062 preset table
+  and band frequencies, and the deferred A3949 block. README gained an A3062
+  equalizer status row and an A3949-deferral row, the
+  `core/data/a3062-eq-presets.json` fixture and the `.scratch/windows-eq-presets/`
+  layout entry.
+- **Redaction.** Every byte of every Bluetooth address is removed from this
+  ticket: the former transcript printed four of six octets. The hardware-test
+  helper now prints `<address masked>` and no run output contains an address
+  octet.
+- **Spec honesty.** AC2 now says 8 visible read-only bands (the core still parses
+  all 10) with the measured evidence; the A3062 preset count is the actual
+  22-entry OpenSCL4 list everywhere (the “13” in ticket 01 is corrected); AC4 now
+  records the A3949 deferral instead of the false “P20i has no EQ” premise, and
+  the A3949 section above documents the block at body 32..44.
+- **Vacuous test removed.** `manual_p20i_has_no_equalizer` is gone: it returned
+  early when its connect failed (so it could pass without testing anything) and
+  its premise was wrong. The deferral is covered by the running unit tests named
+  in the A3949 section.
+- **Code quality.** The protocol constant is `Command::EQUALIZER` (the same
+  `03 87` is outbound write and inbound ack); the unused
+  `EqualizerCapability::custom_preset_id` field was removed while
+  `CUSTOM_EQUALIZER_PRESET_ID` still drives `is_custom`.
+- **Re-verification.** `manual_equalizer_preset_switch` was re-run on the real
+  A3062 after the fixes: it switched Acoustic/Bass Reducer/Classical, re-polled
+  the measured curves and restored the preset found on connect (Soundcore
+  Signature, id 0) — the output above. The device was left as found; the gates
+  below are the final counts after the fixes.

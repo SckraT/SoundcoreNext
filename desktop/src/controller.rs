@@ -1,5 +1,5 @@
 //! The desktop controller: wires the vendored UI to the Windows Bluetooth
-//! transport and the clean-room session.
+//! transport and the session.
 //!
 //! The controller keeps every `AppWindow` access on the Slint thread. Bluetooth
 //! work happens on worker threads that report results over one `mpsc` channel;
@@ -167,7 +167,9 @@ pub fn mode_for_index(index: i32) -> Option<SoundMode> {
 }
 
 /// The sidebar pages of a parsed state: Sound mode and Equalizer only when the
-/// device reports them, so a P20i never shows either page.
+/// device reports a measured mode and a supported equalizer. A P20i has no
+/// measured sound mode, and its equalizer is deliberately deferred in this
+/// slice, so it shows neither page.
 pub fn sound_pages(sound_mode: Option<SoundMode>, has_equalizer: bool) -> Vec<Page> {
     let mut pages = Vec::new();
     if sound_mode.is_some() {
@@ -199,7 +201,8 @@ pub const EQ_BAND_HZ: [u16; EQ_VISIBLE_BANDS] = [100, 200, 400, 800, 1600, 3200,
 /// catalog's display order. The chip value is the decimal preset id the state
 /// reports, so a click names exactly one catalog entry (the page compares the
 /// value with `eq-preset`, which is also the id string); the label is the
-/// preset's name. A model without a measured equalizer gets no chips.
+/// preset's name. A model whose equalizer this slice does not implement (the
+/// deferred A3949) gets no chips.
 pub fn preset_options(model: Option<DeviceModel>) -> Vec<ModeOption> {
     model
         .map(DeviceModel::equalizer_presets)
@@ -1165,9 +1168,9 @@ fn drain_events(inner: &Rc<Inner>) {
                 if attempt == inner.connect.get()
                     && let Some(window) = inner.ui.upgrade()
                 {
-                    // Only a connected model with a measured mode or equalizer
-                    // keeps its worker (and socket) for writes; everything else
-                    // ends as in the MVP.
+                    // Only a connected model with a measured mode or a
+                    // supported equalizer keeps its worker (and socket) for
+                    // writes; everything else ends as in the MVP.
                     let keeps_worker = matches!(
                         &outcome,
                         ConnectOutcome::Connected(_, state)
@@ -1333,9 +1336,10 @@ fn serve_device<T: Transport>(
         attempt,
         outcome: ConnectOutcome::Connected(model, Box::new(state)),
     });
-    // A model without a measured mode or equalizer has nothing this worker can
-    // write; ending it closes the socket as the MVP did. Any other model keeps
-    // its session open for the `06 81` and `03 87` writes.
+    // A model with neither a measured mode nor a supported equalizer has
+    // nothing this worker can write; ending it closes the socket as the MVP
+    // did. Any other model keeps its session open for the `06 81` and `03 87`
+    // writes.
     if !has_sound_mode && !has_equalizer {
         return;
     }
@@ -1843,8 +1847,8 @@ fn set_option(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, index: i3
 /// callback, so no band value can be written.
 fn select_equalizer_preset(window: &AppWindow, inner: &Rc<Inner>, value: &str) {
     let state = window.global::<AppState>();
-    // No connection, or a model without a measured equalizer, means no chips and
-    // no `03 87` frame.
+    // No connection, or a model whose equalizer is deferred (the A3949), means
+    // no chips and no `03 87` frame.
     if state.get_connection() != Connection::Connected || state.get_eq_presets().row_count() == 0 {
         return;
     }
@@ -2532,10 +2536,10 @@ mod tests {
             .expect("the catalog has Bass Booster");
         // The catalog's unusual id 0x7E7E, as a decimal string.
         assert_eq!(bass_booster.value.as_str(), "32382");
-        // A model without a measured equalizer offers no chips.
+        // A model whose equalizer is deferred offers no chips.
         assert!(
             preset_options(soundcore_models::model_by_code("A3949")).is_empty(),
-            "the P20i has no equalizer presets"
+            "the A3949 equalizer is deferred in this slice"
         );
         assert!(preset_options(None).is_empty());
     }
@@ -2556,7 +2560,7 @@ mod tests {
                 "{value:?} is not a chip"
             );
         }
-        // The P20i offers no chips, so no value selects anything.
+        // The deferred A3949 offers no chips, so no value selects anything.
         let p20i = preset_options(soundcore_models::model_by_code("A3949"));
         assert!(p20i.is_empty());
         assert_eq!(selectable_preset_id(&p20i, "0"), None);
@@ -2697,7 +2701,7 @@ mod tests {
     }
 
     #[test]
-    fn the_equalizer_page_is_exposed_only_for_the_a3062() {
+    fn the_equalizer_page_is_exposed_for_the_a3062_and_deferred_for_the_a3949() {
         let a3062 = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
         let a3062_state = soundcore_models::parse_state_frame(a3062, &captured_a3062_frame())
             .expect("the A3062 capture parses");
@@ -2706,10 +2710,25 @@ mod tests {
             vec![Page::SoundModes, Page::Equalizer]
         );
 
+        // The A3949's equalizer is deliberately deferred in this slice: the
+        // real capture's block (body 32..44) is known, but no A3949 `03 87`
+        // write body is verified, so the model has no capability, catalog or
+        // page and no chip value is selectable. This is a limitation, not a
+        // claim that the model has no equalizer.
         let a3949 = soundcore_models::model_by_code("A3949").expect("A3949 is a state model");
         let a3949_state = soundcore_models::parse_state_frame(a3949, &captured_a3949_frame())
             .expect("the A3949 capture parses");
+        assert!(
+            a3949_state.equalizer.is_none(),
+            "A3949 equalizer parsing is deferred"
+        );
         assert!(sound_pages(a3949_state.sound_mode, a3949_state.equalizer.is_some()).is_empty());
+        assert!(preset_options(Some(a3949)).is_empty());
+        assert_eq!(
+            selectable_preset_id(&preset_options(Some(a3949)), "0"),
+            None,
+            "no chip value is offered, so no preset click can name one"
+        );
         let display = EqualizerDisplay::new(Some(a3949), a3949_state.equalizer.as_ref());
         assert!(!display.available);
         assert_eq!(display.preset_count, 0);
@@ -3869,54 +3888,6 @@ mod tests {
         disconnect(&ui, &inner);
     }
 
-    /// Manual hardware check that a P20i never offers the Equalizer page:
-    ///
-    /// ```text
-    /// cargo test -p soundcore-desktop manual_p20i_has_no_equalizer -- --ignored --nocapture
-    /// ```
-    ///
-    /// Connects the suggested A3949 and asserts the page, the chips, the bands
-    /// and the preset stay empty; the `eq-preset` action is then ignored, so no
-    /// `03 87` write has a path on this model. Addresses are masked.
-    #[test]
-    #[ignore = "manual hardware check: needs a paired P20i"]
-    fn manual_p20i_has_no_equalizer() {
-        let ui = AppWindow::new().expect("the shell window builds");
-        let inner = test_inner(&ui);
-        wire_actions(&ui, &inner);
-        if connect_real_device(&ui, &inner, "A3949").is_none() {
-            return;
-        }
-        let state = ui.global::<AppState>();
-        println!(
-            "  sound-pages: {} eq-available: {} eq-presets: {} eq-bands: {} eq-preset: {:?}",
-            state.get_sound_pages().row_count(),
-            state.get_eq_available(),
-            state.get_eq_presets().row_count(),
-            state.get_eq_bands().row_count(),
-            state.get_eq_preset()
-        );
-        assert_eq!(state.get_sound_pages().row_count(), 0, "no page");
-        assert!(!state.get_eq_available(), "the page is unavailable");
-        assert_eq!(state.get_eq_presets().row_count(), 0, "no chips");
-        assert_eq!(state.get_eq_bands().row_count(), 0, "no bands");
-        assert_eq!(state.get_eq_preset().as_str(), "", "no selected preset");
-
-        click_preset(&ui, "0");
-        std::thread::sleep(Duration::from_millis(300));
-        drain_events(&inner);
-        assert_eq!(state.get_eq_presets().row_count(), 0);
-        assert_eq!(state.get_eq_bands().row_count(), 0);
-        assert_eq!(state.get_eq_preset().as_str(), "");
-        assert_eq!(
-            state.get_error_label().as_str(),
-            "",
-            "a P20i chip click changes nothing"
-        );
-        println!("  eq-preset click ignored: no page, no 03 87 path");
-        disconnect(&ui, &inner);
-    }
-
     /// The battery tiles of an Overview, as plain values for test output.
     fn shown_batteries(state: &AppState<'_>) -> Vec<(i32, String)> {
         state
@@ -3946,7 +3917,9 @@ mod tests {
         }
     }
 
-    fn masked_mac(mac: &str) -> String {
-        format!("{} __:__", &mac[..12])
+    /// A Bluetooth address for test output. Every octet is replaced: no part of
+    /// a real address may reach a log, a terminal transcript or a ticket.
+    fn masked_mac(_mac: &str) -> String {
+        "<address masked>".to_owned()
     }
 }

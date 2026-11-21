@@ -489,7 +489,10 @@ fn writes_the_exact_a3062_equalizer_preset_frame_once() {
 }
 
 #[test]
-fn a_model_without_a_measured_equalizer_writes_nothing() {
+fn a_deferred_equalizer_model_writes_nothing() {
+    // The A3949 equalizer is deliberately deferred: its state block is known
+    // but its write body is unverified, so the session refuses the write rather
+    // than sending an invented `03 87` frame.
     let model = model_by_code("A3949").expect("A3949");
     let current = a3062_equalizer_state("Soundcore Signature");
     let preset = soundcore_models::a3062_equalizer_preset(5).expect("Podcast");
@@ -498,14 +501,14 @@ fn a_model_without_a_measured_equalizer_writes_nothing() {
 
     let error = session
         .set_equalizer_preset(&current, preset)
-        .expect_err("the P20i has no equalizer");
+        .expect_err("the A3949 equalizer is deferred");
     assert!(
         matches!(error, SessionError::UnsupportedEqualizer),
         "unexpected error: {error}"
     );
     assert_eq!(
         error.to_string(),
-        "equalizer presets were not measured for this model"
+        "equalizer presets are not supported for this model"
     );
     assert!(transport.writes().is_empty(), "nothing may be written");
 }
@@ -515,7 +518,7 @@ fn skips_the_equalizer_ack_and_a_notification_before_the_next_state() {
     let model = model_by_code("A3062").expect("A3062");
     // The device answers a preset write with an empty inbound `03 87` frame and
     // may push a battery notification before the `01 01` answer.
-    let ack = encode(Direction::Inbound, Command::ACK_EQUALIZER, &[]);
+    let ack = encode(Direction::Inbound, Command::EQUALIZER, &[]);
     assert_eq!(ack, hex("09 FF 00 00 01 03 87 0A 00 9D"));
     let notification = encode(Direction::Inbound, Command::BATTERY, &[2]);
     let state_frame = a3062_equalizer_frame("Bass Reducer");
