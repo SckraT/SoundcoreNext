@@ -24,11 +24,13 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 | Frame parser/encoder | implemented, 503/503 corpus frames parse |
 | Model catalog | 39 models grouped into 5 form factors and 11 families |
 | A3949 real state | parsed, battery 5/4, firmware 14.43, masked serial |
+| A3062 real single-battery state | parsed, one battery tile, firmware 04.39, masked serial |
 | A3954 100-step state | synthetic test, battery 100/75 |
-| Single-battery layouts | intentionally unimplemented (`UnsupportedLayout`) |
+| Other single-battery layouts | intentionally unimplemented (`UnsupportedLayout`) |
 | TLV D1203 | not started |
 | Diagnostics | read-only probes, session manifest, serial/MAC redaction, ZIP export |
-| Desktop (OpenSCL4 2.0) | OpenSCL4 Slint shell vendored under GPL-3.0; Add Device populated from the 39-model catalog, with category and search filters |
+| Windows session/transport | clean-room session writes only `01 01` and parses the answer; the Windows RFCOMM transport lists paired devices and connects by vendor UUID with an SPP fallback |
+| Desktop (OpenSCL4 2.0) | OpenSCL4 Slint shell vendored under GPL-3.0; Add Device populated from the 39-model catalog; real paired Soundcore devices connect over Windows RFCOMM and Overview shows their battery (P20i A3949 and Space One Pro A3062 verified on hardware) |
 | Android UI | not started |
 
 ## Build and test
@@ -42,7 +44,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-Desktop (Rust + Slint, depends on `core/crates/models` by path):
+Desktop (Rust + Slint, depends on `core/crates/models` and `core/crates/session` by path):
 
 ```powershell
 cd desktop
@@ -59,21 +61,27 @@ core/
   data/
     conformance.json      # 503 sanitized frames
     a3949-state.json      # real capture, serial masked, checksum recalculated
+    a3062-state.json      # real capture, serial masked, checksum recalculated
   crates/
     protocol/             # framing, checksum, request builders
     models/               # registry, catalog taxonomy and state parsers
+    session/              # transport trait, frame assembly, state polling
     diagnostics/          # read-only probes and session manifest
 android/                  # Kotlin/Compose app (next)
 desktop/                  # Slint shell vendored from OpenSCL4 (GPL-3.0)
   src/main.rs             # shell wiring: window state and Add Device callbacks
+  src/controller.rs       # UI actions, Bluetooth workers and battery mapping
   src/catalog_adapter.rs  # core catalog -> Add Device models, chips and art
+  src/transport_windows.rs # paired devices, SDP services and RFCOMM transport
   ui/                     # vendored OpenSCL4 Slint tree, not edited
 .scratch/
   openscl4-2.0/           # spec and tickets for this 2.0 slice
+  windows-mvp/            # spec and tickets for the Windows MVP
 ```
 
-The desktop crate depends on `core/crates/models` by path (`soundcore-models`);
-the protocol and diagnostics crates stay core-side.
+The desktop crate depends on `core/crates/models` and `core/crates/session` by
+path (`soundcore-models`, `soundcore-session`); the protocol and diagnostics
+crates stay core-side.
 
 ## Boundaries
 

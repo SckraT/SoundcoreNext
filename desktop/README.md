@@ -19,12 +19,37 @@ layout, components, pages, icons, fonts and art.
   (TWS and sleep buds — the vendored UI has no Sleep chip), **Over-ear**,
   **Open-ear** and **Speakers**. The search field filters by model name or code.
 - Choosing a model advances the existing dialog to its paired-device step with
-  that model's name, code and art. No transport, pairing or connection is
-  attempted yet.
-- Pages for a connected device still open in their placeholder state, which is
-  expected until the desktop controller replaces the OpenSCL4 library adapter.
+  that model's name, code and art. The step lists the Windows-paired Soundcore
+  candidates for that model — devices that advertise the model's Soundcore
+  vendor RFCOMM service, or the standard SPP service when the model has none —
+  and marks the likely match with “looks like the chosen model”.
+- The MVP connects to real paired devices over classic Bluetooth RFCOMM. The
+  Windows transport (`src/transport_windows.rs`) opens the model's vendor
+  service with the standard SPP fallback; the clean-room session
+  (`core/crates/session`) writes the single `01 01` state request and parses the
+  answer; **Overview** then shows the connected device's name, code and battery
+  tiles (`src/controller.rs`).
+- Battery tiles are left/right for the TWS models. Single-battery models show
+  one whole-device tile on their own step scale, e.g. a raw `2/10` reads `20 %`.
+- Connecting shows “Connecting…”, and Bluetooth off, not found, timeout and
+  unsupported-layout failures each show a readable message instead of a crash.
+  Cancel and Retry are wired. The vendored UI has no disconnect control; the
+  controller's `disconnect` action clears the current device and returns to My
+  Devices.
+- Only the one state request is written to the device; pairing stays in Windows
+  settings and the app never changes it.
+- Pages other than Overview and My Devices still open in their placeholder
+  state, which is expected: this MVP does not implement settings, equalizer,
+  controls, comfort or connections.
 
-## Screenshot
+## Screenshots
+
+![Overview with a connected P20i](overview-connected.png)
+
+The connected Overview from the running app on Windows: a paired
+**soundcore P20i** (A3949) answered the `01 01` state request over RFCOMM, and
+its left and right battery tiles read 100 % each (raw 5 of 5 steps). No
+Bluetooth address or serial number appears on this page or in the capture.
 
 ![Add device](add-device.png)
 

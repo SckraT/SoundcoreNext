@@ -1,0 +1,11 @@
+{
+  "model": "A3062",
+  "source": "real capture of Space One Pro over the Windows RFCOMM transport; serial bytes are zero, no address is present, checksum recalculated after masking",
+  "frame_hex": "09 FF 00 00 01 01 01 69 00 02 FF 30 34 2E 33 39 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 00 00 78 78 78 78 78 78 78 78 78 00 1E 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 04 04 0F 03 02 11 01 00 00 01 32 01 00 00 01 01 01 00 5A 00 01 01 00 01 00 00 00 00 00 00 77",
+  "expected": {
+    "battery": 2,
+    "scale": 10,
+    "firmware": "04.39",
+    "serial": null
+  }
+}
