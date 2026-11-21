@@ -371,6 +371,9 @@ export global Actions {
     callback set-number(string, int);
     callback press(string);
     callback remove-item(string, int);
+    // the Connections list row: the row id and the remembered device's option index
+    callback connect-item(string, int);
+    callback disconnect-item(string, int);
     callback set-scale(int);
     callback set-side(ControlSide);
     callback copy(string);
