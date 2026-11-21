@@ -432,3 +432,134 @@ fn reports_a_failed_mode_write_as_an_io_error() {
         "unexpected error: {error}"
     );
 }
+
+#[derive(serde::Deserialize)]
+struct EqualizerFixture {
+    presets: Vec<EqualizerPresetFrame>,
+}
+
+#[derive(serde::Deserialize)]
+struct EqualizerPresetFrame {
+    name: String,
+    frame_hex: String,
+}
+
+/// The real sanitized A3062 state captured after writing `name`.
+fn a3062_equalizer_frame(name: &str) -> Vec<u8> {
+    let fixture: EqualizerFixture =
+        serde_json::from_str(include_str!("../../../data/a3062-eq-presets.json")).expect("fixture");
+    fixture
+        .presets
+        .iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| hex(&entry.frame_hex))
+        .unwrap_or_else(|| panic!("the fixture records {name}"))
+}
+
+fn a3062_equalizer_state(name: &str) -> soundcore_models::EqualizerState {
+    let model = model_by_code("A3062").expect("A3062");
+    soundcore_models::parse_state_frame(model, &a3062_equalizer_frame(name))
+        .expect("the real state")
+        .equalizer
+        .expect("the A3062 equalizer")
+}
+
+#[test]
+fn writes_the_exact_a3062_equalizer_preset_frame_once() {
+    let model = model_by_code("A3062").expect("A3062");
+    let current = a3062_equalizer_state("Soundcore Signature");
+    let preset = soundcore_models::a3062_equalizer_preset(3).expect("Bass Reducer");
+    // No reads are scripted: the write must not try to read the ack.
+    let transport = FakeTransport::default();
+    let mut session = DeviceSession::new(model, transport.clone());
+
+    session
+        .set_equalizer_preset(&current, preset)
+        .expect("write the preset");
+
+    assert_eq!(
+        transport.writes(),
+        vec![hex(
+            "08 EE 00 00 00 03 87 3F 00 03 00 00 00 50 5A 6E 78 78 78 78 78 78 00 00 \
+             00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF \
+             FF FF 50 5A 6E 78 78 78 78 78 78 00 00 7E"
+        )],
+        "exactly one measured 03 87 frame"
+    );
+}
+
+#[test]
+fn a_model_without_a_measured_equalizer_writes_nothing() {
+    let model = model_by_code("A3949").expect("A3949");
+    let current = a3062_equalizer_state("Soundcore Signature");
+    let preset = soundcore_models::a3062_equalizer_preset(5).expect("Podcast");
+    let transport = FakeTransport::default();
+    let mut session = DeviceSession::new(model, transport.clone());
+
+    let error = session
+        .set_equalizer_preset(&current, preset)
+        .expect_err("the P20i has no equalizer");
+    assert!(
+        matches!(error, SessionError::UnsupportedEqualizer),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "equalizer presets were not measured for this model"
+    );
+    assert!(transport.writes().is_empty(), "nothing may be written");
+}
+
+#[test]
+fn skips_the_equalizer_ack_and_a_notification_before_the_next_state() {
+    let model = model_by_code("A3062").expect("A3062");
+    // The device answers a preset write with an empty inbound `03 87` frame and
+    // may push a battery notification before the `01 01` answer.
+    let ack = encode(Direction::Inbound, Command::ACK_EQUALIZER, &[]);
+    assert_eq!(ack, hex("09 FF 00 00 01 03 87 0A 00 9D"));
+    let notification = encode(Direction::Inbound, Command::BATTERY, &[2]);
+    let state_frame = a3062_equalizer_frame("Bass Reducer");
+    let mut scripted = ack;
+    scripted.extend_from_slice(&notification);
+    scripted.extend_from_slice(&state_frame);
+    let transport = FakeTransport::chunks([scripted]);
+    let mut session = DeviceSession::new(model, transport.clone());
+
+    let current = a3062_equalizer_state("Soundcore Signature");
+    let preset = soundcore_models::a3062_equalizer_preset(3).expect("Bass Reducer");
+    session
+        .set_equalizer_preset(&current, preset)
+        .expect("write the preset");
+    let state = session.poll_state().expect("state after the ack");
+    let equalizer = state.equalizer.expect("the equalizer");
+    assert_eq!(equalizer.preset_id, 3);
+    assert_eq!(equalizer.bands, preset.bands);
+
+    assert_eq!(
+        transport.writes().len(),
+        2,
+        "one preset frame, then one state request"
+    );
+    assert_eq!(
+        transport.writes()[1],
+        request(Command::STATE),
+        "the poll sends the state request after the write"
+    );
+}
+
+#[test]
+fn reports_a_failed_equalizer_write_as_an_io_error() {
+    let model = model_by_code("A3062").expect("A3062");
+    let current = a3062_equalizer_state("Soundcore Signature");
+    let preset = soundcore_models::a3062_equalizer_preset(5).expect("Podcast");
+    let transport = FakeTransport::failing_writes(io::ErrorKind::BrokenPipe);
+    let mut session = DeviceSession::new(model, transport);
+
+    let error = session
+        .set_equalizer_preset(&current, preset)
+        .expect_err("write failure");
+    assert!(
+        matches!(error, SessionError::Io(ref io_error) if io_error.kind() == io::ErrorKind::BrokenPipe),
+        "unexpected error: {error}"
+    );
+}

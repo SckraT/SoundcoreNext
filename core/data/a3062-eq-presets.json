@@ -1,0 +1,60 @@
+{
+  "model": "A3062",
+  "source": "real capture of a Space One Pro (firmware 04.39) over the Windows RFCOMM transport on 2026-11-21: the 01 01 responses after writing the built-in Soundcore Signature, Bass Reducer and Podcast presets with the 03 87 body, plus the frame after restoring the original Soundcore Signature preset; serial bytes zero, no address present, checksums recalculated after masking",
+  "preset_offset": 23,
+  "bands_offset": 25,
+  "presets": [
+    {
+      "name": "Soundcore Signature",
+      "id": 0,
+      "bands": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -120
+      ],
+      "frame_hex": "09 FF 00 00 01 01 01 69 00 02 FF 30 34 2E 33 39 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 00 00 78 78 78 78 78 78 78 78 78 00 1E 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 04 04 0F 03 02 51 01 01 00 05 32 01 00 00 01 01 01 00 5A 00 01 01 00 00 00 00 00 00 00 00 BB"
+    },
+    {
+      "name": "Bass Reducer",
+      "id": 3,
+      "bands": [
+        -40,
+        -30,
+        -10,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -120
+      ],
+      "frame_hex": "09 FF 00 00 01 01 01 69 00 02 FF 30 34 2E 33 39 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 03 00 50 5A 6E 78 78 78 78 78 78 00 1E 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 04 04 0F 03 02 51 01 01 00 05 32 01 00 00 01 01 01 00 5A 00 01 01 00 00 00 00 00 00 00 00 6E"
+    },
+    {
+      "name": "Podcast",
+      "id": 5,
+      "bands": [
+        -30,
+        20,
+        40,
+        40,
+        30,
+        20,
+        0,
+        -20,
+        0,
+        -120
+      ],
+      "frame_hex": "09 FF 00 00 01 01 01 69 00 02 FF 30 34 2E 33 39 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 05 00 5A 8C A0 A0 96 8C 78 64 78 00 1E 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 04 04 0F 03 02 51 01 01 00 05 32 01 00 00 01 01 01 00 5A 00 01 01 00 00 00 00 00 00 00 00 24"
+    }
+  ],
+  "restored_frame_hex": "09 FF 00 00 01 01 01 69 00 02 FF 30 34 2E 33 39 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 00 00 78 78 78 78 78 78 78 78 78 00 1E 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 04 04 0F 03 02 51 01 01 00 05 32 01 00 00 01 01 01 00 5A 00 01 01 00 00 00 00 00 00 00 00 BB"
+}

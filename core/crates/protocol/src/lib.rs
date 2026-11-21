@@ -29,6 +29,9 @@ impl Command {
     /// six-byte mode body, and the device acknowledges it with an empty inbound
     /// `06 81`.
     pub const ACK_AMBIENT_SOUND_MODE: Self = Self::new(0x06, 0x81);
+    /// The equalizer command: an outbound `03 87` carries the A3062 preset
+    /// body, and the device acknowledges it with an empty inbound `03 87`.
+    pub const ACK_EQUALIZER: Self = Self::new(0x03, 0x87);
 
     pub const fn new(group: u8, opcode: u8) -> Self {
         Self { group, opcode }

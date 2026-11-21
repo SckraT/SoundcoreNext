@@ -8,7 +8,9 @@
 //! - accumulate inbound bytes until one complete, checksum-valid frame is
 //!   available, tolerating leading garbage and several frames per read;
 //! - hand that frame to [`soundcore_models::parse_state_frame`];
-//! - write the measured `06 81` sound-mode frame for models that have one.
+//! - write the measured `06 81` sound-mode frame for models that have one;
+//! - write the measured `03 87` equalizer preset frame for models that have
+//!   one.
 //!
 //! Nothing here knows about Windows, sockets, threads or timers.
 //!
@@ -27,7 +29,10 @@
 
 use std::io;
 
-use soundcore_models::{DeviceModel, DeviceState, SoundMode, StateError, parse_state_frame};
+use soundcore_models::{
+    DeviceModel, DeviceState, EqualizerPreset, EqualizerState, SoundMode, StateError,
+    parse_state_frame,
+};
 use soundcore_protocol::{
     Command, Direction, INBOUND_PREFIX, MIN_FRAME_LEN, ParseError, encode, parse, request,
 };
@@ -105,6 +110,9 @@ pub enum SessionError {
     /// The model has no measured sound-mode control, so there is no `06 81`
     /// frame to write.
     UnsupportedSoundMode,
+    /// The model has no measured equalizer control, so there is no `03 87`
+    /// frame to write.
+    UnsupportedEqualizer,
 }
 
 impl std::fmt::Display for SessionError {
@@ -122,6 +130,12 @@ impl std::fmt::Display for SessionError {
             Self::UnsupportedSoundMode => {
                 write!(formatter, "sound modes were not measured for this model")
             }
+            Self::UnsupportedEqualizer => {
+                write!(
+                    formatter,
+                    "equalizer presets were not measured for this model"
+                )
+            }
         }
     }
 }
@@ -131,7 +145,10 @@ impl std::error::Error for SessionError {
         match self {
             Self::Io(error) => Some(error),
             Self::Protocol(error) => Some(error),
-            Self::Timeout | Self::UnsupportedLayout | Self::UnsupportedSoundMode => None,
+            Self::Timeout
+            | Self::UnsupportedLayout
+            | Self::UnsupportedSoundMode
+            | Self::UnsupportedEqualizer => None,
         }
     }
 }
@@ -221,6 +238,34 @@ impl<T: Transport> DeviceSession<T> {
             Command::ACK_AMBIENT_SOUND_MODE,
             &body,
         ))?;
+        Ok(())
+    }
+
+    /// Write this model's `03 87` equalizer preset frame exactly once and
+    /// return once every byte of it is written.
+    ///
+    /// The 53-byte body keeps the HearID fields of `current` and applies
+    /// `preset`'s id and curve; see
+    /// [`DeviceModel::equalizer_preset_body`](soundcore_models::DeviceModel::equalizer_preset_body).
+    ///
+    /// This method never reads. The device acknowledges with an empty inbound
+    /// `03 87` frame and may push notifications; call [`Self::poll_state`]
+    /// afterwards to read the preset and bands the device now reports, and it
+    /// will skip those frames.
+    ///
+    /// Fails with [`SessionError::UnsupportedEqualizer`] when the model has no
+    /// measured equalizer control, and writes nothing in that case.
+    pub fn set_equalizer_preset(
+        &mut self,
+        current: &EqualizerState,
+        preset: &EqualizerPreset,
+    ) -> Result<(), SessionError> {
+        let body = self
+            .model
+            .equalizer_preset_body(current, preset)
+            .ok_or(SessionError::UnsupportedEqualizer)?;
+        self.transport
+            .write_all(&encode(Direction::Outbound, Command::ACK_EQUALIZER, &body))?;
         Ok(())
     }
 
