@@ -27,7 +27,7 @@ This is a narrowly measured extension of the MVP, not a general single-battery i
    - return a single battery value; model API may add `DeviceState::single_battery` or reuse left with a flag — choose a minimal explicit shape and document it.
 4. Sanitize the captured frame: zero the serial field, recompute checksum, store `core/data/a3062-state.json`; no MAC/serial in the repo.
 5. Controller: for single-battery state show one tile with `label = 3` (the vendored UI renders “Battery”), value `NN%`, progress.
-6. Tests: real sanitized A3062 state parses to 50 %, firmware 04.39; short/oversized battery rejected; controller maps one tile.
+6. Tests: the real sanitized A3062 fixture parses to the captured value (raw 2/10 → 20 %, firmware 04.39); a synthetic raw 5/10 → 50 % test covers the scale mapping; short/oversized battery rejected; controller maps one tile.
 
 ## Measured layout (2026-11-21)
 

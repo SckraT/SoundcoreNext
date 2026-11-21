@@ -6,12 +6,10 @@
 //!
 //! It implements [`soundcore_session::Transport`]: blocking `write_all` and a
 //! partial `read`, both returning [`std::io::Result`], with a read deadline of
-//! [`IO_TIMEOUT`] reported as [`io::ErrorKind::TimedOut`]. Ticket 03 owns
-//! creating the `DeviceSession` and driving it from a worker thread; `connect`
-//! itself blocks while Windows pages the device (tens of seconds), never on a
-//! UI thread.
-
-#![allow(dead_code)] // wired into the desktop controller by ticket 03
+//! [`IO_TIMEOUT`] reported as [`io::ErrorKind::TimedOut`]. The desktop
+//! controller creates the `DeviceSession` with this transport and drives it from
+//! a worker thread; [`WindowsRfcommTransport::connect`] itself blocks while
+//! Windows pages the device (tens of seconds), never on a UI thread.
 
 use std::fmt;
 use std::io;
@@ -689,7 +687,7 @@ mod tests {
 
     #[test]
     fn the_socket_is_a_session_transport() {
-        // Compile-time check that ticket 03 can hand this socket to
+        // Compile-time check that the controller can hand this socket to
         // `DeviceSession::new`; the hardware is not needed for it.
         fn assert_transport<T: soundcore_session::Transport>() {}
         assert_transport::<WindowsRfcommTransport>();

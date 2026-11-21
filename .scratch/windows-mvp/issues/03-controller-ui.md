@@ -32,8 +32,8 @@ Do not edit any `.slint` file.
    - connect on a worker thread: pick vendor/SPP service, open the Windows transport, create the session, `poll_state()`;
    - on success set `connection = connected`, `batteries` from `DeviceState`, and keep the UI responsive;
    - on failure set `connection = failed`, `failure-kind` (`not-found`/`timed-out`/`other`) and a readable `failure-text`; never expose a raw MAC.
-4. Battery mapping: label 0/1/2 for left/right/case, `value = "NN%"`, `progress = raw / scale.maximum()`, `known = true`; unsupported single-battery layout → `batteries = []` and a readable failure/empty state, no crash.
-5. `connect(mac)` reconnects a saved card; `disconnect` sets `connection = off` (or `no-device` when nothing selected) and clears the current card; `retry` repeats connect; `cancel-connect` aborts the pending attempt; `navigate(page)` sets `AppState.page`.
+4. Battery mapping: label 0/1 for left/right, `value = "NN%"`, `progress = raw / scale.maximum()`, `known = true`; a case tile (label 2) only if a state ever provides a case value (the MVP's `01 01` answers carry none); unsupported single-battery layout → `batteries = []` and a readable failure/empty state, no crash.
+5. `connect(mac)` reconnects a saved card; `disconnect` sets `connection = off` (or `no-device` when nothing selected) and clears the current card (the vendored UI has no control that calls it in this MVP, so it is verified by the ignored hardware test); `retry` repeats connect; `cancel-connect` aborts the pending attempt; `navigate(page)` sets `AppState.page`.
 6. UI thread safety: worker → UI through an mpsc channel polled by `slint::Timer` or `invoke_from_event_handle`; never touch `AppWindow` from the worker.
 7. Keep `sound-pages`, `device-pages`, `overview-rows`, `panels`, `quick-toggles` empty for this MVP; `linux = false`, `system-settings-available = false`.
 8. Only `01 01` may be written; no settings writes.
@@ -42,7 +42,7 @@ Do not edit any `.slint` file.
 
 - [x] Build/test/fmt/clippy pass.
 - [x] Manual: choose a model, see paired candidates, pair one, reach Overview, see battery tiles.
-- [x] Disconnect and retry work; Bluetooth-off and timeout show readable errors.
+- [x] Connect, retry and the disconnect callback work (the vendored UI has no disconnect control; disconnect is verified by the ignored hardware test); Bluetooth-off and timeout show readable errors.
 - [x] No `.slint` edits; no MAC/serial in logs or UI text.
 
 ## Comments
@@ -65,8 +65,6 @@ Do not edit any `.slint` file.
 - Manual UI check with Windows UI Automation on the running app (`target/debug/soundcore-desktop.exe`):
   - Add Device → Liberty 4 Pro listed `soundcore P20i`, `soundcore Liberty 4 Pro`
     (`Paired in Windows · looks like the chosen model`) and `soundcore Space One Pro`.
-  - Demo mode listed the simulated rows; pairing one reached Overview with the hero connected
-    and the tiles `Left: 100%` / `Right: 80%`.
   - Real P20i (A3949 candidate suggested): pairing reached Overview `Connecting…`, then after
     ~5 s `Could not connect` + `The device did not answer in time. Try again.`; no MAC in the
     UI. Retry showed `Connecting…` again, Cancel returned to `Not connected` and the stale
@@ -75,13 +73,12 @@ Do not edit any `.slint` file.
     as an unsupported battery layout and the UI showed `This model reports a battery layout the
     app cannot read yet, so battery levels are unavailable.` — readable, no crash, no MAC.
   - The P20i and Liberty 4 Pro were not powered on/reachable at test time (radio page timeout).
-    A positive battery read from them on hardware is still pending for ticket 04; the demo and
+    A positive battery read from them on hardware is still pending for ticket 04; the
     captured-frame checks cover the UI path and the mapping meanwhile.
 - `disconnect` is wired but the vendored UI has no control that calls it; `connect`/`retry`/
-  `cancel-connect`/`navigate`/`refresh-paired`/`pair`/`set-demo` are wired. `sound-pages`,
+  `cancel-connect`/`navigate`/`refresh-paired`/`pair` are wired. `sound-pages`,
   `device-pages`, `overview-rows`, `panels`, `quick-toggles`, `all-toggles` stay empty;
   `linux = false` and `system-settings-available = false`.
 - Checks run from `desktop`: `cargo test` (70 passed, 2 ignored), `cargo fmt --all -- --check`,
   `cargo clippy --all-targets -- -D warnings`, `cargo build`; from `core`: `cargo test`.
   No `.slint` file changed.
-

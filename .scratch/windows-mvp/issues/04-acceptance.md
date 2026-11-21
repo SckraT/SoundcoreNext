@@ -15,8 +15,8 @@ Prove the Windows MVP on real paired Soundcore hardware and leave evidence.
 3. Verify:
    - the paired candidate is marked suggested;
    - Overview shows device name/code and battery tiles;
-   - values match the device (P20i 5-step mapped to %, Liberty 4 Pro 100/75/case);
-   - disconnect returns to Devices; retry reconnects;
+   - values match the device (P20i 5-step mapped to %; Liberty 4 Pro left/right 100/75 if reachable; case is not parsed in this MVP);
+   - the disconnect callback returns to Devices and retry reconnects (the vendored UI has no disconnect control, so this is verified through the controller callbacks, not the UI);
    - only `01 01` is written (code review of the session path).
 4. Capture `desktop/overview-connected.png` showing the connected Overview with battery; add it to `desktop/README.md`. Mask or avoid MAC display.
 5. Run:
@@ -77,8 +77,9 @@ mask or omit them.
   Try again.” state, not a crash and not a raw MAC, and Retry repeated the
   attempt (saw `Connecting…`, then the timeout again after ~5 s).
 - **Disconnect returns to Devices; retry reconnects.** The vendored UI has no
-  disconnect control, so this was checked through the controller callbacks in
-  the ignored hardware test `manual_disconnect_and_retry`: real A3062 connect →
+  disconnect control, so AC5's disconnect part is not user-verifiable in this
+  MVP; it was checked through the controller callbacks in the ignored hardware
+  test `manual_disconnect_and_retry`: real A3062 connect →
   `disconnect` → page `Devices`, `Connection.off`, no current card, no tiles →
   `retry` → real reconnect with the battery tile again. Output:
   `connected [(3, "20%")]` → `disconnect: page=Devices connection=Off` →

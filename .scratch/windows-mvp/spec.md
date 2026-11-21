@@ -19,12 +19,13 @@ This is the first functional Windows slice. It proves the clean-room session lay
 - A transport/session contract in the clean-room core: send `01 01`, read a complete inbound frame, parse state.
 - Add Device: list paired Soundcore candidates for the chosen model, mark suggested candidates, pair/connect.
 - Overview: connected device name/code/art and battery tiles from the parsed state.
-- Disconnect, retry, cancel, navigation wiring needed for the above.
+- Disconnect callback, retry, cancel and navigation wiring needed for the above (the vendored UI has no disconnect control).
 - Error mapping: Bluetooth off, not found, timeout, connection failed, unsupported layout.
 
 ## Out of scope
 
 - Settings, sound modes, equalizer, presets, controls, comfort, connections, case.
+- Demo mode and simulated device data: the vendored demo toggle stays inert; only real paired hardware is shown.
 - Tray, autostart, notifications, diagnostics UI.
 - Android and Linux.
 - Writes to the device; only `01 01` is sent.
@@ -44,9 +45,9 @@ This is the first functional Windows slice. It proves the clean-room session lay
 
 1. `cargo build`, `cargo test`, `fmt --check`, `clippy -D warnings` pass in `desktop` and `core`.
 2. The app lists at least one paired Soundcore model for the chosen catalog model and marks the vendor-UUID candidate as suggested.
-3. Connecting to the available real Space One Pro (A3062) shows its single battery tile (raw 5/10 → 50 %); if P20i (A3949) or Liberty 4 Pro (A3954) are reachable, their left/right/case values are shown too.
+3. Connecting to the available real Space One Pro (A3062) shows its single battery tile from the captured ten-step value (the real capture is raw 2/10 → 20 %; a synthetic 5/10 → 50 % covers the scale); if P20i (A3949) or Liberty 4 Pro (A3954) are reachable, their left/right values are shown. The `01 01` state answer for these models carries no case value, so case is not parsed in this MVP.
 4. Bluetooth-off, missing device, timeout and unsupported-layout cases show a readable failure, not a crash or a raw MAC.
-5. Disconnect returns to the Devices page; retry reconnects; navigation works.
+5. The disconnect callback clears the current device and returns to the Devices page, verified by the ignored hardware test; the vendored UI has no control that calls it in this MVP, so disconnect is not user-verifiable. Retry reconnects; navigation works.
 6. Only `01 01` is written; no settings are changed.
 7. A screenshot of the connected Overview with battery is stored in `desktop/` and linked from `desktop/README.md`.
 8. No serial number or MAC appears in committed docs or screenshots (mask in UI captures if needed).
