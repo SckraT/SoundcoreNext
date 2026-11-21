@@ -285,14 +285,16 @@ impl EqualizerState {
 
 /// The measured A3062 equalizer control: where its block starts in the `01 01`
 /// body and how many bands it carries.
+///
+/// A model's custom-band marker is [`CUSTOM_EQUALIZER_PRESET_ID`]: it is a
+/// property of the protocol shape, not a per-model setting, so it is not stored
+/// here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EqualizerCapability {
     /// Body offset of the preset id in the `01 01` state response.
     pub state_offset: usize,
     /// Number of bands in the state and in the command body.
     pub band_count: usize,
-    /// The id the device reports for custom bands.
-    pub custom_preset_id: u16,
 }
 
 /// The A3062 band conversion offset: a state byte is `value + 120`.
@@ -361,8 +363,9 @@ pub struct DeviceState {
     /// The measured environmental sound mode; `None` for models without a
     /// measured sound-mode control (for example the P20i).
     pub sound_mode: Option<SoundMode>,
-    /// The measured equalizer preset and band values; `None` for models without
-    /// a measured equalizer control (for example the P20i).
+    /// The measured equalizer preset and band values; `None` for models whose
+    /// equalizer this slice does not implement (for example the P20i A3949,
+    /// whose equalizer block is known but deliberately deferred).
     pub equalizer: Option<EqualizerState>,
     /// The two TWS firmware versions. Single-battery layouts report their one
     /// firmware string in [`SingleBatteryState::firmware`] instead.
@@ -388,8 +391,10 @@ pub struct DeviceModel {
     /// The measured sound-mode control, or `None` when the model's sound modes
     /// were not measured (or it has none, like the P20i).
     pub sound_mode: Option<SoundModeCapability>,
-    /// The measured equalizer control, or `None` when the model's equalizer was
-    /// not measured (or it has none, like the P20i).
+    /// The measured equalizer control, or `None` when this slice does not
+    /// implement the model's equalizer. The A3949 is in that group deliberately:
+    /// its state block is known (body 32..44) but its write body is unverified,
+    /// so it has no capability, page or `03 87` frame yet.
     pub equalizer: Option<EqualizerCapability>,
 }
 
@@ -407,7 +412,8 @@ impl DeviceModel {
     }
 
     /// The built-in equalizer presets of this model, in display order; empty
-    /// when the model has no measured equalizer control.
+    /// when this slice does not implement the model's equalizer (for example
+    /// the deferred A3949).
     pub fn equalizer_presets(self) -> &'static [EqualizerPreset] {
         if self.code == A3062.code {
             A3062_EQUALIZER_PRESETS
@@ -417,8 +423,8 @@ impl DeviceModel {
     }
 
     /// The full A3062 `03 87` body that selects `preset` while keeping the
-    /// device's current HearID block, or `None` when this model has no measured
-    /// equalizer control.
+    /// device's current HearID block, or `None` when this slice does not
+    /// implement the model's equalizer (for example the deferred A3949).
     ///
     /// The body is 53 bytes, the shape OpenSCL4's A3062 equalizer builder
     /// writes:
@@ -472,6 +478,12 @@ fn band_byte(value: i16) -> u8 {
     u8::try_from(clamped + BAND_BYTE_OFFSET).expect("a clamped band value fits the state byte")
 }
 
+/// The P20i (A3949): its `01 01` capture carries an equalizer block at body
+/// 32..44 (preset id `00 00` and ten flat band bytes), so the model does have
+/// equalizer data, but no A3949 `03 87` write body is verified. This slice
+/// therefore defers A3949 equalizer support deliberately: no capability, no
+/// preset catalog, no page and no command. That is a limitation, not evidence
+/// that the model has no equalizer.
 pub const A3949: DeviceModel = DeviceModel {
     code: "A3949",
     name: "Soundcore P20i / P25i / R50i",
@@ -533,7 +545,6 @@ pub const A3062: DeviceModel = DeviceModel {
     equalizer: Some(EqualizerCapability {
         state_offset: 23,
         band_count: EQ_BANDS,
-        custom_preset_id: CUSTOM_EQUALIZER_PRESET_ID,
     }),
 };
 
@@ -640,6 +651,10 @@ fn parse_tws_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState, S
         }),
         single_battery: None,
         sound_mode: parse_sound_mode(model, body)?,
+        // The A3949's equalizer block (body 32..44) is known from its committed
+        // capture, but this slice deliberately defers A3949 equalizer support
+        // (no verified `03 87` write body), so the model has no capability and
+        // this returns `None` rather than inventing offsets.
         equalizer: parse_equalizer(model, body)?,
         firmware: FirmwareVersions {
             left: parse_firmware(&body[6..11]),
@@ -707,9 +722,11 @@ fn parse_single_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState
     })
 }
 
-/// Parses the equalizer block of a model whose equalizer control was measured.
+/// Parses the equalizer block of a model whose equalizer control this slice
+/// implements.
 ///
-/// `None` when the model has no measured control. A body too short to hold the
+/// `None` when the model has no equalizer capability, including models whose
+/// equalizer is deliberately deferred (the A3949). A body too short to hold the
 /// whole measured block is an error: the parser does not invent band values.
 fn parse_equalizer(model: DeviceModel, body: &[u8]) -> Result<Option<EqualizerState>, StateError> {
     let Some(capability) = model.equalizer else {

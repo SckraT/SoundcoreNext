@@ -14,7 +14,8 @@ The complete `desktop/ui` tree: `app.slint`, `shell.slint`, `theme.slint`,
 
 ## Changes
 
-This application adapts the shell to a new controller and clean-room core.
+This application adapts the shell to a new controller and its own Rust core
+(whose protocol/preset data is attributed in the root `NOTICE`).
 Until that adapter lands, the shell opens with empty state. Any change to a
 vendored file is made in a commit that names the file and the reason; the
 upstream copyright and GPL-3.0 terms stay in place.

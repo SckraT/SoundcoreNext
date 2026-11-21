@@ -3,7 +3,7 @@
 //! The Slint interface is vendored from OpenSCL4 under GPL-3.0 (see
 //! `ui/SOURCE.md`) and is intentionally not redesigned. This binary opens the
 //! shell and hands it to [`controller::Controller`], which fills the Add Device
-//! dialog from the clean-room catalog and wires the Windows Bluetooth session
+//! dialog from the model catalog and wires the Windows Bluetooth session
 //! that shows the connected device's battery on the Overview page.
 
 slint::include_modules!();

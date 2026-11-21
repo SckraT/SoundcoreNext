@@ -16,7 +16,10 @@ Parse A3062 equalizer state, expose the preset catalog, build the `03 87` preset
 
 ## Data source
 
-OpenSCL4 A3062 equalizer module is permitted:
+OpenSCL4 command/response and preset data is authorized for this project and
+adapted under GPL-3.0-or-later with attribution in `NOTICE`. The A3062
+equalizer data comes from:
+
 - `lib/src/devices/soundcore/a3062/packets/inbound/state_update.rs`
 - `lib/src/devices/soundcore/a3062/packets/outbound.rs` (`set_equalizer`)
 - `lib/src/devices/soundcore/a3062/modules/equalizer.rs` (preset names/ids/bands)
@@ -29,11 +32,11 @@ OpenSCL4 A3062 equalizer module is permitted:
    - preset id u16 LE at 23..25;
    - 10 band bytes at 25..35, value = byte - 120 (dB×10);
    - record measured/derived offsets in the ticket; verify against a live A3062 state.
-2. Preset catalog with ids/names/bands matching OpenSCL4's A3062 list (13 presets, signature id 0, custom 0xFEFE).
+2. Preset catalog with ids/names/bands matching OpenSCL4's A3062 list (22 presets, signature id 0, custom 0xFEFE).
 3. Build the full 53-byte `03 87` body:
    - preset id 2 bytes, hear-id genre 2, current band 10, unknown 2 zeros, hear-id enabled 0, hear-id volume 10, time 4 zero, type 2, custom 10, active bands 10, unknown 0 — preserve the A3062 packet shape; use OpenSCL4 defaults/current state so a preset write is accepted.
 4. Session method to write the preset body exactly once; controller re-polls state. No ACK read.
-5. Tests: real A3062 state parses preset/bands; each preset command hex; A3949 no EQ; session writes one frame; sanitized fixtures no serial/MAC.
+5. Tests: real A3062 state parses preset/bands; each preset command hex; A3949 equalizer deferred (its state block at body 32..44 is known but not parsed and has no write body); session writes one frame; sanitized fixtures no serial/MAC.
 6. No UI code.
 
 ## Measured offsets and command shape (2026-11-21)
@@ -93,11 +96,12 @@ and active).
 The catalog is OpenSCL4's
 `lib/src/devices/soundcore/a3062/modules/equalizer.rs` list, names taken from
 OpenSCL4's English display strings in `lib/i18n/en/openscq30-lib.ftl`. It
-contains **22 built-in presets, not 13**: ids `0`, `1`, `3..=21` and `0x7E7E`
-(Bass Booster; id `2` is absent for this model). The ticket's "(13 presets)"
-matches only ids `0..=13`, so all 22 OpenSCL4 entries are implemented. Every
-preset has 10 raw band values; the last two bands are invisible on this model
-and fixed at `0` and `-120`, as in OpenSCL4.
+contains **22 built-in presets**: ids `0`, `1`, `3..=21` and `0x7E7E`
+(Bass Booster; id `2` is absent for this model). An earlier draft of this ticket
+said "(13 presets)", which matches only ids `0..=13`; requirement 2 and this
+record were corrected to the actual 22-entry OpenSCL4 list. Every preset has 10
+raw band values; the last two bands are invisible on this model and fixed at `0`
+and `-120`, as in OpenSCL4.
 
 Custom bands are reported as preset id **0xFEFE**; the parser exposes
 `EqualizerState::is_custom()` and no catalog entry exists for 0xFEFE, so the UI
@@ -117,7 +121,9 @@ on a built-in preset); parsing the id is covered by unit tests.
   - the exact 53-byte bodies and full `03 87` frames above match the captures;
   - the state's HearID fields are copied and its enabled flag is cleared;
   - custom `0xFEFE` parses as custom and is not a built-in preset;
-  - A3949 has no equalizer state, catalog or body;
+  - A3949's equalizer is deferred: its model has no capability, catalog or write
+    body, and its committed `01 01` capture (which does hold an equalizer block
+    at body 32..44) parses with no equalizer;
   - a body truncated at the HearID block, and band bytes at both ends of the
     range, are tested.
 - New session tests: exactly one measured `03 87` frame is written and no read

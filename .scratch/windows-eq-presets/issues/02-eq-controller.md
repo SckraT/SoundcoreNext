@@ -27,12 +27,12 @@ Populate the vendored Equalizer page with the A3062 preset catalog and wire pres
 2. Handle `Actions.eq-preset(value)`:
    - resolve id; write the preset via session; re-poll; update `eq-preset`, `eq-bands`, `eq-name`, the chart;
    - readable `error-label` on failure; ignore unknown ids.
-3. P20i: no Equalizer page, no `03 87` path.
+3. A3949 equalizer is deferred in this slice: no Equalizer page and no `03 87` path.
 4. Custom band callbacks (`eq-commit`/`eq-preview`/`eq-type`/`eq-reset`) are inert; `eq-read-only=true` keeps the UI hidden.
 5. Tests: preset id/name mapping, band labels/values, page exposure A3062 vs A3949, error mapping, no custom writes.
 6. No strength/profiles/import-export.
 
-## Deviation from this ticket's literal band count and labels
+## Visible band count: 8 visible, 10 parsed
 
 `eq-band-count` is **8**, not 10, and the frequency labels are **100 Hz…12.8 kHz**,
 not 31 Hz…16 kHz. This is measured, not a shortcut:
@@ -51,8 +51,9 @@ not 31 Hz…16 kHz. This is measured, not a shortcut:
   6.4 kHz, 12.8 kHz and the range "-12.0 to +13.4 dB".
 
 All ten raw state bands still parse in the core (ticket 01); the page shows the
-eight visible ones. See the ticket's Verification section for the real-device
-confirmation.
+eight visible ones. The original spec AC2 said "10-band" and has been corrected
+to "8 visible bands" with this evidence. See the Verification section for the
+real-device confirmation.
 
 ## Implementation notes
 
@@ -106,11 +107,13 @@ confirmation.
   - restored Soundcore Signature (`0`); a stopped worker then produced the
     readable banner "Equalizer profile (connection lost)", Retry reconnected and
     the device kept the restored preset. The device was left as found.
-- Real hardware, P20i A3949
-  (`cargo test -p soundcore-desktop manual_p20i_has_no_equalizer -- --ignored --nocapture`):
-  no sound pages at all, `eq-available: false`, no chips, no bands, no selected
-  preset; an `eq-preset` click is ignored with no error label and no `03 87`
-  write path.
+- Deferred A3949 equalizer, from the committed real capture and unit tests: the
+  real A3949 `01 01` capture does hold an equalizer block at body 32..44, but
+  A3949 equalizer support is deliberately deferred, so the model has no
+  equalizer capability or catalog and the page stays hidden with no `03 87`
+  path. The acceptance run could not page the paired P20i (ticket 03 records
+  that limitation), so this is unit-test evidence on the real capture, not a
+  live P20i session.
 - Gates: desktop/core `cargo test`, `cargo fmt --all -- --check`,
   `cargo clippy --all-targets -- -D warnings`, `cargo build`.
 
@@ -118,5 +121,5 @@ confirmation.
 
 - [x] Build/test/fmt/clippy pass.
 - [x] Real A3062: page shows current preset and bands; changing preset writes and updates.
-- [x] P20i no page/no command.
+- [x] A3949 equalizer deferred: no page, no `03 87`.
 - [x] No `.slint` edits.

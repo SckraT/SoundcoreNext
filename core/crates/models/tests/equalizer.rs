@@ -74,7 +74,6 @@ fn parses_the_real_a3062_equalizer_state() {
     assert_eq!(capability.state_offset, fixture.preset_offset);
     assert_eq!(capability.state_offset + 2, fixture.bands_offset);
     assert_eq!(capability.band_count, EQ_BANDS);
-    assert_eq!(capability.custom_preset_id, CUSTOM_EQUALIZER_PRESET_ID);
     assert_eq!(fixture.preset_offset, 23);
     assert_eq!(fixture.bands_offset, 25);
 
@@ -239,7 +238,7 @@ fn builds_the_exact_a3062_preset_body_and_frame() {
             .expect("the A3062 preset body");
         assert_eq!(body.len(), EQUALIZER_COMMAND_BODY_LEN);
         assert_eq!(frame_hex(&body), expected_body, "preset {id}");
-        let frame = encode(Direction::Outbound, Command::ACK_EQUALIZER, &body);
+        let frame = encode(Direction::Outbound, Command::EQUALIZER, &body);
         assert_eq!(frame_hex(&frame), expected_frame, "preset {id}");
     }
 }
@@ -312,19 +311,44 @@ fn custom_preset_id_is_not_a_built_in_preset() {
 }
 
 #[test]
-fn a3949_has_no_equalizer() {
+fn a3949_equalizer_is_explicitly_deferred() {
+    // A3949 equalizer support is deliberately out of this slice: no capability,
+    // no catalog and no write body, so the page stays hidden and no `03 87` is
+    // sent. This is a limitation, not evidence that the model has no equalizer.
     let model = model_by_code("A3949").expect("A3949");
     assert!(model.equalizer.is_none());
     assert!(model.equalizer_presets().is_empty());
 
+    // The committed real A3949 capture does hold an equalizer block: right
+    // after the 16-byte serial, body 32..34 is the preset id and body 34..44 is
+    // the same ten-band, value-minus-120 curve A3062 uses (nine 0 dB bands and
+    // a -12.0 dB last band on this capture). OpenSCL4's A3949 state parser reads
+    // the same block; only the write body is unverified.
     let a3949_fixture: serde_json::Value =
         serde_json::from_str(include_str!("../../../data/a3949-state.json")).expect("fixture");
     let frame = hex(a3949_fixture["frame_hex"].as_str().expect("frame_hex"));
-    let state = parse_state_frame(model, &frame).expect("parse the P20i state");
-    assert!(state.equalizer.is_none());
+    let body = &frame[9..frame.len() - 1];
+    assert_eq!(
+        u16::from_le_bytes([body[32], body[33]]),
+        0,
+        "the A3949 capture reports preset id 0"
+    );
+    assert_eq!(
+        &body[34..44],
+        &[0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x00],
+        "the A3949 capture's ten band bytes are the flat curve"
+    );
 
-    // The write body also refuses an unmeasured model, even when handed a
-    // parsed A3062 state.
+    // Because the capability is deliberately absent, the parser does not invent
+    // A3949 offsets and reports no equalizer for the same capture.
+    let state = parse_state_frame(model, &frame).expect("parse the P20i state");
+    assert!(
+        state.equalizer.is_none(),
+        "A3949 equalizer parsing is deferred"
+    );
+
+    // The write body also refuses a deferred model, even when handed a parsed
+    // A3062 state.
     let eq_fixture = fixture();
     let current: EqualizerState = a3062_state(&eq_fixture.presets[0])
         .equalizer
