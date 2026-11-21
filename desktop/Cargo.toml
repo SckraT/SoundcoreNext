@@ -5,12 +5,13 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 
 [dependencies]
-# The About rows' copy button puts their text on the Windows clipboard, and the
-# Import dialog reads the clipboard for a pasted profiles file; the image half
-# of arboard is not needed.
+# The About rows' copy button and the Import and export panel's Copy button put
+# their text on the Windows clipboard, and the Import dialog reads the clipboard
+# for a pasted profiles file; the image half of arboard is not needed.
 arboard = { version = "3.7", default-features = false }
-# The Import dialog's Windows file picker. The default features are the Linux
-# xdg-portal and Wayland backends; the Windows backend needs none of them.
+# The Import dialog's Windows file picker and the Export save dialog. The default
+# features are the Linux xdg-portal and Wayland backends; the Windows backend
+# needs none of them.
 rfd = { version = "0.17", default-features = false }
 slint = "1.18"
 soundcore-models = { path = "../core/crates/models" }

@@ -26,7 +26,9 @@ use soundcore_models::{
     DbLimit, DecibelReadingRefreshRate, DeviceModel, DeviceState, EqualizerPreset, EqualizerState,
     SettingCommand, SoundMode, VISIBLE_EQ_BANDS,
 };
-use soundcore_profiles::{EqualizerProfile, ImportPreview, ProfileSet, preview_import};
+use soundcore_profiles::{
+    EqualizerProfile, ImportPreview, ProfileSet, export_json, preview_import,
+};
 use soundcore_session::{DeviceSession, SessionError, Transport};
 use windows::core::GUID;
 
@@ -335,11 +337,13 @@ pub fn profile_curve(bands: &[i16]) -> String {
 
 /// The `AppState.eq-profiles` rows of the saved set against the bands the page
 /// currently shows: each row carries the profile's curve, its eight-band count,
-/// and whether it is applied (its bands are exactly the visible bands).
-///
-/// Export stays false: import/export is out of scope for this slice and its
-/// checkboxes never activate.
-pub fn profile_rows(profiles: &ProfileSet, current_bands: &[i16]) -> Vec<EqProfile> {
+/// whether it is applied (its bands are exactly the visible bands) and whether
+/// it is chosen for export.
+pub fn profile_rows(
+    profiles: &ProfileSet,
+    current_bands: &[i16],
+    chosen: &[String],
+) -> Vec<EqProfile> {
     profiles
         .iter()
         .map(|profile| EqProfile {
@@ -347,9 +351,83 @@ pub fn profile_rows(profiles: &ProfileSet, current_bands: &[i16]) -> Vec<EqProfi
             curve: profile_curve(&profile.bands).into(),
             bands: i32::try_from(VISIBLE_EQ_BANDS).unwrap_or(0),
             in_effect: profile.bands.as_slice() == current_bands,
-            export: false,
+            export: export_chosen(chosen, &profile.name),
         })
         .collect()
+}
+
+/// Whether `name` is one of the saved profiles chosen for export.
+fn export_chosen(chosen: &[String], name: &str) -> bool {
+    chosen.iter().any(|candidate| candidate == name)
+}
+
+/// The chosen profiles that are still saved, in the saved order: the slice the
+/// transfer file and the clipboard carry.
+fn chosen_profiles(profiles: &ProfileSet, chosen: &[String]) -> Vec<EqualizerProfile> {
+    profiles
+        .iter()
+        .filter(|profile| export_chosen(chosen, &profile.name))
+        .cloned()
+        .collect()
+}
+
+/// The OpenSCL4 transfer JSON of the chosen profiles, or `None` when none of the
+/// chosen names is still saved: the Export buttons are disabled for no choice.
+fn chosen_profiles_json(profiles: &ProfileSet, chosen: &[String]) -> Option<String> {
+    let chosen = chosen_profiles(profiles, chosen);
+    (!chosen.is_empty()).then(|| export_json(&chosen))
+}
+
+/// The `AppState.eq-export-count` of a choice: the chosen profiles that are
+/// still saved. A name that is no longer saved is not counted.
+fn export_count(profiles: &ProfileSet, chosen: &[String]) -> i32 {
+    let count = profiles
+        .iter()
+        .filter(|profile| export_chosen(chosen, &profile.name))
+        .count();
+    i32::try_from(count).unwrap_or(i32::MAX)
+}
+
+/// Answers an `Actions.eq-export-choose(name, checked)` click: `""` chooses
+/// every saved profile or none of them, and a name toggles only that profile.
+/// Unknown names change nothing. Returns whether the choice changed, so the page
+/// is refilled only when there is something new to show.
+fn choose_export(
+    profiles: &ProfileSet,
+    chosen: &mut Vec<String>,
+    name: &str,
+    checked: bool,
+) -> bool {
+    let name = name.trim();
+    let before = chosen.clone();
+    if name.is_empty() {
+        chosen.clear();
+        if checked {
+            chosen.extend(profiles.iter().map(|profile| profile.name.clone()));
+        }
+    } else if checked {
+        if profiles.contains(name) && !export_chosen(chosen, name) {
+            chosen.push(name.to_owned());
+        }
+    } else {
+        chosen.retain(|candidate| candidate != name);
+    }
+    *chosen != before
+}
+
+/// Answers an `Actions.eq-export-one(name)` click: only that saved profile stays
+/// chosen, so a row's "Save to file" menu item exports exactly it. Unknown names
+/// change nothing. Returns whether the choice changed.
+fn choose_only_export(profiles: &ProfileSet, chosen: &mut Vec<String>, name: &str) -> bool {
+    let Some(profile) = profiles.get(name) else {
+        return false;
+    };
+    let only = vec![profile.name.clone()];
+    if *chosen == only {
+        return false;
+    }
+    *chosen = only;
+    true
 }
 
 /// The `AppState.eq-presets` chips of a model: one per built-in preset, in the
@@ -878,7 +956,7 @@ fn answer_band_edit(inner: &Rc<Inner>, action: BandAction) {
         return;
     }
     answer_band_action(&state, &**inner, action);
-    show_saved_profiles(&state, &inner.profiles.borrow());
+    inner.refresh_saved_profiles(&state);
 }
 
 /// Why a sound-mode change did not take, in the words the vendored error banner
@@ -1417,6 +1495,11 @@ enum Event {
     ImportFilePicked {
         result: Option<Result<String, ImportFileError>>,
     },
+    /// The export-file worker closed its save dialog: `None` when it was
+    /// cancelled, otherwise whether the chosen file was written.
+    ExportFileSaved {
+        result: Option<Result<(), ExportFileError>>,
+    },
 }
 
 /// State shared between the UI callbacks and the polling timer. Every field is
@@ -1458,15 +1541,33 @@ struct Inner {
     /// re-validate it before anything is written; `None` when no preview is
     /// open. UI thread only.
     import_text: RefCell<Option<String>>,
-    /// The clipboard and file-dialog seam the import actions use. The real
-    /// implementation is [`NativeImportIo`]; tests substitute a fake.
-    import_io: Arc<dyn ImportIo + Send + Sync>,
+    /// The clipboard and file-dialog seam the import and export actions use. The
+    /// real implementation is [`NativeTransferIo`]; tests substitute a fake.
+    transfer_io: Arc<dyn TransferIo + Send + Sync>,
     /// Whether the file-dialog worker is running, so a second click does not
     /// open a second dialog. UI thread only.
     picking_import_file: Cell<bool>,
+    /// The names of the saved profiles chosen for export. UI thread only.
+    export_selection: RefCell<Vec<String>>,
+    /// Whether the export save-dialog worker is running, so a second click does
+    /// not open a second save dialog. UI thread only.
+    picking_export_file: Cell<bool>,
 }
 
 impl Inner {
+    /// Refills the Equalizer page's saved-profile rows and export count from the
+    /// saved set and the names chosen for export, dropping chosen names that are
+    /// no longer saved. UI thread only.
+    fn refresh_saved_profiles(&self, state: &AppState<'_>) {
+        let mut chosen = self.export_selection.borrow_mut();
+        let profiles = self.profiles.borrow();
+        chosen.retain(|name| profiles.contains(name));
+        let bands = state.shown_band_values();
+        let rows = profile_rows(&profiles, &bands, &chosen);
+        state.set_eq_profiles(ModelRc::new(VecModel::from(rows)));
+        state.set_eq_export_count(export_count(&profiles, &chosen));
+    }
+
     /// Enumerates paired devices on a worker thread for a model, or for every
     /// SPP device when no model is chosen yet.
     fn request_paired(&self, model: Option<(String, String)>) {
@@ -1597,11 +1698,13 @@ impl Controller {
             profiles: RefCell::new(profiles),
             profiles_path,
             import_text: RefCell::new(None),
-            import_io: Arc::new(NativeImportIo),
+            transfer_io: Arc::new(NativeTransferIo),
             picking_import_file: Cell::new(false),
+            export_selection: RefCell::new(Vec::new()),
+            picking_export_file: Cell::new(false),
         });
         initial_state(ui);
-        show_saved_profiles(&ui.global::<AppState>(), &inner.profiles.borrow());
+        inner.refresh_saved_profiles(&ui.global::<AppState>());
         wire_actions(ui, &inner);
         let timer = Timer::default();
         let polling = Rc::clone(&inner);
@@ -1816,6 +1919,38 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         }
     });
 
+    actions.on_eq_export_choose({
+        let inner = Rc::clone(inner);
+        move |name, checked| {
+            if let Some(window) = inner.ui.upgrade() {
+                choose_export_profiles(&window, &inner, name.as_str(), checked);
+            }
+        }
+    });
+
+    actions.on_eq_export_one({
+        let inner = Rc::clone(inner);
+        move |name| {
+            if let Some(window) = inner.ui.upgrade() {
+                export_one_profile(&window, &inner, name.as_str());
+            }
+        }
+    });
+
+    actions.on_eq_export_file({
+        let inner = Rc::clone(inner);
+        move || begin_export_file(&inner)
+    });
+
+    actions.on_eq_export_copy({
+        let inner = Rc::clone(inner);
+        move || {
+            if let Some(window) = inner.ui.upgrade() {
+                copy_exported_profiles(&window, &inner);
+            }
+        }
+    });
+
     actions.on_eq_import_file({
         let inner = Rc::clone(inner);
         move || begin_import_file(&inner)
@@ -1933,7 +2068,7 @@ fn drain_events(inner: &Rc<Inner>) {
                     apply_outcome(&window, inner, outcome);
                     // A connected A3062 shows the Saved profiles panel, so the
                     // loaded rows and their Applied tags are filled here.
-                    show_saved_profiles(&window.global::<AppState>(), &inner.profiles.borrow());
+                    inner.refresh_saved_profiles(&window.global::<AppState>());
                 }
             }
             Ok(Event::ModeChanged {
@@ -1966,7 +2101,7 @@ fn drain_events(inner: &Rc<Inner>) {
                 );
                 if applies && let Some(window) = inner.ui.upgrade() {
                     apply_preset_outcome(&window, inner, outcome);
-                    show_saved_profiles(&window.global::<AppState>(), &inner.profiles.borrow());
+                    inner.refresh_saved_profiles(&window.global::<AppState>());
                 }
             }
             Ok(Event::CurveChanged {
@@ -1985,7 +2120,7 @@ fn drain_events(inner: &Rc<Inner>) {
                     let state = window.global::<AppState>();
                     apply_curve_outcome(&state, &|| inner.stop_worker(), outcome);
                     // A re-polled curve changes which saved profile is applied.
-                    show_saved_profiles(&state, &inner.profiles.borrow());
+                    inner.refresh_saved_profiles(&state);
                 }
             }
             Ok(Event::SettingChanged {
@@ -2018,6 +2153,7 @@ fn drain_events(inner: &Rc<Inner>) {
                     );
                 }
             }
+            Ok(Event::ExportFileSaved { result }) => answer_export_file(inner, result),
             // Both an empty queue and a closed channel mean nothing more will
             // arrive until a new worker is started.
             Err(_) => break,
@@ -2978,10 +3114,11 @@ fn refresh_rate_from_index(index: i32) -> Option<DecibelReadingRefreshRate> {
 /// button and the saved-profile panel with its Save button are enabled and the
 /// eight visible bands are editable. A model whose equalizer is deferred (the
 /// A3949) keeps all of them hidden, so it has no page and no profile writes.
-/// The saved-profile panel offers import (paste and file), which the same
-/// editability gates: only the A3062's page shows the panel. Export and the
-/// legacy migration stay inert: the export count and the legacy list are always
-/// empty and no export or migrate action is wired.
+/// The saved-profile panel offers the import blocks (paste and file) and the
+/// export block (choose profiles, save to a file or the clipboard), which the
+/// same editability gates: only the A3062's page shows the panel. The legacy
+/// migration stays inert: the legacy list is always empty and no migrate action
+/// is wired.
 fn show_equalizer(state: &AppState<'_>, display: &EqualizerDisplay) {
     state.set_eq_available(display.available);
     state.set_eq_read_only(!display.editable);
@@ -3000,17 +3137,11 @@ fn show_equalizer(state: &AppState<'_>, display: &EqualizerDisplay) {
     state.set_eq_chart_area(display.chart_area.as_str().into());
     state.set_eq_name(display.name.as_str().into());
     state.set_has_saved_profiles(display.editable);
+    // The rows and the export count are filled by
+    // [`Inner::refresh_saved_profiles`] once the page data is shown.
     state.set_eq_profiles(ModelRc::default());
     state.set_eq_export_count(0);
     state.set_eq_legacy(ModelRc::default());
-}
-
-/// Fills the saved-profile rows of the vendored Equalizer page from the saved
-/// set and the bands the page now shows, so the profile whose bands are exactly
-/// the shown bands carries the “Applied” tag.
-fn show_saved_profiles(state: &AppState<'_>, profiles: &ProfileSet) {
-    let bands = state.shown_band_values();
-    state.set_eq_profiles(ModelRc::new(VecModel::from(profile_rows(profiles, &bands))));
 }
 
 /// Applies a finished sound-mode change: the mode the device reports becomes the
@@ -3534,7 +3665,7 @@ fn save_equalizer_profile(window: &AppWindow, inner: &Rc<Inner>, name: &str, rep
         )
     };
     if outcome == SaveOutcome::Saved {
-        show_saved_profiles(&state, &inner.profiles.borrow());
+        inner.refresh_saved_profiles(&state);
     }
 }
 
@@ -3603,11 +3734,11 @@ fn delete_equalizer_profile(window: &AppWindow, inner: &Rc<Inner>, name: &str) {
     };
     match outcome {
         DeleteOutcome::Removed => {
-            show_saved_profiles(&state, &inner.profiles.borrow());
+            inner.refresh_saved_profiles(&state);
             clear_profile_write_error(&state);
         }
         DeleteOutcome::NotWritten => {
-            show_saved_profiles(&state, &inner.profiles.borrow());
+            inner.refresh_saved_profiles(&state);
             state.set_error_label(PROFILE_WRITE_FAILURE_LABEL.into());
         }
         DeleteOutcome::NotFound => {}
@@ -3640,11 +3771,33 @@ impl ImportFileError {
     }
 }
 
+/// The default file name the export save dialog offers: an OpenSCL4 transfer
+/// profile file, as OpenSCL4 names it.
+pub const DEFAULT_EXPORT_FILE_NAME: &str = "openscl4-equalizer-profiles.json";
+
+/// Why an exported profiles file was not written; the Export panel's note says
+/// which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportFileError {
+    /// The file cannot be written: its directory is gone, the path is read-only,
+    /// the disk is full, or the name is a directory.
+    WriteFailed,
+}
+
+impl ExportFileError {
+    /// The `TransferNote` the Import and export panel shows for this error.
+    fn note(self) -> TransferNote {
+        match self {
+            Self::WriteFailed => TransferNote::FileSaveFailed,
+        }
+    }
+}
+
 /// Reads an import file, checking its size before reading it.
 fn read_import_file(path: &Path) -> Result<String, ImportFileError> {
     let size = fs::metadata(path)
         .map_err(|error| {
-            log_import_file(&format!("could not read its size ({error})"), path);
+            log_transfer_file(&format!("could not read its size ({error})"), path);
             ImportFileError::ReadFailed
         })?
         .len();
@@ -3652,37 +3805,58 @@ fn read_import_file(path: &Path) -> Result<String, ImportFileError> {
         return Err(ImportFileError::TooLarge);
     }
     fs::read_to_string(path).map_err(|error| {
-        log_import_file(&format!("could not read it ({error})"), path);
+        log_transfer_file(&format!("could not read it ({error})"), path);
         ImportFileError::ReadFailed
     })
 }
 
-/// Logs one import-file message to stderr. The Import panel's note is the visible
-/// report; the console keeps the operating system's error text.
-fn log_import_file(message: &str, path: &Path) {
+/// Writes an exported transfer-profile file, logging the operating system's
+/// error text to stderr on failure. The panel's note is the visible report.
+fn write_export_file(path: &Path, text: &str) -> io::Result<()> {
+    fs::write(path, text).map_err(|error| {
+        log_transfer_file(&format!("could not write it ({error})"), path);
+        error
+    })
+}
+
+/// Logs one import or export file message to stderr. The panel's note is the
+/// visible report; the console keeps the operating system's error text.
+fn log_transfer_file(message: &str, path: &Path) {
     eprintln!("OpenSCL4: {message}: {}", path.display());
 }
 
-/// What the Import dialog asks the machine for: the clipboard's text and a file
-/// picked in the native dialog. The real implementation is [`NativeImportIo`];
-/// tests substitute a fake so neither the clipboard nor a dialog is touched.
-trait ImportIo {
+/// What the Import and export panel asks the machine for: the clipboard, a file
+/// picked in the native open dialog, and a file named in the native save dialog.
+/// The real implementation is [`NativeTransferIo`]; tests substitute a fake so
+/// neither the clipboard nor a dialog is touched.
+trait TransferIo {
     /// The clipboard's text, or `None` when it holds no text or cannot be read.
     fn clipboard_text(&self) -> Option<String>;
+    /// Puts `text` on the clipboard.
+    fn set_clipboard_text(&self, text: &str) -> io::Result<()>;
     /// The file the user picked, or `None` when the dialog was cancelled.
     fn pick_file(&self) -> Option<PathBuf>;
     /// The text of an import file, or why it cannot be imported.
     fn read_import_file(&self, path: &Path) -> Result<String, ImportFileError>;
+    /// The file the user named in the save dialog, or `None` when it was
+    /// cancelled; `default_name` is the name the dialog starts with.
+    fn pick_save_file(&self, default_name: &str) -> Option<PathBuf>;
+    /// Writes an exported transfer-profile file.
+    fn write_export_file(&self, path: &Path, text: &str) -> Result<(), ExportFileError>;
 }
 
-/// The real [`ImportIo`]: arboard for the clipboard and rfd for the Windows JSON
-/// file dialog.
-struct NativeImportIo;
+/// The real [`TransferIo`]: arboard for the clipboard and rfd for the Windows
+/// JSON open and save dialogs.
+struct NativeTransferIo;
 
-impl ImportIo for NativeImportIo {
+impl TransferIo for NativeTransferIo {
     fn clipboard_text(&self) -> Option<String> {
         let mut clipboard = arboard::Clipboard::new().ok()?;
         clipboard.get_text().ok()
+    }
+
+    fn set_clipboard_text(&self, text: &str) -> io::Result<()> {
+        set_clipboard_text(text).map_err(io::Error::other)
     }
 
     /// The rfd Windows backend initializes COM as an apartment-threaded process;
@@ -3698,6 +3872,21 @@ impl ImportIo for NativeImportIo {
 
     fn read_import_file(&self, path: &Path) -> Result<String, ImportFileError> {
         read_import_file(path)
+    }
+
+    /// The save dialog runs on the [`begin_export_file`] worker thread for the
+    /// same COM reason as [`Self::pick_file`].
+    fn pick_save_file(&self, default_name: &str) -> Option<PathBuf> {
+        rfd::FileDialog::new()
+            .set_title("Export equalizer profiles")
+            .set_file_name(default_name)
+            .add_filter("JSON", &["json"])
+            .add_filter("All files", &["*"])
+            .save_file()
+    }
+
+    fn write_export_file(&self, path: &Path, text: &str) -> Result<(), ExportFileError> {
+        write_export_file(path, text).map_err(|_| ExportFileError::WriteFailed)
     }
 }
 
@@ -3812,7 +4001,7 @@ fn import_from_clipboard(
     page: &impl ImportPage,
     saved: &ProfileSet,
     import_text: &mut Option<String>,
-    io: &dyn ImportIo,
+    io: &dyn TransferIo,
 ) {
     match io.clipboard_text() {
         Some(text) if !text.trim().is_empty() => {
@@ -3825,10 +4014,10 @@ fn import_from_clipboard(
     }
 }
 
-/// Picks the import file and reads it through the [`ImportIo`] seam. This is the
-/// work `Actions.eq-import-file` runs on its worker thread; `None` means the
+/// Picks the import file and reads it through the [`TransferIo`] seam. This is
+/// the work `Actions.eq-import-file` runs on its worker thread; `None` means the
 /// dialog was cancelled.
-fn pick_and_read_import_file(io: &dyn ImportIo) -> Option<Result<String, ImportFileError>> {
+fn pick_and_read_import_file(io: &dyn TransferIo) -> Option<Result<String, ImportFileError>> {
     io.pick_file().map(|path| io.read_import_file(&path))
 }
 
@@ -3923,7 +4112,7 @@ fn eq_import_paste(window: &AppWindow, inner: &Rc<Inner>) {
         &state,
         &inner.profiles.borrow(),
         &mut import_text,
-        &*inner.import_io,
+        &*inner.transfer_io,
     );
 }
 
@@ -3935,7 +4124,7 @@ fn begin_import_file(inner: &Rc<Inner>) {
         return;
     }
     inner.picking_import_file.set(true);
-    let io = Arc::clone(&inner.import_io);
+    let io = Arc::clone(&inner.transfer_io);
     let sender = inner.sender.clone();
     std::thread::spawn(move || {
         let result = pick_and_read_import_file(&*io);
@@ -3967,26 +4156,200 @@ fn answer_import(inner: &Rc<Inner>) {
         )
     };
     if let ImportOutcome::Imported(_) = outcome {
-        show_saved_profiles(&state, &inner.profiles.borrow());
+        inner.refresh_saved_profiles(&state);
         clear_profile_write_error(&state);
-        clear_import_toast_after_a_while(&window);
+        clear_transfer_toast_after_a_while(&window);
     }
 }
 
-/// Hides the Imported toast after a few seconds, unless a newer toast replaced
-/// it. The vendored window has no toast timer of its own.
-fn clear_import_toast_after_a_while(window: &AppWindow) {
+/// Hides a transfer toast (an import, a saved file or a copy) after a few
+/// seconds, unless a newer toast replaced it. The vendored window has no toast
+/// timer of its own.
+fn clear_transfer_toast_after_a_while(window: &AppWindow) {
     let weak = window.as_weak();
     Timer::single_shot(Duration::from_secs(3), move || {
         let Some(window) = weak.upgrade() else {
             return;
         };
         let state = window.global::<AppState>();
-        if state.get_toast() == ToastKind::Imported {
+        if matches!(
+            state.get_toast(),
+            ToastKind::Imported | ToastKind::FileSaved | ToastKind::Copied
+        ) {
             state.set_toast(ToastKind::None);
             state.set_toast_count(0);
         }
     });
+}
+
+/// Picks the export file and writes `text` through the [`TransferIo`] seam. This
+/// is the work `Actions.eq-export-file` runs on its worker thread; `None` means
+/// the save dialog was cancelled.
+fn pick_and_write_export_file(
+    io: &dyn TransferIo,
+    text: &str,
+) -> Option<Result<(), ExportFileError>> {
+    io.pick_save_file(DEFAULT_EXPORT_FILE_NAME)
+        .map(|path| io.write_export_file(&path, text))
+}
+
+/// The Import and export panel fields an export action changes. The real
+/// implementation is the Slint `AppState`; the tests record the calls so the
+/// panel behaviour can be checked without a window.
+trait ExportPage {
+    /// Shows the panel's note and the number its text may use.
+    fn show_export_note(&self, note: TransferNote, count: i32);
+    /// Shows the short toast at the bottom of the window.
+    fn show_export_toast(&self, kind: ToastKind, count: i32);
+}
+
+impl ExportPage for AppState<'_> {
+    fn show_export_note(&self, note: TransferNote, count: i32) {
+        self.set_transfer_note(note);
+        self.set_transfer_count(count);
+    }
+
+    fn show_export_toast(&self, kind: ToastKind, count: i32) {
+        self.set_toast(kind);
+        self.set_toast_count(count);
+    }
+}
+
+/// Answers the export-file worker's result: a written file shows the saved note
+/// and toast, a failed write the failed note, and a cancelled save dialog
+/// changes nothing.
+fn answer_export_file_saved(page: &impl ExportPage, result: Option<Result<(), ExportFileError>>) {
+    match result {
+        None => {}
+        Some(Ok(())) => {
+            page.show_export_note(TransferNote::FileSaved, 0);
+            page.show_export_toast(ToastKind::FileSaved, 0);
+        }
+        Some(Err(error)) => page.show_export_note(error.note(), 0),
+    }
+}
+
+/// Answers `Actions.eq-export-copy`: puts the chosen profiles' transfer JSON on
+/// the clipboard and shows the Copied toast. Nothing chosen does nothing; a
+/// clipboard failure is only logged, as the panel has no note for it. Returns
+/// whether the toast is showing.
+fn copy_export_profiles(
+    page: &impl ExportPage,
+    io: &dyn TransferIo,
+    profiles: &ProfileSet,
+    chosen: &[String],
+) -> bool {
+    let Some(text) = chosen_profiles_json(profiles, chosen) else {
+        return false;
+    };
+    match io.set_clipboard_text(&text) {
+        Ok(()) => {
+            page.show_export_toast(ToastKind::Copied, 0);
+            true
+        }
+        Err(error) => {
+            eprintln!("OpenSCL4: could not copy the equalizer profiles to the clipboard: {error}");
+            false
+        }
+    }
+}
+
+/// Answers `Actions.eq-export-choose(name, checked)` on the window: the choice
+/// is applied to the controller's selection and the rows and export count are
+/// refilled.
+fn choose_export_profiles(window: &AppWindow, inner: &Rc<Inner>, name: &str, checked: bool) {
+    let state = window.global::<AppState>();
+    // Export belongs to the editable A3062 page's saved-profile panel.
+    if !band_edit_allowed(&state) {
+        return;
+    }
+    let changed = {
+        let profiles = inner.profiles.borrow();
+        let mut chosen = inner.export_selection.borrow_mut();
+        choose_export(&profiles, &mut chosen, name, checked)
+    };
+    if changed {
+        inner.refresh_saved_profiles(&state);
+    }
+}
+
+/// Answers `Actions.eq-export-one(name)`: only that saved profile is chosen for
+/// export, so a row's "Save to file" menu item exports exactly it.
+fn export_one_profile(window: &AppWindow, inner: &Rc<Inner>, name: &str) {
+    let state = window.global::<AppState>();
+    if !band_edit_allowed(&state) {
+        return;
+    }
+    let changed = {
+        let profiles = inner.profiles.borrow();
+        let mut chosen = inner.export_selection.borrow_mut();
+        choose_only_export(&profiles, &mut chosen, name)
+    };
+    if changed {
+        inner.refresh_saved_profiles(&state);
+    }
+}
+
+/// Answers `Actions.eq-export-copy` on the window through the real clipboard,
+/// hiding the Copied toast after a few seconds.
+fn copy_exported_profiles(window: &AppWindow, inner: &Rc<Inner>) {
+    let state = window.global::<AppState>();
+    if !band_edit_allowed(&state) {
+        return;
+    }
+    let copied = {
+        let profiles = inner.profiles.borrow();
+        let chosen = inner.export_selection.borrow();
+        copy_export_profiles(&state, &*inner.transfer_io, &profiles, &chosen)
+    };
+    if copied {
+        clear_transfer_toast_after_a_while(window);
+    }
+}
+
+/// Answers `Actions.eq-export-file`: the native save dialog and the file write
+/// run on a worker thread, so the window keeps drawing while the dialog is open.
+/// The result arrives through the same event channel as the Bluetooth workers.
+/// Nothing chosen opens no dialog, so no empty transfer file is ever written.
+fn begin_export_file(inner: &Rc<Inner>) {
+    let Some(window) = inner.ui.upgrade() else {
+        return;
+    };
+    let state = window.global::<AppState>();
+    if !band_edit_allowed(&state) || inner.picking_export_file.get() {
+        return;
+    }
+    let text = {
+        let profiles = inner.profiles.borrow();
+        let chosen = inner.export_selection.borrow();
+        chosen_profiles_json(&profiles, &chosen)
+    };
+    let Some(text) = text else {
+        return;
+    };
+    inner.picking_export_file.set(true);
+    let io = Arc::clone(&inner.transfer_io);
+    let sender = inner.sender.clone();
+    std::thread::spawn(move || {
+        let result = pick_and_write_export_file(&*io, &text);
+        // A closed channel means the window is gone; nothing is left to report.
+        let _ = sender.send(Event::ExportFileSaved { result });
+    });
+}
+
+/// Answers the export-file worker's [`Event::ExportFileSaved`]: shows the note
+/// and toast, and hides the toast after a few seconds.
+fn answer_export_file(inner: &Rc<Inner>, result: Option<Result<(), ExportFileError>>) {
+    inner.picking_export_file.set(false);
+    let Some(window) = inner.ui.upgrade() else {
+        return;
+    };
+    let state = window.global::<AppState>();
+    let saved = matches!(result, Some(Ok(())));
+    answer_export_file_saved(&state, result);
+    if saved {
+        clear_transfer_toast_after_a_while(&window);
+    }
 }
 
 /// Replaces the dialog's model list with the models for a query and chip; an
@@ -4246,22 +4609,22 @@ mod tests {
         set.add(profile("Flat", flat)).expect("Flat is added");
 
         // The device is on the Warm curve: only Warm carries the Applied tag.
-        let rows = profile_rows(&set, &warm);
+        let rows = profile_rows(&set, &warm, &[]);
         assert_eq!(rows.len(), 2, "insertion order is kept");
         assert_eq!(rows[0].name.as_str(), "Warm");
         assert_eq!(rows[0].bands, VISIBLE_EQ_BANDS as i32);
         assert!(rows[0].in_effect, "Warm's bands are the shown bands");
         assert!(!rows[0].curve.is_empty(), "the row carries its curve");
         assert!(rows[0].curve.starts_with("M "), "the curve is a path");
-        assert!(!rows[0].export, "export checkboxes stay inert");
+        assert!(!rows[0].export, "nothing is chosen for export yet");
         assert_eq!(rows[1].name.as_str(), "Flat");
         assert!(!rows[1].in_effect, "Flat is not the shown curve");
         assert!(!rows[1].export);
 
         // Any other curve applies no profile, and no shown bands apply none.
-        let rows = profile_rows(&set, &[1i16; VISIBLE_EQ_BANDS]);
+        let rows = profile_rows(&set, &[1i16; VISIBLE_EQ_BANDS], &[]);
         assert!(rows.iter().all(|row| !row.in_effect));
-        let rows = profile_rows(&set, &[]);
+        let rows = profile_rows(&set, &[], &[]);
         assert!(rows.iter().all(|row| !row.in_effect));
     }
 
@@ -4634,17 +4997,27 @@ mod tests {
         }
     }
 
-    /// The import actions' machine seam in tests: the clipboard and the file
-    /// picker serve fixed values, and `read` overrides the file read so a size or
-    /// IO failure can be simulated without touching the disk.
+    /// The import and export actions' machine seam in tests: the clipboard and
+    /// the open and save dialogs serve fixed values, and `read` overrides the
+    /// file read so a size or IO failure can be simulated without touching the
+    /// disk.
     #[derive(Default)]
-    struct RecordedImportIo {
+    struct RecordedTransferIo {
         clipboard: RefCell<Option<String>>,
+        /// What the last copy put on the clipboard.
+        copied: RefCell<Option<String>>,
         picked: RefCell<Option<PathBuf>>,
         read: RefCell<Option<Result<String, ImportFileError>>>,
+        /// The path the save dialog returns; `None` is a cancelled dialog.
+        save_picked: RefCell<Option<PathBuf>>,
+        /// The default name the save dialog was offered, for the
+        /// `openscl4-equalizer-profiles.json` contract.
+        save_default_name: RefCell<Option<String>>,
+        /// The last exported file: the path and the text passed to the write.
+        written: RefCell<Option<(PathBuf, String)>>,
     }
 
-    impl RecordedImportIo {
+    impl RecordedTransferIo {
         /// An IO whose clipboard holds `text`.
         fn pasting(text: &str) -> Self {
             Self {
@@ -4663,18 +5036,31 @@ mod tests {
             }
         }
 
-        /// An IO whose file dialog picks `path`; the file is read for real.
+        /// An IO whose open dialog picks `path`; the file is read for real.
         fn picking(path: impl Into<PathBuf>) -> Self {
             Self {
                 picked: RefCell::new(Some(path.into())),
                 ..Self::default()
             }
         }
+
+        /// An IO whose save dialog names `path`; the file is written for real.
+        fn saving(path: impl Into<PathBuf>) -> Self {
+            Self {
+                save_picked: RefCell::new(Some(path.into())),
+                ..Self::default()
+            }
+        }
     }
 
-    impl ImportIo for RecordedImportIo {
+    impl TransferIo for RecordedTransferIo {
         fn clipboard_text(&self) -> Option<String> {
             self.clipboard.borrow().clone()
+        }
+
+        fn set_clipboard_text(&self, text: &str) -> io::Result<()> {
+            *self.copied.borrow_mut() = Some(text.to_owned());
+            Ok(())
         }
 
         fn pick_file(&self) -> Option<PathBuf> {
@@ -4687,17 +5073,28 @@ mod tests {
             }
             read_import_file(path)
         }
+
+        fn pick_save_file(&self, default_name: &str) -> Option<PathBuf> {
+            *self.save_default_name.borrow_mut() = Some(default_name.to_owned());
+            self.save_picked.borrow().clone()
+        }
+
+        fn write_export_file(&self, path: &Path, text: &str) -> Result<(), ExportFileError> {
+            write_export_file(path, text).map_err(|_| ExportFileError::WriteFailed)?;
+            *self.written.borrow_mut() = Some((path.to_path_buf(), text.to_owned()));
+            Ok(())
+        }
     }
 
     /// Runs the two shipped halves of `Actions.eq-import-file` — the worker's
     /// pick-and-read step and the event handler's preview step — against a fake
-    /// [`ImportIo`], so the file-dialog tests drive the same code the window
+    /// [`TransferIo`], so the file-dialog tests drive the same code the window
     /// runs without opening a native dialog.
     fn import_from_file(
         page: &impl ImportPage,
         saved: &ProfileSet,
         import_text: &mut Option<String>,
-        io: &dyn ImportIo,
+        io: &dyn TransferIo,
     ) {
         answer_import_file_picked(page, saved, import_text, pick_and_read_import_file(io));
     }
@@ -4711,9 +5108,9 @@ mod tests {
                 &page,
                 &ProfileSet::new(),
                 &mut import_text,
-                &RecordedImportIo {
+                &RecordedTransferIo {
                     clipboard: RefCell::new(clipboard),
-                    ..RecordedImportIo::default()
+                    ..RecordedTransferIo::default()
                 },
             );
 
@@ -4736,7 +5133,7 @@ mod tests {
             &page,
             &ProfileSet::new(),
             &mut import_text,
-            &RecordedImportIo::pasting(WARM_IMPORT),
+            &RecordedTransferIo::pasting(WARM_IMPORT),
         );
 
         assert!(page.importing.get(), "the dialog opens");
@@ -4830,7 +5227,7 @@ mod tests {
                 &page,
                 &ProfileSet::new(),
                 &mut import_text,
-                &RecordedImportIo::pasting(text),
+                &RecordedTransferIo::pasting(text),
             );
 
             assert!(!page.importing.get(), "{text:?} opens no dialog");
@@ -4855,7 +5252,7 @@ mod tests {
             &page,
             &ProfileSet::new(),
             &mut import_text,
-            &RecordedImportIo::default(),
+            &RecordedTransferIo::default(),
         );
 
         assert!(!page.importing.get());
@@ -4871,7 +5268,7 @@ mod tests {
             &page,
             &ProfileSet::new(),
             &mut import_text,
-            &RecordedImportIo::failing_file("C:\\profiles.json", ImportFileError::TooLarge),
+            &RecordedTransferIo::failing_file("C:\\profiles.json", ImportFileError::TooLarge),
         );
 
         assert!(!page.importing.get());
@@ -4888,7 +5285,7 @@ mod tests {
             &page,
             &ProfileSet::new(),
             &mut import_text,
-            &RecordedImportIo::failing_file("C:\\profiles.json", ImportFileError::ReadFailed),
+            &RecordedTransferIo::failing_file("C:\\profiles.json", ImportFileError::ReadFailed),
         );
 
         assert!(!page.importing.get());
@@ -4908,7 +5305,7 @@ mod tests {
             &page,
             &ProfileSet::new(),
             &mut import_text,
-            &RecordedImportIo::picking(path.clone()),
+            &RecordedTransferIo::picking(path.clone()),
         );
 
         assert!(page.importing.get(), "the picked file is previewed");
@@ -4973,7 +5370,7 @@ mod tests {
             &page,
             &profiles,
             &mut import_text,
-            &RecordedImportIo::pasting(TWO_PROFILE_IMPORT),
+            &RecordedTransferIo::pasting(TWO_PROFILE_IMPORT),
         );
         let outcome = answer_import_click(&page, &mut profiles, Some(&path), &mut import_text);
 
@@ -5031,7 +5428,7 @@ mod tests {
             &page,
             &profiles,
             &mut import_text,
-            &RecordedImportIo::pasting(text),
+            &RecordedTransferIo::pasting(text),
         );
         assert!(page.blocked.get(), "the wrong-count and range rows block");
         assert!(page.importing.get());
@@ -5107,6 +5504,299 @@ mod tests {
         assert_eq!(import_text, None);
     }
 
+    /// The exact transfer JSON of the saved `Warm` profile, whose bands are
+    /// [`WARM_IMPORT_BANDS`].
+    const WARM_EXPORT: &str =
+        r#"[{"name":"Warm","volumeAdjustments":[3.0,-3.0,6.0,0.0,-6.0,2.0,0.0,-2.0]}]"#;
+    /// The exact transfer JSON of the flat `Flat` profile.
+    const FLAT_EXPORT: &str =
+        r#"[{"name":"Flat","volumeAdjustments":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]}]"#;
+    /// The exact transfer JSON of `Warm` followed by the flat `Flat`.
+    const TWO_PROFILE_EXPORT: &str = concat!(
+        r#"[{"name":"Warm","volumeAdjustments":[3.0,-3.0,6.0,0.0,-6.0,2.0,0.0,-2.0]},"#,
+        r#"{"name":"Flat","volumeAdjustments":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]}]"#,
+    );
+
+    /// A saved set with `Warm` and `Flat`, in the saved order the rows and the
+    /// export keep.
+    fn two_saved_profiles() -> ProfileSet {
+        let mut set = ProfileSet::new();
+        set.add(profile("Warm", WARM_IMPORT_BANDS))
+            .expect("Warm is saved");
+        set.add(profile("Flat", [0; VISIBLE_EQ_BANDS]))
+            .expect("Flat is saved");
+        set
+    }
+
+    /// An Import and export panel that records what an export action shows, in
+    /// place of the Slint `AppState`.
+    #[derive(Default)]
+    struct RecordedExportPanel {
+        notes: RefCell<Vec<(TransferNote, i32)>>,
+        toasts: RefCell<Vec<(ToastKind, i32)>>,
+    }
+
+    impl RecordedExportPanel {
+        /// The note the panel last showed.
+        fn last_note(&self) -> Option<(TransferNote, i32)> {
+            self.notes.borrow().last().copied()
+        }
+
+        /// The toast the window last showed.
+        fn last_toast(&self) -> Option<(ToastKind, i32)> {
+            self.toasts.borrow().last().copied()
+        }
+    }
+
+    impl ExportPage for RecordedExportPanel {
+        fn show_export_note(&self, note: TransferNote, count: i32) {
+            self.notes.borrow_mut().push((note, count));
+        }
+
+        fn show_export_toast(&self, kind: ToastKind, count: i32) {
+            self.toasts.borrow_mut().push((kind, count));
+        }
+    }
+
+    #[test]
+    fn choosing_profiles_fills_the_export_flags_and_count() {
+        let set = two_saved_profiles();
+        let shown = [0i16; VISIBLE_EQ_BANDS];
+        let mut chosen: Vec<String> = Vec::new();
+        let rows = profile_rows(&set, &shown, &chosen);
+        assert!(rows.iter().all(|row| !row.export), "nothing is chosen");
+        assert_eq!(export_count(&set, &chosen), 0);
+        assert_eq!(chosen_profiles_json(&set, &chosen), None);
+
+        assert!(
+            choose_export(&set, &mut chosen, "Warm", true),
+            "a row checkbox chooses its profile"
+        );
+        let rows = profile_rows(&set, &shown, &chosen);
+        assert_eq!(
+            rows.iter().map(|row| row.export).collect::<Vec<bool>>(),
+            [true, false],
+            "only the chosen row is checked"
+        );
+        assert_eq!(export_count(&set, &chosen), 1);
+        assert!(
+            !choose_export(&set, &mut chosen, "Warm", true),
+            "choosing a chosen profile changes nothing"
+        );
+
+        assert!(choose_export(&set, &mut chosen, "Flat", true));
+        assert_eq!(export_count(&set, &chosen), 2);
+        assert_eq!(
+            chosen_profiles_json(&set, &chosen).as_deref(),
+            Some(TWO_PROFILE_EXPORT),
+            "the export keeps the saved order, not the click order"
+        );
+
+        assert!(choose_export(&set, &mut chosen, "Warm", false));
+        assert_eq!(export_count(&set, &chosen), 1);
+
+        assert!(
+            choose_export(&set, &mut chosen, "", true),
+            "the Select all checkbox chooses every saved profile"
+        );
+        assert_eq!(export_count(&set, &chosen), 2);
+        assert!(!choose_export(&set, &mut chosen, "", true));
+        assert!(
+            choose_export(&set, &mut chosen, "", false),
+            "clearing Select all unchoses every profile"
+        );
+        assert_eq!(export_count(&set, &chosen), 0);
+
+        // Unknown names change nothing, and a stale name is not counted.
+        assert!(!choose_export(&set, &mut chosen, "Missing", true));
+        assert_eq!(export_count(&set, &chosen), 0);
+        let stale = vec!["Missing".to_owned()];
+        assert_eq!(export_count(&set, &stale), 0);
+        assert_eq!(chosen_profiles_json(&set, &stale), None);
+    }
+
+    #[test]
+    fn the_row_menu_chooses_only_that_profile_for_export() {
+        let set = two_saved_profiles();
+        let mut chosen = Vec::new();
+        choose_export(&set, &mut chosen, "", true);
+        assert_eq!(export_count(&set, &chosen), 2);
+
+        assert!(
+            choose_only_export(&set, &mut chosen, "Flat"),
+            "the row's Save to file menu item chooses its profile alone"
+        );
+        let rows = profile_rows(&set, &[0; VISIBLE_EQ_BANDS], &chosen);
+        assert_eq!(
+            rows.iter().map(|row| row.export).collect::<Vec<bool>>(),
+            [false, true],
+            "the other profiles are unchosen"
+        );
+        assert_eq!(export_count(&set, &chosen), 1);
+        assert_eq!(
+            chosen_profiles_json(&set, &chosen).as_deref(),
+            Some(FLAT_EXPORT)
+        );
+        assert!(
+            !choose_only_export(&set, &mut chosen, "Flat"),
+            "the same single choice changes nothing"
+        );
+        assert!(
+            !choose_only_export(&set, &mut chosen, "Missing"),
+            "an unknown name changes nothing"
+        );
+        assert_eq!(export_count(&set, &chosen), 1, "the old choice stays");
+    }
+
+    #[test]
+    fn exporting_to_a_file_writes_exactly_the_chosen_profiles() {
+        let set = two_saved_profiles();
+        let mut chosen = Vec::new();
+        choose_export(&set, &mut chosen, "Flat", true);
+        choose_export(&set, &mut chosen, "Warm", true);
+        let text = chosen_profiles_json(&set, &chosen).expect("two profiles are chosen");
+        assert_eq!(
+            text, TWO_PROFILE_EXPORT,
+            "the file carries the OpenSCL4 transfer format in the saved order"
+        );
+
+        let directory = TempDir::new("export-file");
+        let file = directory.path().join(DEFAULT_EXPORT_FILE_NAME);
+        let io = RecordedTransferIo::saving(file.clone());
+        let panel = RecordedExportPanel::default();
+        answer_export_file_saved(&panel, pick_and_write_export_file(&io, &text));
+
+        assert_eq!(
+            fs::read_to_string(&file).expect("the export file is written"),
+            TWO_PROFILE_EXPORT,
+            "the file content is exactly the chosen profiles' JSON"
+        );
+        assert_eq!(
+            io.save_default_name.borrow().as_deref(),
+            Some(DEFAULT_EXPORT_FILE_NAME),
+            "the save dialog starts with the OpenSCL4 file name"
+        );
+        assert_eq!(DEFAULT_EXPORT_FILE_NAME, "openscl4-equalizer-profiles.json");
+        assert_eq!(panel.last_note(), Some((TransferNote::FileSaved, 0)));
+        assert_eq!(panel.last_toast(), Some((ToastKind::FileSaved, 0)));
+
+        // The written file re-imports through the core's import path with the
+        // same bands and replaces the profiles it was exported from.
+        let preview = preview_import(&text, &set).expect("the export is a profiles file");
+        assert_eq!(preview.len(), 2);
+        for (item, saved) in preview.items().iter().zip(set.profiles()) {
+            assert_eq!(item.name, saved.name);
+            assert_eq!(
+                item.status,
+                soundcore_profiles::ImportStatus::ReplacesExisting
+            );
+            assert_eq!(item.bands, Some(saved.bands));
+        }
+    }
+
+    #[test]
+    fn a_cancelled_save_dialog_changes_nothing() {
+        let directory = TempDir::new("export-cancel");
+        let io = RecordedTransferIo::default();
+        let panel = RecordedExportPanel::default();
+
+        let result = pick_and_write_export_file(&io, TWO_PROFILE_EXPORT);
+        assert_eq!(result, None, "a cancelled save dialog names no file");
+        answer_export_file_saved(&panel, result);
+
+        assert_eq!(
+            io.save_default_name.borrow().as_deref(),
+            Some(DEFAULT_EXPORT_FILE_NAME),
+            "the dialog was offered the default name before it was cancelled"
+        );
+        assert!(io.written.borrow().is_none(), "nothing is written");
+        assert!(
+            panel.notes.borrow().is_empty(),
+            "a cancelled save shows no note"
+        );
+        assert!(
+            panel.toasts.borrow().is_empty(),
+            "a cancelled save shows no toast"
+        );
+        assert_eq!(
+            fs::read_dir(directory.path())
+                .expect("the temporary directory is readable")
+                .count(),
+            0,
+            "the directory stays empty"
+        );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_written_shows_the_failed_note() {
+        let directory = TempDir::new("export-failure");
+        // A file where the export file's directory belongs makes the write fail.
+        let blocker = directory.path().join("blocked");
+        fs::write(&blocker, b"not a directory").expect("the blocking file is written");
+        let file = blocker.join(DEFAULT_EXPORT_FILE_NAME);
+        let io = RecordedTransferIo::saving(file.clone());
+        let panel = RecordedExportPanel::default();
+
+        answer_export_file_saved(&panel, pick_and_write_export_file(&io, TWO_PROFILE_EXPORT));
+
+        assert_eq!(
+            panel.last_note(),
+            Some((TransferNote::FileSaveFailed, 0)),
+            "the panel says the file could not be saved"
+        );
+        assert!(
+            panel.toasts.borrow().is_empty(),
+            "a failed write shows no saved toast"
+        );
+        assert!(!file.exists(), "the failed write leaves no file");
+    }
+
+    #[test]
+    fn copying_the_chosen_profiles_puts_the_same_json_on_the_clipboard() {
+        let set = two_saved_profiles();
+        let chosen = vec!["Warm".to_owned()];
+        let io = RecordedTransferIo::default();
+        let panel = RecordedExportPanel::default();
+
+        assert!(copy_export_profiles(&panel, &io, &set, &chosen));
+
+        assert_eq!(
+            io.copied.borrow().as_deref(),
+            Some(WARM_EXPORT),
+            "the clipboard gets the same transfer JSON the file would"
+        );
+        assert_eq!(
+            panel.last_toast(),
+            Some((ToastKind::Copied, 0)),
+            "the window shows the Copied toast"
+        );
+        assert!(
+            panel.notes.borrow().is_empty(),
+            "copying adds no Import and export panel note"
+        );
+    }
+
+    #[test]
+    fn exporting_with_nothing_chosen_does_nothing() {
+        let set = two_saved_profiles();
+        let chosen: Vec<String> = Vec::new();
+        let io = RecordedTransferIo::default();
+        let panel = RecordedExportPanel::default();
+
+        assert_eq!(chosen_profiles_json(&set, &chosen), None);
+        assert!(!copy_export_profiles(&panel, &io, &set, &chosen));
+        assert!(
+            io.copied.borrow().is_none(),
+            "the clipboard is not touched for no choice"
+        );
+        assert!(
+            io.save_default_name.borrow().is_none(),
+            "no save dialog is opened for no choice"
+        );
+        assert!(panel.notes.borrow().is_empty());
+        assert!(panel.toasts.borrow().is_empty());
+    }
+
     #[test]
     fn only_the_editable_a3062_page_offers_saved_profiles() {
         let a3062 = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
@@ -5118,8 +5808,9 @@ mod tests {
             "the editable A3062 page saves, lists and applies profiles"
         );
 
-        // The deferred A3949 has no page and therefore no saved profiles: no
-        // save button, no list, no apply and no `03 87` write.
+        // The deferred A3949 page is read-only, so it has no saved-profile panel
+        // and therefore no Export block: the export actions check the editable
+        // page (`band_edit_allowed`), so the A3949 has no export path either.
         let a3949 = soundcore_models::model_by_code("A3949").expect("A3949 is a state model");
         let a3949_state = soundcore_models::parse_state_frame(a3949, &captured_a3949_frame())
             .expect("the A3949 capture parses");
@@ -8026,8 +8717,10 @@ mod tests {
             profiles: RefCell::new(load_profiles(&path)),
             profiles_path: Some(path),
             import_text: RefCell::new(None),
-            import_io: Arc::new(NativeImportIo),
+            transfer_io: Arc::new(NativeTransferIo),
             picking_import_file: Cell::new(false),
+            export_selection: RefCell::new(Vec::new()),
+            picking_export_file: Cell::new(false),
         })
     }
 
@@ -8518,7 +9211,9 @@ mod tests {
     ///
     /// Connects the suggested A3949 and asserts the page, the tiles and the mode
     /// index stay empty; the `ambientSoundMode` action is then ignored, so no
-    /// `06 81` write has a path on this model. Addresses are masked.
+    /// `06 81` write has a path on this model, and every export action is a
+    /// no-op because the read-only page has no saved-profile panel. Addresses
+    /// are masked.
     #[test]
     #[ignore = "manual hardware check: needs a paired P20i"]
     fn manual_p20i_has_no_sound_mode() {
@@ -8550,6 +9245,32 @@ mod tests {
             "a P20i tile click changes nothing"
         );
         println!("  ambientSoundMode click ignored: no page, no 06 81 path");
+
+        // Export belongs to the saved-profile panel the read-only A3949 page
+        // never shows, so every export action is a no-op on this model.
+        assert!(
+            !state.get_has_saved_profiles(),
+            "the read-only A3949 page has no saved-profile panel"
+        );
+        ui.global::<Actions>()
+            .invoke_eq_export_choose("".into(), true);
+        ui.global::<Actions>().invoke_eq_export_one("Warm".into());
+        ui.global::<Actions>().invoke_eq_export_copy();
+        ui.global::<Actions>().invoke_eq_export_file();
+        std::thread::sleep(Duration::from_millis(200));
+        drain_events(&inner);
+        assert!(
+            !inner.picking_export_file.get(),
+            "no save dialog opens on the A3949"
+        );
+        assert_eq!(state.get_eq_export_count(), 0, "nothing is chosen");
+        assert_eq!(
+            state.get_transfer_note(),
+            TransferNote::None,
+            "no note is shown"
+        );
+        assert_eq!(state.get_toast(), ToastKind::None, "no toast is shown");
+        println!("  export actions ignored: no panel, no save dialog");
         disconnect(&ui, &inner);
     }
 
@@ -9075,9 +9796,10 @@ mod tests {
     /// cargo test -p soundcore-desktop manual_saved_profiles -- --ignored --nocapture
     /// ```
     ///
-    /// Connects the suggested A3062, asserts the page offers saved profiles and
-    /// that export/legacy stay inert, writes a custom curve, saves it as “Test
-    /// curve”, checks its row (curve path, eight bands, Applied tag) and the
+    /// Connects the suggested A3062, asserts the page offers saved profiles,
+    /// that nothing is chosen for export yet and that legacy stays inert, writes
+    /// a custom curve, saves it as “Test curve”, checks its row (curve path,
+    /// eight bands, Applied tag) and the
     /// real document in `%APPDATA%\OpenSCL4\equalizer-profiles.json`, loads that
     /// document through a fresh `Controller::new` (the startup path a restarted
     /// app runs), changes the curve so Applied clears, applies the profile so
@@ -9118,7 +9840,11 @@ mod tests {
             profile_rows_of(&state).is_empty(),
             "the run starts from an empty document"
         );
-        assert_eq!(state.get_eq_export_count(), 0, "export stays inert");
+        assert_eq!(
+            state.get_eq_export_count(),
+            0,
+            "nothing is chosen for export yet"
+        );
         assert_eq!(state.get_eq_legacy().row_count(), 0, "legacy stays empty");
         assert_eq!(
             state.get_eq_profiles().row_count(),
@@ -9386,7 +10112,11 @@ mod tests {
             profile_rows_of(&state).is_empty(),
             "the run starts from an empty document"
         );
-        assert_eq!(state.get_eq_export_count(), 0, "export stays inert");
+        assert_eq!(
+            state.get_eq_export_count(),
+            0,
+            "nothing is chosen for export yet"
+        );
         assert_eq!(state.get_eq_legacy().row_count(), 0, "legacy stays empty");
         println!(
             "  found: preset {initial_preset:?} name {initial_name:?} bands {initial_bands:?}"
@@ -9465,7 +10195,7 @@ mod tests {
                 &state,
                 &inner.profiles.borrow(),
                 &mut import_text,
-                &RecordedImportIo::picking(file.clone()),
+                &RecordedTransferIo::picking(file.clone()),
             );
         }
         let items: Vec<ImportItem> = state.get_import_items().iter().collect();
@@ -9555,6 +10285,349 @@ mod tests {
         );
         assert!(load_profiles(&path).is_empty());
         println!("  deleted both imported profiles; the document is empty again");
+
+        // Put the state found on connect back, so the device is left as found.
+        let initial_is_built_in = initial_preset.parse::<u16>().ok().is_some_and(|id| {
+            model
+                .equalizer_presets()
+                .iter()
+                .any(|preset| preset.id == id)
+        });
+        if initial_is_built_in {
+            click_preset(&ui, &initial_preset);
+            wait_for_preset(&ui, &inner, &initial_preset)
+                .expect("the preset found on connect is restored");
+            println!(
+                "  restored preset {initial_preset:?} bands {:?}",
+                band_values(&state)
+            );
+        } else {
+            for (index, value) in initial_bands.iter().enumerate() {
+                preview_band(&ui, index as i32, i32::from(*value));
+            }
+            commit_band(&ui, 0, i32::from(initial_bands[0]));
+            let restored = wait_for_custom_curve(&ui, &inner, initial_bands)
+                .expect("the found curve is restored");
+            println!("  restored custom curve {restored:?}");
+        }
+        disconnect(&ui, &inner);
+    }
+
+    /// The Windows clipboard's text, for the manual export check.
+    fn read_clipboard_text() -> Option<String> {
+        arboard::Clipboard::new().ok()?.get_text().ok()
+    }
+
+    /// Manual hardware check of exporting saved equalizer profiles on the real
+    /// Space One Pro:
+    ///
+    /// ```text
+    /// cargo test -p soundcore-desktop manual_export_profiles -- --ignored --nocapture
+    /// ```
+    ///
+    /// Connects the suggested A3062, saves two distinguishable profiles, chooses
+    /// one through the row's `eq-export-one` action and every profile through the
+    /// Select all checkbox action, exports the choice to real files through the
+    /// save-dialog seam and to the real Windows clipboard through the wired
+    /// `eq-export-copy` action, deletes the saved profiles, re-imports the
+    /// exported file through the real import path with New statuses and the same
+    /// bands, applies an imported profile and checks the re-polled curve, and
+    /// leaves the device and the user's profile document as found. Addresses are
+    /// masked.
+    #[test]
+    #[ignore = "manual hardware check: needs a paired A3062"]
+    fn manual_export_profiles() {
+        let path = default_profiles_path().expect("Windows has %APPDATA%");
+        // A failed assertion must not leave the user's real profiles changed.
+        let _restore = RestoreDocument::capture(&path);
+        let ui = AppWindow::new().expect("the shell window builds");
+        let inner = test_inner_with_profiles(&ui, path.clone());
+        wire_actions(&ui, &inner);
+        if connect_real_device(&ui, &inner, "A3062").is_none() {
+            return;
+        }
+        let state = ui.global::<AppState>();
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 has a parser");
+
+        // Record the state found on connect so the device can be left as found.
+        let initial_preset = state.get_eq_preset().to_string();
+        let initial_name = state.get_eq_name().to_string();
+        let initial_bands: [i16; VISIBLE_EQ_BANDS] = band_values(&state)
+            .try_into()
+            .expect("the A3062 page shows eight bands");
+        println!(
+            "  found: preset {initial_preset:?} name {initial_name:?} bands {initial_bands:?}"
+        );
+        assert!(
+            state.get_has_saved_profiles(),
+            "the A3062 page shows the Import and export panel"
+        );
+        assert!(
+            profile_rows_of(&state).is_empty(),
+            "the run starts from an empty document"
+        );
+        assert_eq!(
+            state.get_eq_export_count(),
+            0,
+            "nothing is chosen for export yet"
+        );
+        assert_eq!(state.get_eq_legacy().row_count(), 0, "legacy stays empty");
+
+        // Nothing chosen: the Save to file button is disabled and the action
+        // behind it opens no save dialog, so no empty transfer file is written.
+        ui.global::<Actions>().invoke_eq_export_file();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !inner.picking_export_file.get(),
+            "no save dialog opens for no choice"
+        );
+        assert_eq!(
+            state.get_transfer_note(),
+            TransferNote::None,
+            "no choice shows no note"
+        );
+        println!("  no choice: Save to file opens no dialog");
+
+        // Save two profiles with different curves.
+        let mut first_curve = initial_bands;
+        first_curve[0] = 40;
+        type_band(&ui, 0, "4.0");
+        wait_for_custom_curve(&ui, &inner, first_curve).expect("the first band is re-polled");
+        first_curve[3] = -40;
+        commit_band(&ui, 3, -40);
+        wait_for_custom_curve(&ui, &inner, first_curve).expect("the first curve is re-polled");
+        click_save_profile(&ui, "Export one", false);
+
+        let mut second_curve = first_curve;
+        second_curve[0] = -20;
+        type_band(&ui, 0, "-2.0");
+        wait_for_custom_curve(&ui, &inner, second_curve).expect("the second band is re-polled");
+        second_curve[7] = 30;
+        type_band(&ui, 7, "3.0");
+        wait_for_custom_curve(&ui, &inner, second_curve).expect("the second curve is re-polled");
+        click_save_profile(&ui, "Export two", false);
+
+        let rows = profile_rows_of(&state);
+        assert_eq!(rows.len(), 2, "both profiles are saved and listed");
+        let document = load_profiles(&path);
+        assert_eq!(document.len(), 2);
+        assert_eq!(
+            document.get("Export one").expect("the first profile").bands,
+            first_curve
+        );
+        assert_eq!(
+            document
+                .get("Export two")
+                .expect("the second profile")
+                .bands,
+            second_curve
+        );
+        println!(
+            "  saved {:?} {:?} and {:?} {:?}",
+            rows[0].name, first_curve, rows[1].name, second_curve
+        );
+
+        // The row's Save to file menu item chooses exactly that profile. The
+        // native save dialog cannot be driven from a test, so the seam supplies
+        // the path while the shipped pick-and-write half writes the real file.
+        ui.global::<Actions>()
+            .invoke_eq_export_one("Export one".into());
+        let rows = profile_rows_of(&state);
+        assert_eq!(
+            state.get_eq_export_count(),
+            1,
+            "one-click export chooses one profile"
+        );
+        assert!(rows[0].export, "the chosen row is checked");
+        assert!(!rows[1].export, "the other row is unchecked");
+        let expected_one = export_json(&[document
+            .get("Export one")
+            .expect("the first profile")
+            .clone()]);
+        let one_text = {
+            let profiles = inner.profiles.borrow();
+            let chosen = inner.export_selection.borrow();
+            chosen_profiles_json(&profiles, &chosen).expect("one profile is chosen")
+        };
+        assert_eq!(one_text, expected_one, "the chosen profile exports alone");
+
+        let directory = TempDir::new("manual-export-file");
+        let one_file = directory.path().join("one.json");
+        answer_export_file(
+            &inner,
+            pick_and_write_export_file(&RecordedTransferIo::saving(one_file.clone()), &one_text),
+        );
+        assert_eq!(state.get_transfer_note(), TransferNote::FileSaved);
+        assert_eq!(state.get_toast(), ToastKind::FileSaved);
+        assert_eq!(
+            fs::read_to_string(&one_file).expect("the one-profile export is written"),
+            expected_one
+        );
+        println!(
+            "  exported the chosen profile to a file ({} bytes)",
+            expected_one.len()
+        );
+
+        // Copy the same choice through the real Windows clipboard.
+        ui.global::<Actions>().invoke_eq_export_copy();
+        assert_eq!(
+            read_clipboard_text().expect("the Windows clipboard holds the export"),
+            expected_one,
+            "the clipboard carries the chosen profile's JSON"
+        );
+        assert_eq!(state.get_toast(), ToastKind::Copied);
+        println!("  copied the chosen profile to the clipboard");
+
+        // Select all through the panel's checkbox action, then export every
+        // profile to a file and the clipboard.
+        ui.global::<Actions>()
+            .invoke_eq_export_choose("".into(), true);
+        assert_eq!(
+            state.get_eq_export_count(),
+            2,
+            "Select all chooses every saved profile"
+        );
+        assert!(
+            profile_rows_of(&state).iter().all(|row| row.export),
+            "every row is checked"
+        );
+        let expected_all = export_json(document.profiles());
+        let all_text = {
+            let profiles = inner.profiles.borrow();
+            let chosen = inner.export_selection.borrow();
+            chosen_profiles_json(&profiles, &chosen).expect("every profile is chosen")
+        };
+        assert_eq!(
+            all_text, expected_all,
+            "the selection keeps the saved order"
+        );
+        let all_file = directory.path().join(DEFAULT_EXPORT_FILE_NAME);
+        answer_export_file(
+            &inner,
+            pick_and_write_export_file(&RecordedTransferIo::saving(all_file.clone()), &all_text),
+        );
+        assert_eq!(state.get_transfer_note(), TransferNote::FileSaved);
+        assert_eq!(
+            fs::read_to_string(&all_file).expect("the all-profiles export is written"),
+            expected_all
+        );
+        ui.global::<Actions>().invoke_eq_export_copy();
+        assert_eq!(
+            read_clipboard_text().expect("the Windows clipboard holds the export"),
+            expected_all,
+            "the clipboard carries both profiles"
+        );
+        assert_eq!(state.get_toast(), ToastKind::Copied);
+        println!(
+            "  exported both profiles to a file and the clipboard ({} bytes)",
+            expected_all.len()
+        );
+
+        // Delete both profiles, so the exported file previews every row as new.
+        for name in ["Export two", "Export one"] {
+            state.set_eq_deleting(name.into());
+            click_delete_profile(&ui, name);
+            assert_eq!(
+                state.get_eq_deleting().as_str(),
+                "",
+                "the delete dialog closes"
+            );
+        }
+        assert!(
+            profile_rows_of(&state).is_empty(),
+            "the exported profiles are deleted"
+        );
+        assert!(
+            load_profiles(&path).is_empty(),
+            "the document is empty again"
+        );
+
+        // The exported file re-imports through the shipped import path: every
+        // row is New and carries the exported bands.
+        let exported = fs::read_to_string(&all_file).expect("the export file is readable");
+        let preview =
+            preview_import(&exported, &ProfileSet::new()).expect("the export is a profiles file");
+        assert_eq!(preview.len(), 2);
+        assert!(
+            preview
+                .items()
+                .iter()
+                .all(|item| item.status == soundcore_profiles::ImportStatus::New),
+            "the exported profiles are new against the emptied set"
+        );
+        assert_eq!(preview.items()[0].bands, Some(first_curve));
+        assert_eq!(preview.items()[1].bands, Some(second_curve));
+        {
+            let mut import_text = inner.import_text.borrow_mut();
+            import_from_file(
+                &state,
+                &inner.profiles.borrow(),
+                &mut import_text,
+                &RecordedTransferIo::picking(all_file.clone()),
+            );
+        }
+        assert!(
+            state.get_importing(),
+            "the exported file opens the Import dialog"
+        );
+        assert!(!state.get_import_blocked(), "the export is importable");
+        let items: Vec<ImportItem> = state.get_import_items().iter().collect();
+        assert_eq!(items.len(), 2);
+        for (item, name) in items.iter().zip(["Export one", "Export two"]) {
+            assert_eq!(item.name.as_str(), name);
+            assert_eq!(item.status, 0, "the exported profile is new again");
+            assert_eq!(item.bands, VISIBLE_EQ_BANDS as i32);
+        }
+        ui.global::<Actions>().invoke_eq_import();
+        assert!(
+            !state.get_importing(),
+            "the import closes the dialog after the profiles are saved"
+        );
+        assert_eq!(state.get_transfer_note(), TransferNote::Imported);
+        assert_eq!(state.get_transfer_count(), 2);
+        assert_eq!(
+            profile_rows_of(&state).len(),
+            2,
+            "the exported profiles are imported again"
+        );
+        let imported = load_profiles(&path);
+        assert_eq!(
+            imported.get("Export one").expect("the first profile").bands,
+            first_curve
+        );
+        assert_eq!(
+            imported
+                .get("Export two")
+                .expect("the second profile")
+                .bands,
+            second_curve
+        );
+        println!("  re-imported both exported profiles with New statuses and the same bands");
+
+        // An imported profile applies to the real device and its curve is
+        // re-polled.
+        click_apply_profile(&ui, "Export one");
+        wait_for_custom_curve(&ui, &inner, first_curve)
+            .expect("the imported curve is written and re-polled");
+        let rows = profile_rows_of(&state);
+        assert!(
+            rows.iter()
+                .find(|row| row.name == "Export one")
+                .expect("the applied row")
+                .in_effect,
+            "the applied imported profile is marked Applied"
+        );
+        println!("  applied the imported profile: re-polled bands {first_curve:?}");
+
+        // Clean up the imported profiles and leave the document empty; the guard
+        // restores the user's previous document bytes.
+        for name in ["Export two", "Export one"] {
+            state.set_eq_deleting(name.into());
+            click_delete_profile(&ui, name);
+        }
+        assert!(profile_rows_of(&state).is_empty());
+        assert_eq!(state.get_eq_export_count(), 0, "the choice is pruned");
+        assert!(load_profiles(&path).is_empty());
 
         // Put the state found on connect back, so the device is left as found.
         let initial_is_built_in = initial_preset.parse::<u16>().ok().is_some_and(|id| {
