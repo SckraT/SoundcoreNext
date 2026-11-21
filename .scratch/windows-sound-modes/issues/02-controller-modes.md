@@ -117,3 +117,34 @@ changed (plus this ticket). No `.slint` file and no dependency changed.
 - The integration tip `e1e1d65` was already the branch base, so
   `git merge integration/windows-sound-modes` reported “Already up to date” and
   no merge commit was needed; the gates were re-run after that check.
+
+## Review fixes
+
+Resolved on `ticket/sm-04-review-fixes`:
+
+- **Failure/click race.** A mode result is stale page data only when it
+  succeeded: a failed write/read of the current attempt now always reaches
+  `error-label`, even when a newer click has already superseded its request
+  number. The worker ends after a failure, so the newer queued click never
+  runs; surfacing the failure is the only report the user gets, the worker is
+  stopped and the banner's Retry is available, so the queued click is clearly
+  discarded rather than silently lost. Regression tests:
+  `a_failed_change_surfaces_although_a_newer_click_was_queued` (the
+  result-validity rule) and
+  `a_failed_change_ends_the_worker_without_running_the_queued_click` (a
+  scripted-transport worker run: one `06 81`, its timed-out re-poll, no second
+  frame for the queued click, one surfaced failure). The worker body moved to
+  the transport-generic `serve_device` so a `FakeTransport` can drive it.
+- **Dead branches removed.** `ConnectFailure::NoSoundMode` and
+  `ModeFailure::Unsupported` were unreachable — a connect only polls `01 01`,
+  and a change is only written for a model whose state reported a mode — so
+  the variants, labels and tests are gone; the mapping folds the write-only
+  `SessionError::UnsupportedSoundMode` into the existing readable outcomes.
+- **Top module doc** now describes the long-lived mode-capable worker and its
+  second command channel instead of "short-lived worker threads over one
+  mpsc".
+- Hardware smoke re-run after the fixes: `manual_sound_mode_switch` (A3062
+  connects, shows `[SoundModes]`, switches 0/1/2 with a re-poll each, quick
+  clicks settle on the last, stopped-worker banner + Retry pass, device left in
+  normal mode) and `manual_p20i_has_no_sound_mode` (P20i: no page, no tiles,
+  no banner, no `06 81`) both pass.

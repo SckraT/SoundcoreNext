@@ -13,7 +13,7 @@ Verify the sound mode slice on real hardware and capture evidence.
 1. Build and run the app; connect Space One Pro (A3062).
 2. Open Sound mode; verify the current mode; switch to each of noise canceling, transparency and normal; confirm the device changes (LED/app/ear) and the UI reflects state after re-poll.
 3. Verify P20i (A3949) has no Sound mode page and no `06 81` is sent.
-4. Failure path: with the device off/unreachable, the page reports a readable error; no crash/MAC.
+4. Failure path: a failed write/read shows a readable error; no crash/MAC. Evidence: the failure mapping is unit-tested and the worker-failure banner was exercised; a live device-off during a mode change was not reproduced.
 5. Capture `desktop/sound-mode-connected.png` showing the Sound mode page; link from `desktop/README.md`.
 6. Run all gates (desktop/core test, fmt, clippy, build).
 7. Record devices/firmware (no serial/MAC), commands and results in the ticket.
@@ -96,18 +96,21 @@ mask or omit them.
 
 ### Failure path
 
-- **A change failing on a live connection:** the ignored
-  `manual_sound_mode_switch` covers the failed-worker branch — the state a
-  failed write/read leaves. The next click shows the vendored banner
-  `Sound mode (connection lost)` (readable, no MAC) and the banner's **Retry**
-  reconnects, restores the page and reads the mode back. This was re-run on the
-  real A3062 in this ticket.
-- **Unreachable device:** Liberty 4 Pro (A3954, off) ends in the readable
-  “The device did not answer in time. Make sure it is turned on and nearby,
-  then try again.” state — no crash, no address. Powering the connected Space
-  One Pro off mid-session was not done, to avoid changing the user's device and
-  Bluetooth state; the timeout/lost/unreadable mappings of that branch are also
-  covered by the unit tests in ticket 02.
+- **Failure mapping (simulated, not a live device-off):** the failure mapping is
+  unit-tested — a silent device maps to a timeout, a reset link to a lost
+  connection — and the ignored `manual_sound_mode_switch` exercises the
+  failed-worker banner: after the worker is stopped (the state a failed
+  write/read leaves), the next click shows the readable vendored banner
+  `Sound mode (connection lost)` (no MAC) and its **Retry** reconnects, restores
+  the page and reads the mode back. A live power-off of the connected Space One
+  Pro during a mode change was not reproduced.
+- **Unreachable device (connect-time, not a mode change):** Liberty 4 Pro
+  (A3954, off) ends in the readable “The device did not answer in time. Make
+  sure it is turned on and nearby, then try again.” state — no crash, no
+  address. Powering the connected Space One Pro off mid-session was not done, to
+  avoid changing the user's device and Bluetooth state; the timeout/lost/
+  unreadable mappings of the mode-change branch are covered by the unit tests in
+  ticket 02.
 
 ### Hardware commands and output (masked)
 
@@ -155,3 +158,16 @@ cargo test                                  # 60 passed across 16 targets; 0 fai
 cargo fmt --all -- --check                  # clean
 cargo clippy --all-targets -- -D warnings   # clean
 ```
+
+### Review fixes (2026-11-21)
+
+- The failure-path evidence above was reworded to say exactly what was
+  exercised: the failure mapping is unit-tested and the worker-failure banner
+  was exercised, and a live device-off during a mode change was not
+  reproduced. The A3954 evidence is a connect-time timeout.
+- The spec's AC7 now says the branch adds no strength controls or behavior and
+  leaves the vendored page's explanatory aside about a remembered strength
+  unchanged (no `.slint` edits).
+- The failure/click race is covered by the two regression tests added in
+  ticket 02; `manual_sound_mode_switch` and `manual_p20i_has_no_sound_mode`
+  were re-run after the fix on the same devices and still pass.

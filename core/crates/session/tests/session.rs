@@ -389,7 +389,7 @@ fn skips_the_mode_ack_and_a_notification_before_the_next_state() {
     let model = model_by_code("A3062").expect("A3062");
     // The measured ack is the empty inbound `06 81` frame; a battery
     // notification may arrive before the state answer, too.
-    let ack = encode(Direction::Inbound, Command::AMBIENT_SOUND_MODE, &[]);
+    let ack = encode(Direction::Inbound, Command::ACK_AMBIENT_SOUND_MODE, &[]);
     assert_eq!(ack, hex("09 FF 00 00 01 06 81 0A 00 9A"));
     let notification = encode(Direction::Inbound, Command::BATTERY, &[5]);
     let state_frame = a3062_mode_frame("Transparency");
@@ -409,7 +409,7 @@ fn skips_the_mode_ack_and_a_notification_before_the_next_state() {
         vec![
             encode(
                 Direction::Outbound,
-                Command::AMBIENT_SOUND_MODE,
+                Command::ACK_AMBIENT_SOUND_MODE,
                 &[1, 0x51, 0x01, 0x01, 0x00, 0x05],
             ),
             request(Command::STATE),

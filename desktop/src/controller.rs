@@ -2,9 +2,12 @@
 //! transport and the clean-room session.
 //!
 //! The controller keeps every `AppWindow` access on the Slint thread. Bluetooth
-//! work happens on short-lived worker threads that report back over one `mpsc`
-//! channel; a [`slint::Timer`] drains that channel on the UI thread. Nothing
-//! here waits for Bluetooth on the UI thread.
+//! work happens on worker threads that report results over one `mpsc` channel;
+//! a [`slint::Timer`] drains that channel on the UI thread. A connection
+//! attempt is short-lived, but when the model reports a sound mode its worker
+//! outlives the connect: it keeps the session open and serves mode writes from
+//! a second `mpsc` command channel, dropped by the UI to end the worker and
+//! close the connection. Nothing here waits for Bluetooth on the UI thread.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -182,8 +185,6 @@ pub enum ModeFailure {
     Disconnected,
     /// The device answered with something this app cannot read.
     Unreadable,
-    /// The model has no measured sound-mode control, so nothing was written.
-    Unsupported,
 }
 
 impl ModeFailure {
@@ -192,8 +193,12 @@ impl ModeFailure {
         match error {
             SessionError::Timeout => Self::TimedOut,
             SessionError::Io(_) => Self::Disconnected,
-            SessionError::Protocol(_) | SessionError::UnsupportedLayout => Self::Unreadable,
-            SessionError::UnsupportedSoundMode => Self::Unsupported,
+            // A change is only written for a model whose state reported a sound
+            // mode, so the session always has a `06 81` body to write; the
+            // write-only variant keeps the mapping total.
+            SessionError::Protocol(_)
+            | SessionError::UnsupportedLayout
+            | SessionError::UnsupportedSoundMode => Self::Unreadable,
         }
     }
 
@@ -204,7 +209,6 @@ impl ModeFailure {
             Self::TimedOut => "Sound mode (no answer)",
             Self::Disconnected => "Sound mode (connection lost)",
             Self::Unreadable => "Sound mode (unreadable answer)",
-            Self::Unsupported => "Sound mode (not supported)",
         }
     }
 }
@@ -241,8 +245,6 @@ pub enum ConnectFailure {
     NoService,
     /// The catalog lists the model, but the core has no state parser for it yet.
     NoParser,
-    /// The model has no measured sound-mode control, so no mode can be sent.
-    NoSoundMode,
     /// The device answered, but its battery layout is not implemented yet.
     UnsupportedLayout,
     /// The device answered with bytes that are not a valid state frame.
@@ -269,9 +271,10 @@ impl ConnectFailure {
         match error {
             SessionError::Timeout => Self::TimedOut,
             SessionError::Io(error) => Self::Transport(error.to_string()),
-            SessionError::Protocol(_) => Self::Protocol,
+            // A connection attempt only polls `01 01`; `UnsupportedSoundMode`
+            // only comes from a mode write, so it cannot reach this mapping.
+            SessionError::Protocol(_) | SessionError::UnsupportedSoundMode => Self::Protocol,
             SessionError::UnsupportedLayout => Self::UnsupportedLayout,
-            SessionError::UnsupportedSoundMode => Self::NoSoundMode,
         }
     }
 
@@ -318,9 +321,6 @@ impl ConnectFailure {
             }
             Self::NoParser => {
                 "The app cannot read this model's state yet, so its battery levels are unavailable.".into()
-            }
-            Self::NoSoundMode => {
-                "This model does not expose the sound mode the app can change.".into()
             }
             Self::UnsupportedLayout => {
                 "This model reports a battery layout the app cannot read yet, so battery levels are unavailable.".into()
@@ -749,6 +749,23 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
     });
 }
 
+/// Whether a finished sound-mode change still updates the page.
+///
+/// A success is page data: it only applies when it belongs to the current
+/// connection attempt and to the newest click. A failure is not stale page
+/// data — the worker stops after it, so no newer result can replace it, and a
+/// click queued behind the failed one will never run. Surfacing the failure is
+/// then the only report the user gets, and the banner's Retry stays available.
+fn mode_result_applies(
+    outcome: &Result<SoundMode, ModeFailure>,
+    attempt: u64,
+    request: u64,
+    current_attempt: u64,
+    newest_request: u64,
+) -> bool {
+    attempt == current_attempt && (outcome.is_err() || request == newest_request)
+}
+
 /// Drains everything the workers sent since the last tick and applies it on the
 /// Slint thread. Stale results (from a superseded enumeration or a cancelled
 /// connect attempt) are dropped.
@@ -785,10 +802,14 @@ fn drain_events(inner: &Rc<Inner>) {
                 request,
                 outcome,
             }) => {
-                if attempt == inner.connect.get()
-                    && request == inner.mode_change.get()
-                    && let Some(window) = inner.ui.upgrade()
-                {
+                let applies = mode_result_applies(
+                    &outcome,
+                    attempt,
+                    request,
+                    inner.connect.get(),
+                    inner.mode_change.get(),
+                );
+                if applies && let Some(window) = inner.ui.upgrade() {
                     apply_mode_outcome(&window, inner, outcome);
                 }
             }
@@ -854,12 +875,12 @@ fn open_session(request: &ConnectRequest, cancel: &AtomicBool) -> OpenOutcome {
     OpenOutcome::Opened(DeviceSession::new(model, transport))
 }
 
-/// The connected device worker: connects, writes the single `01 01` state
-/// request, reports the state, then serves sound-mode changes on the same
-/// session until the UI drops the command channel.
+/// The connected device worker: connects, then hands the open session to
+/// [`serve_device`] for the initial state report and the sound-mode writes.
 ///
-/// Every change runs here, so the UI thread never blocks on Bluetooth, and a
-/// re-poll after each write keeps `mode-index` in step with the device.
+/// Every change runs on this worker, so the UI thread never blocks on
+/// Bluetooth, and a re-poll after each write keeps `mode-index` in step with the
+/// device.
 fn run_device_worker(
     request: ConnectRequest,
     attempt: u64,
@@ -867,7 +888,7 @@ fn run_device_worker(
     events: Sender<Event>,
     commands: Receiver<DeviceCommand>,
 ) {
-    let mut session = match open_session(&request, &cancel) {
+    let session = match open_session(&request, &cancel) {
         OpenOutcome::Opened(session) => session,
         OpenOutcome::Cancelled => return,
         OpenOutcome::Failed(failure) => {
@@ -878,6 +899,19 @@ fn run_device_worker(
             return;
         }
     };
+    serve_device(session, attempt, events, commands);
+}
+
+/// Reports the initial state, then serves sound-mode changes on the same
+/// session until the UI drops the command channel or a change fails.
+///
+/// Generic over the transport so the tests can drive it with a scripted one.
+fn serve_device<T: Transport>(
+    mut session: DeviceSession<T>,
+    attempt: u64,
+    events: Sender<Event>,
+    commands: Receiver<DeviceCommand>,
+) {
     // `poll_state` here is the MVP's one initial `01 01` request.
     let state = match session.poll_state() {
         Ok(state) => state,
@@ -911,7 +945,8 @@ fn run_device_worker(
         if failed {
             // The session is out of step after a failed write or read; the
             // banner's Retry opens a fresh connection instead of writing on a
-            // broken one.
+            // broken one. Any click already queued behind this one is dropped
+            // with the channel, and the surfaced failure explains why.
             return;
         }
     }
@@ -1560,14 +1595,6 @@ mod tests {
     }
 
     #[test]
-    fn a_model_without_a_measured_sound_mode_is_explained() {
-        let failure = ConnectFailure::from_session(SessionError::UnsupportedSoundMode);
-        assert_eq!(failure.kind(), FailureKind::Other);
-        assert_eq!(failure.connection(), Connection::Failed);
-        assert!(readable(&failure.text()).contains("sound mode"));
-    }
-
-    #[test]
     fn an_unsupported_battery_layout_is_explained() {
         let failure = ConnectFailure::from_session(SessionError::UnsupportedLayout);
         assert_eq!(failure.kind(), FailureKind::Other);
@@ -1880,7 +1907,6 @@ mod tests {
                 ModeFailure::Unreadable,
             ),
             (SessionError::UnsupportedLayout, ModeFailure::Unreadable),
-            (SessionError::UnsupportedSoundMode, ModeFailure::Unsupported),
         ];
         for (error, expected) in cases {
             let failure = ModeFailure::from_session(error);
@@ -2002,22 +2028,6 @@ mod tests {
     }
 
     #[test]
-    fn a_model_without_a_sound_mode_is_never_sent_a_mode_frame() {
-        let transport = FakeTransport::default();
-        let mut session = session_with("A3949", &transport);
-
-        let failure = change_sound_mode(&mut session, SoundMode::NoiseCanceling)
-            .expect_err("the P20i has no mode");
-
-        assert_eq!(failure, ModeFailure::Unsupported);
-        assert_eq!(failure.label(), "Sound mode (not supported)");
-        assert!(
-            transport.writes().is_empty(),
-            "nothing may be written to a model without a sound mode"
-        );
-    }
-
-    #[test]
     fn a_silent_device_after_the_write_is_a_timeout() {
         let transport = FakeTransport::failing(std::io::ErrorKind::TimedOut);
         let mut session = session_with("A3062", &transport);
@@ -2047,6 +2057,88 @@ mod tests {
 
         assert_eq!(failure, ModeFailure::Disconnected);
         assert_eq!(failure.label(), "Sound mode (connection lost)");
+    }
+
+    #[test]
+    fn a_failed_change_surfaces_although_a_newer_click_was_queued() {
+        // Regression: request 1 fails while request 2 is already queued.
+        // Request 1 is superseded, but the worker stops after the failure, so
+        // request 2 never runs: the failure must still reach the page or the
+        // click leaves no feedback at all.
+        let failure = Err(ModeFailure::TimedOut);
+        assert!(
+            mode_result_applies(&failure, 4, 1, 4, 2),
+            "a failure of the current attempt always surfaces"
+        );
+        // A superseded success is still stale; the newest result applies.
+        let success = Ok(SoundMode::Normal);
+        assert!(!mode_result_applies(&success, 4, 1, 4, 2));
+        assert!(mode_result_applies(&success, 4, 2, 4, 2));
+        assert!(mode_result_applies(&failure, 4, 2, 4, 2));
+        // Results of an older connection attempt never apply, failure or not.
+        assert!(!mode_result_applies(&failure, 3, 1, 4, 1));
+        assert!(!mode_result_applies(&success, 3, 2, 4, 2));
+    }
+
+    #[test]
+    fn a_failed_change_ends_the_worker_without_running_the_queued_click() {
+        // The initial state is a real masked A3062 capture (normal mode); no
+        // read is scripted after it, so the re-poll of the first change times
+        // out.
+        let transport = FakeTransport::scripted([captured_a3062_frame()]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::SetSoundMode {
+                request: 1,
+                mode: SoundMode::Transparency,
+            })
+            .expect("the first click is queued");
+        commands
+            .send(DeviceCommand::SetSoundMode {
+                request: 2,
+                mode: SoundMode::Normal,
+            })
+            .expect("the newer click is queued behind the first");
+
+        serve_device(session, 9, events, command_receiver);
+
+        // Only the first change reached the device: the connect `01 01`, its
+        // `06 81`, and the `01 01` re-poll that timed out. The queued click
+        // wrote nothing.
+        assert_eq!(
+            transport.writes(),
+            vec![
+                hex("08 EE 00 00 00 01 01 0A 00 02"),
+                hex("08 EE 00 00 00 06 81 10 00 01 51 01 01 00 05 E6"),
+                hex("08 EE 00 00 00 01 01 0A 00 02"),
+            ],
+            "the queued click must not be written after the failure"
+        );
+        // The page gets the state, then the failure of the request that was in
+        // flight; the drain surfaces it even though request 2 is newer.
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected {
+                attempt: 9,
+                outcome: ConnectOutcome::Connected(_)
+            }
+        ));
+        assert!(matches!(
+            received.try_recv().expect("the failed change"),
+            Event::ModeChanged {
+                attempt: 9,
+                request: 1,
+                outcome: Err(ModeFailure::TimedOut)
+            }
+        ));
+        // The worker ended instead of running the queued click, so the banner's
+        // Retry is the way back to a working connection.
+        assert!(
+            received.try_recv().is_err(),
+            "the worker reports nothing else and stops"
+        );
     }
 
     /// Manual hardware check, not part of the automated suite:

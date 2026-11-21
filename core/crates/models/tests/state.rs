@@ -191,7 +191,7 @@ fn the_a3062_sound_mode_command_is_the_measured_six_byte_body() {
         let body = model.sound_mode_body(mode).expect("A3062 has a mode body");
         assert_eq!(body, [mode.value(), 0x51, 0x01, 0x01, 0x00, 0x05]);
         assert_eq!(
-            encode(Direction::Outbound, Command::AMBIENT_SOUND_MODE, &body),
+            encode(Direction::Outbound, Command::ACK_AMBIENT_SOUND_MODE, &body),
             hex(expected_frame),
             "{mode:?}"
         );
