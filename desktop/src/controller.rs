@@ -23,8 +23,8 @@ use std::time::Duration;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use soundcore_models::{
     A3062Settings, AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, ButtonAction,
-    DbLimit, DecibelReadingRefreshRate, DeviceModel, DeviceState, EqualizerPreset, EqualizerState,
-    SettingCommand, SoundMode, VISIBLE_EQ_BANDS,
+    DbLimit, DecibelReadingRefreshRate, DeviceModel, DeviceState, DualConnectionDevice,
+    EqualizerPreset, EqualizerState, SettingCommand, SoundMode, VISIBLE_EQ_BANDS,
 };
 use soundcore_profiles::{
     EqualizerProfile, ImportPreview, ProfileSet, export_json, preview_import,
@@ -1206,6 +1206,184 @@ pub fn change_setting<T: Transport>(
     Ok(Box::new(state))
 }
 
+/// How many list reads a connect, disconnect or forget may take while the
+/// device settles, and how long to wait between them. The A3062 can take a few
+/// seconds to apply a connect or a disconnect, so the first `0B 01` answer may
+/// still report the old list.
+const DUAL_ACTION_READ_ATTEMPTS: usize = 4;
+const DUAL_ACTION_SETTLE_DELAY: Duration = Duration::from_millis(400);
+
+/// The `0B 82`/`0B 81`/`0B 83` write a dual-connections list row asks for. The
+/// six address bytes are the ones the `0B 01` reply reported, in reply order;
+/// nothing built from this action is ever shown in the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DualAction {
+    /// `0B 82`: connect the remembered device.
+    Connect([u8; 6]),
+    /// `0B 81`: disconnect the connected device.
+    Disconnect([u8; 6]),
+    /// `0B 83`: forget the remembered device.
+    Forget([u8; 6]),
+}
+
+impl DualAction {
+    /// The row name a failed write's banner shows; never the address.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Connect(_) => "Connect device",
+            Self::Disconnect(_) => "Disconnect device",
+            Self::Forget(_) => "Forget device",
+        }
+    }
+
+    /// What the list has to report before the write counts as settled: a
+    /// connect shows the device connected, a disconnect shows it disconnected,
+    /// a forget drops it from the list.
+    fn expectation(self) -> DualExpectation {
+        match self {
+            Self::Connect(mac) => DualExpectation::Connected(mac, true),
+            Self::Disconnect(mac) => DualExpectation::Connected(mac, false),
+            Self::Forget(mac) => DualExpectation::Absent(mac),
+        }
+    }
+}
+
+/// Why a dual-connections list read or write did not complete, in the words the
+/// vendored error banner shows above the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DualFailure {
+    /// The device did not answer the list read in time.
+    TimedOut,
+    /// The Bluetooth link dropped before the list was read.
+    Disconnected,
+    /// The device answered with something this app cannot read.
+    Unreadable,
+}
+
+impl DualFailure {
+    /// Reduces a session failure to the case the page has words for.
+    fn from_session(error: SessionError) -> Self {
+        match error {
+            SessionError::Timeout => Self::TimedOut,
+            SessionError::Io(_) => Self::Disconnected,
+            // A list read or write is only started for a model that reports the
+            // dual-connections capability, so the unsupported variants keep the
+            // mapping total without naming a state the page can reach.
+            SessionError::Protocol(_)
+            | SessionError::UnsupportedLayout
+            | SessionError::UnsupportedSoundMode
+            | SessionError::UnsupportedEqualizer
+            | SessionError::UnsupportedSetting
+            | SessionError::UnsupportedDualConnections => Self::Unreadable,
+        }
+    }
+
+    /// The parenthesised reason the banner appends to the list's name.
+    fn reason(self) -> &'static str {
+        match self {
+            Self::TimedOut => "no answer",
+            Self::Disconnected => "connection lost",
+            Self::Unreadable => "unreadable answer",
+        }
+    }
+
+    /// The `AppState.error-label` of a failed list read, e.g. after entering the
+    /// Connections page; the vendored banner wraps it as "Could not change “{}”.".
+    fn list_label(self) -> String {
+        format!("Dual connections list ({})", self.reason())
+    }
+
+    /// The `AppState.error-label` of a failed list-row action, naming what the
+    /// user asked the earbuds to do.
+    fn action_label(self, action: DualAction) -> String {
+        format!("{} ({})", action.label(), self.reason())
+    }
+}
+
+/// What a list re-read has to report before a write counts as settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DualExpectation {
+    /// A plain refresh: any complete reply is enough.
+    Any,
+    /// The device must be reported connected (`true`) or disconnected (`false`).
+    Connected([u8; 6], bool),
+    /// The device must be gone from the list.
+    Absent([u8; 6]),
+}
+
+impl DualExpectation {
+    /// Whether `devices`, the list the device just reported, satisfies the
+    /// expectation.
+    fn met(self, devices: &[DualConnectionDevice]) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Connected(mac, connected) => devices
+                .iter()
+                .any(|device| device.mac == mac && device.connected == connected),
+            Self::Absent(mac) => devices.iter().all(|device| device.mac != mac),
+        }
+    }
+}
+
+/// One `0B 01` read of the device's remembered and connected devices. Blocking:
+/// only the device worker calls this, never the UI thread.
+fn read_dual_connections<T: Transport>(
+    session: &mut DeviceSession<T>,
+) -> Result<Vec<DualConnectionDevice>, DualFailure> {
+    session
+        .read_dual_connections_devices()
+        .map_err(DualFailure::from_session)
+}
+
+/// Writes one `0B 82`/`0B 81`/`0B 83` frame and re-reads the list, returning the
+/// devices the device reports after the write.
+///
+/// The A3062 can take a few seconds to apply a connect or a disconnect, so the
+/// re-read repeats (bounded) until the list shows the outcome; a read with no
+/// expectation reads once. Blocking: only the device worker calls this.
+fn write_dual_connection<T: Transport>(
+    session: &mut DeviceSession<T>,
+    action: DualAction,
+) -> Result<Vec<DualConnectionDevice>, DualFailure> {
+    match action {
+        DualAction::Connect(mac) => session.connect_dual_connection(mac),
+        DualAction::Disconnect(mac) => session.disconnect_dual_connection(mac),
+        DualAction::Forget(mac) => session.forget_dual_connection(mac),
+    }
+    .map_err(DualFailure::from_session)?;
+    read_dual_list_settling(session, action.expectation())
+}
+
+/// Repeats the list read until `expectation` holds or the attempts run out; the
+/// last reply is returned either way, so the page still shows what the device
+/// reports.
+fn read_dual_list_settling<T: Transport>(
+    session: &mut DeviceSession<T>,
+    expectation: DualExpectation,
+) -> Result<Vec<DualConnectionDevice>, DualFailure> {
+    let mut remaining = if expectation == DualExpectation::Any {
+        1
+    } else {
+        DUAL_ACTION_READ_ATTEMPTS
+    };
+    loop {
+        remaining -= 1;
+        match read_dual_connections(session) {
+            Ok(devices) => {
+                if remaining == 0 || expectation.met(&devices) {
+                    return Ok(devices);
+                }
+            }
+            Err(failure) => {
+                if remaining == 0 || failure == DualFailure::Disconnected {
+                    return Err(failure);
+                }
+            }
+        }
+        std::thread::sleep(DUAL_ACTION_SETTLE_DELAY);
+    }
+}
+
 /// A failed connection, reduced to the cases the window has words for. It
 /// deliberately holds no Bluetooth address, so nothing built from it can leak a
 /// MAC into the UI.
@@ -1448,7 +1626,7 @@ enum ConnectOutcome {
 }
 
 /// A write the connected device worker has to perform.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeviceCommand {
     /// Write a sound mode and re-read the state; `request` identifies the click
     /// so the UI can drop a result a newer click has superseded.
@@ -1470,6 +1648,13 @@ enum DeviceCommand {
         request: u64,
         setting: SettingCommand,
     },
+    /// Ask for the dual-connections list: the worker writes the empty `0B 01`
+    /// frame and reports the devices the earbuds remember and whether they are
+    /// connected. Used by the Connections page's refresh.
+    ReadDualConnections,
+    /// Write one `0B 83`/`0B 82`/`0B 81` frame and re-read the list, so the
+    /// Connections page shows the outcome instead of the optimistic click.
+    DualConnectionWrite(DualAction),
 }
 
 /// A worker-to-UI message; the sequence number tells the UI whether the result
@@ -1512,6 +1697,19 @@ enum Event {
         setting: SettingCommand,
         outcome: Result<Box<DeviceState>, SettingFailure>,
     },
+    /// A device worker read the dual-connections list: on connect while the
+    /// setting is on, after the page was entered, or after a settings write.
+    DualConnectionsRead {
+        attempt: u64,
+        outcome: Result<Vec<DualConnectionDevice>, DualFailure>,
+    },
+    /// A device worker wrote a dual-connections list-row action and re-read the
+    /// list, which the Connections page then shows.
+    DualConnectionsWritten {
+        attempt: u64,
+        action: DualAction,
+        outcome: Result<Vec<DualConnectionDevice>, DualFailure>,
+    },
     /// The import-file worker closed its file dialog: the file it read, or `None`
     /// when the dialog was cancelled. A read failure carries the note to show.
     ImportFilePicked {
@@ -1553,6 +1751,11 @@ struct Inner {
     /// a section-page change refills the panels, and a settings write's
     /// re-poll replaces it, without another poll.
     device: RefCell<Option<Box<DeviceState>>>,
+    /// The dual-connections list the device worker last reported, in reply
+    /// order. The Connections page's option strings are built from it, so an
+    /// option's index is always the index of the same device in this list.
+    /// UI thread only.
+    dual_devices: RefCell<Vec<DualConnectionDevice>>,
     /// The saved equalizer profiles, loaded from the document at startup and
     /// edited by the Equalizer page's save/apply/delete actions. UI thread only.
     profiles: RefCell<ProfileSet>,
@@ -1698,6 +1901,33 @@ impl Inner {
             .as_ref()
             .is_some_and(|sender| sender.send(command(next)).is_ok())
     }
+
+    /// Queues one command that needs no click sequence number. False when the
+    /// worker is gone (a failed or stopped connection).
+    fn send_command(&self, command: DeviceCommand) -> bool {
+        self.commands
+            .borrow()
+            .as_ref()
+            .is_some_and(|sender| sender.send(command).is_ok())
+    }
+
+    /// Whether the Connections page should show the remembered-device list: the
+    /// device's settings block says dual connections are on. Only the A3062 has
+    /// that block, so the deferred A3949 never shows a list and never reads
+    /// `0B 01`.
+    fn dual_list_visible(&self) -> bool {
+        self.device
+            .borrow()
+            .as_ref()
+            .and_then(|device_state| device_state.settings)
+            .is_some_and(|settings| settings.dual_connections)
+    }
+
+    /// Drops the remembered-device list the Connections page shows, e.g. when
+    /// the connection is replaced or lost.
+    fn clear_dual_devices(&self) {
+        self.dual_devices.borrow_mut().clear();
+    }
 }
 
 /// Owns the timer that drains worker events. Keep it alive for as long as the
@@ -1741,6 +1971,7 @@ impl Controller {
             curve_change: Cell::new(0),
             setting_change: Cell::new(0),
             device: RefCell::new(None),
+            dual_devices: RefCell::new(Vec::new()),
             profiles: RefCell::new(profiles),
             profiles_path,
             import_text: RefCell::new(None),
@@ -1910,6 +2141,51 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         }
     });
 
+    actions.on_remove_item({
+        let inner = Rc::clone(inner);
+        move |setting_id, index| {
+            if let Some(window) = inner.ui.upgrade() {
+                answer_dual_item(
+                    &window,
+                    &inner,
+                    setting_id.as_str(),
+                    index,
+                    DualAction::Forget,
+                );
+            }
+        }
+    });
+
+    actions.on_connect_item({
+        let inner = Rc::clone(inner);
+        move |setting_id, index| {
+            if let Some(window) = inner.ui.upgrade() {
+                answer_dual_item(
+                    &window,
+                    &inner,
+                    setting_id.as_str(),
+                    index,
+                    DualAction::Connect,
+                );
+            }
+        }
+    });
+
+    actions.on_disconnect_item({
+        let inner = Rc::clone(inner);
+        move |setting_id, index| {
+            if let Some(window) = inner.ui.upgrade() {
+                answer_dual_item(
+                    &window,
+                    &inner,
+                    setting_id.as_str(),
+                    index,
+                    DualAction::Disconnect,
+                );
+            }
+        }
+    });
+
     actions.on_copy(move |text| copy_text(text.as_str()));
 
     actions.on_open_system_settings(open_system_settings);
@@ -2035,6 +2311,12 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
                 // The panels belong to the page, so a sidebar click refits them
                 // from the last connected state.
                 show_section_pages(&state, &inner);
+                // The remembered-device list can change while the page is not
+                // shown, so entering the Connections page asks the worker for a
+                // fresh one; with dual connections off there is no list to ask.
+                if page == Page::Connections {
+                    refresh_dual_connections(&inner);
+                }
             }
         }
     });
@@ -2378,6 +2660,24 @@ fn drain_events(inner: &Rc<Inner>) {
                     apply_setting_outcome(&window, inner, setting, outcome);
                 }
             }
+            Ok(Event::DualConnectionsRead { attempt, outcome }) => {
+                if attempt == inner.connect.get()
+                    && let Some(window) = inner.ui.upgrade()
+                {
+                    apply_dual_read(&window, inner, outcome);
+                }
+            }
+            Ok(Event::DualConnectionsWritten {
+                attempt,
+                action,
+                outcome,
+            }) => {
+                if attempt == inner.connect.get()
+                    && let Some(window) = inner.ui.upgrade()
+                {
+                    apply_dual_write(&window, inner, action, outcome);
+                }
+            }
             Ok(Event::ImportFilePicked { result }) => {
                 inner.picking_import_file.set(false);
                 if let Some(window) = inner.ui.upgrade() {
@@ -2512,10 +2812,26 @@ fn serve_device<T: Transport>(
     let mut equalizer = state.equalizer;
     let has_equalizer = equalizer.is_some();
     let has_settings = state.settings.is_some();
+    // The A3062 asks for its remembered-device list once on connect, but only
+    // while dual connections are on; with them off the Connections page has no
+    // list and no `0B 01` is written.
+    let dual_enabled = model.dual_connections
+        && state
+            .settings
+            .is_some_and(|settings| settings.dual_connections);
     let _ = events.send(Event::Connected {
         attempt,
         outcome: ConnectOutcome::Connected(model, Box::new(state)),
     });
+    if dual_enabled {
+        let outcome = read_dual_connections(&mut session);
+        let disconnected = outcome == Err(DualFailure::Disconnected);
+        let _ = events.send(Event::DualConnectionsRead { attempt, outcome });
+        if disconnected {
+            // The socket is gone; the page's Retry opens a fresh connection.
+            return;
+        }
+    }
     // A model with neither a measured mode, a supported equalizer nor the
     // settings block has nothing this worker can write; ending it closes the
     // socket as the MVP did. Any other model keeps its session open for the
@@ -2605,6 +2921,15 @@ fn serve_device<T: Transport>(
                 if let Ok(reported) = &outcome {
                     equalizer = reported.equalizer;
                 }
+                // Toggling dual connections on makes the Connections page show
+                // its list, so the worker reads it right away; the device's own
+                // answer decides, so a failed or refused toggle reads nothing.
+                let dual_turned_on = matches!(setting, SettingCommand::DualConnections(_))
+                    && outcome
+                        .as_ref()
+                        .ok()
+                        .and_then(|reported| reported.settings)
+                        .is_some_and(|settings| settings.dual_connections);
                 let failed = outcome.is_err();
                 let _ = events.send(Event::SettingChanged {
                     attempt,
@@ -2615,6 +2940,34 @@ fn serve_device<T: Transport>(
                 if failed {
                     // Same rule as a failed mode change: stop writing on a
                     // session that is out of step and let Retry reconnect.
+                    return;
+                }
+                if dual_turned_on {
+                    let outcome = read_dual_connections(&mut session);
+                    let disconnected = outcome == Err(DualFailure::Disconnected);
+                    let _ = events.send(Event::DualConnectionsRead { attempt, outcome });
+                    if disconnected {
+                        return;
+                    }
+                }
+            }
+            DeviceCommand::ReadDualConnections => {
+                let outcome = read_dual_connections(&mut session);
+                let disconnected = outcome == Err(DualFailure::Disconnected);
+                let _ = events.send(Event::DualConnectionsRead { attempt, outcome });
+                if disconnected {
+                    return;
+                }
+            }
+            DeviceCommand::DualConnectionWrite(action) => {
+                let outcome = write_dual_connection(&mut session, action);
+                let disconnected = outcome == Err(DualFailure::Disconnected);
+                let _ = events.send(Event::DualConnectionsWritten {
+                    attempt,
+                    action,
+                    outcome,
+                });
+                if disconnected {
                     return;
                 }
             }
@@ -2795,6 +3148,7 @@ fn begin_connecting(state: &AppState<'_>, inner: &Rc<Inner>, request: ConnectReq
     state.set_error_label("".into());
     state.set_batteries(ModelRc::default());
     inner.device.borrow_mut().take();
+    inner.clear_dual_devices();
     show_sound_mode(state, None, false, false);
     show_equalizer(state, &EqualizerDisplay::default());
     clear_section_pages(state);
@@ -2818,6 +3172,7 @@ fn cancel_connect(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_failure_text("".into());
     state.set_error_label("".into());
     inner.device.borrow_mut().take();
+    inner.clear_dual_devices();
     show_sound_mode(&state, None, false, false);
     show_equalizer(&state, &EqualizerDisplay::default());
     clear_section_pages(&state);
@@ -2849,6 +3204,7 @@ fn disconnect(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_failure_text("".into());
     state.set_error_label("".into());
     inner.device.borrow_mut().take();
+    inner.clear_dual_devices();
     show_sound_mode(&state, None, false, false);
     show_equalizer(&state, &EqualizerDisplay::default());
     clear_section_pages(&state);
@@ -2899,6 +3255,9 @@ fn apply_outcome(window: &AppWindow, inner: &Rc<Inner>, outcome: ConnectOutcome)
     let state = window.global::<AppState>();
     match outcome {
         ConnectOutcome::Connected(model, device_state) => {
+            // A fresh connection starts from no remembered-device list; the
+            // worker reports one when dual connections are on.
+            inner.clear_dual_devices();
             let equalizer = EqualizerDisplay::new(Some(model), device_state.equalizer.as_ref());
             let has_settings = device_state.settings.is_some();
             state.set_batteries(ModelRc::new(VecModel::from(batteries(&device_state))));
@@ -2928,6 +3287,7 @@ fn apply_outcome(window: &AppWindow, inner: &Rc<Inner>, outcome: ConnectOutcome)
 fn apply_failure(inner: &Rc<Inner>, state: &AppState<'_>, failure: ConnectFailure) {
     state.set_batteries(ModelRc::default());
     inner.device.borrow_mut().take();
+    inner.clear_dual_devices();
     show_sound_mode(state, None, false, false);
     show_equalizer(state, &EqualizerDisplay::default());
     clear_section_pages(state);
@@ -3002,9 +3362,10 @@ fn clear_section_pages(state: &AppState<'_>) {
 /// A3949) gets none.
 fn show_section_pages(state: &AppState<'_>, inner: &Rc<Inner>) {
     let device = inner.device.borrow();
+    let dual_devices = inner.dual_devices.borrow();
     let panels = device
         .as_deref()
-        .map(|device_state| panels_for_page(state.get_page(), device_state))
+        .map(|device_state| panels_for_page(state.get_page(), device_state, &dual_devices))
         .unwrap_or_default();
     state.set_panels(ModelRc::new(VecModel::from(panels)));
 }
@@ -3025,13 +3386,62 @@ pub const AUTO_POWER_OFF_OPTIONS: [&str; 5] = [
 /// The limit-high-volume dB reading refresh choices.
 pub const REFRESH_RATE_OPTIONS: [&str; 3] = ["Real time", "10 seconds", "1 minute"];
 
+/// The setting id of the dual-connections list row: the id the vendored list row
+/// passes back to `remove-item`, `connect-item` and `disconnect-item`.
+pub const DUAL_DEVICES_ROW_ID: &str = "dualDevices";
+
+/// One remembered device as the Connections page shows it: its name and, when
+/// the earbuds report it connected, the connected marker. The six address bytes
+/// never reach the UI.
+pub fn dual_device_option(device: &DualConnectionDevice) -> String {
+    let name = device.name.trim();
+    let name = if name.is_empty() {
+        "Unknown device"
+    } else {
+        name
+    };
+    if device.connected {
+        format!("{name} — connected")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// The address of the displayed row `index`, as the device reported it. The list
+/// the row options were built from is the only source of addresses, so an index
+/// outside it writes nothing.
+fn dual_device_mac(devices: &[DualConnectionDevice], index: i32) -> Option<[u8; 6]> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| devices.get(index))
+        .map(|device| device.mac)
+}
+
+/// The dual-connections list row: one option per remembered device, in the
+/// order the device reported them, each with its connected marker.
+fn dual_devices_row(devices: &[DualConnectionDevice]) -> SettingRow {
+    let mut row = setting_row(DUAL_DEVICES_ROW_ID, RowKind::List, "Paired devices");
+    let options: Vec<SharedString> = devices
+        .iter()
+        .map(|device| SharedString::from(dual_device_option(device)))
+        .collect();
+    row.options = ModelRc::new(VecModel::from(options));
+    row
+}
+
 /// The settings panels of one sidebar page, in the vendored section page's panel
-/// layout.
+/// layout, with the dual-connections list the worker last read for the
+/// Connections page. The list row is built from `dual_devices` in reply order,
+/// so the option the user clicks is always the device at that index.
 ///
 /// The A3062 is the only model with a settings block; a state without one (the
 /// A3949 and the rest of the catalog so far) has no panels, so it can neither
 /// show a settings page nor name a setting for a write.
-pub fn panels_for_page(page: Page, device_state: &DeviceState) -> Vec<SettingsPanel> {
+pub fn panels_for_page(
+    page: Page,
+    device_state: &DeviceState,
+    dual_devices: &[DualConnectionDevice],
+) -> Vec<SettingsPanel> {
     let Some(settings) = device_state.settings else {
         return Vec::new();
     };
@@ -3101,16 +3511,26 @@ pub fn panels_for_page(page: Page, device_state: &DeviceState) -> Vec<SettingsPa
                 toggle_row("voicePrompt", "Voice prompt", settings.voice_prompt),
             ],
         )],
-        // The A3062's dual-connections device list is a separate follow-up
-        // slice, so the page has the toggle only.
-        Page::Connections => vec![settings_panel(
-            PanelKind::Plain,
-            vec![toggle_row(
-                "dualConnections",
-                "Dual connections",
-                settings.dual_connections,
-            )],
-        )],
+        // The remembered-device list belongs to the dual-connections setting:
+        // with it off the page has the toggle only, and the controller sends no
+        // `0B 01` either.
+        Page::Connections => {
+            let mut panels = vec![settings_panel(
+                PanelKind::Plain,
+                vec![toggle_row(
+                    "dualConnections",
+                    "Dual connections",
+                    settings.dual_connections,
+                )],
+            )];
+            if settings.dual_connections {
+                panels.push(settings_panel(
+                    PanelKind::DualDevices,
+                    vec![dual_devices_row(dual_devices)],
+                ));
+            }
+            panels
+        }
         Page::Effects => vec![settings_panel(
             PanelKind::Plain,
             vec![
@@ -3422,7 +3842,16 @@ fn apply_setting_outcome(
     let state = window.global::<AppState>();
     match outcome {
         Ok(reported) => {
+            // Turning dual connections off takes the remembered-device list
+            // away with the setting, so no stale row can be forgotten or
+            // connected while it is off.
+            let dual_off = !reported
+                .settings
+                .is_some_and(|settings| settings.dual_connections);
             *inner.device.borrow_mut() = Some(reported);
+            if dual_off {
+                inner.clear_dual_devices();
+            }
             show_section_pages(&state, inner);
             state.set_error_label("".into());
         }
@@ -3434,6 +3863,49 @@ fn apply_setting_outcome(
         }
     }
     refresh_tray(inner, &state);
+}
+
+/// Applies a dual-connections list the worker read: the panel list is rebuilt
+/// from the new order, so a row index can never name the wrong device, and a
+/// failed read says why in the banner while the last list stays displayed.
+fn apply_dual_read(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    outcome: Result<Vec<DualConnectionDevice>, DualFailure>,
+) {
+    let state = window.global::<AppState>();
+    match outcome {
+        Ok(devices) => {
+            show_dual_devices(inner, &state, devices);
+            state.set_error_label("".into());
+        }
+        Err(failure) => state.set_error_label(failure.list_label().into()),
+    }
+}
+
+/// Applies a finished dual-connections write: the re-read list becomes the one
+/// the panel shows, or the banner names the action that failed.
+fn apply_dual_write(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    action: DualAction,
+    outcome: Result<Vec<DualConnectionDevice>, DualFailure>,
+) {
+    let state = window.global::<AppState>();
+    match outcome {
+        Ok(devices) => {
+            show_dual_devices(inner, &state, devices);
+            state.set_error_label("".into());
+        }
+        Err(failure) => state.set_error_label(failure.action_label(action).into()),
+    }
+}
+
+/// Stores the dual-connections list the panels are built from and refills the
+/// current page from it.
+fn show_dual_devices(inner: &Rc<Inner>, state: &AppState<'_>, devices: Vec<DualConnectionDevice>) {
+    *inner.dual_devices.borrow_mut() = devices;
+    show_section_pages(state, inner);
 }
 
 /// Applies a finished equalizer preset change: the preset and curve the device
@@ -3563,6 +4035,50 @@ fn answer_setting(
         // The worker of a previous failed write has closed the connection; the
         // banner's Retry reconnects.
         state.set_error_label(SettingFailure::Disconnected.label(setting).into());
+    }
+}
+
+/// Asks the device worker for a fresh dual-connections list. Nothing is queued
+/// when the page has no list (dual connections off, no connected device or the
+/// deferred A3949), which is also when entering the page must write no `0B 01`.
+fn refresh_dual_connections(inner: &Rc<Inner>) {
+    if !inner.dual_list_visible() {
+        return;
+    }
+    let _ = inner.send_command(DeviceCommand::ReadDualConnections);
+}
+
+/// Answers one of the Connections list's row buttons: the option index names a
+/// device in the list the panels were built from, and that device's six address
+/// bytes are written back unchanged in a `0B 82`/`0B 81`/`0B 83` frame. The
+/// worker re-reads the list after the write, so the page shows the outcome.
+///
+/// A row of another kind, an index the last read no longer has, or a write that
+/// cannot be queued never writes an invented address.
+fn answer_dual_item(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    setting_id: &str,
+    index: i32,
+    action: fn([u8; 6]) -> DualAction,
+) {
+    if setting_id != DUAL_DEVICES_ROW_ID || !inner.dual_list_visible() {
+        return;
+    }
+    let mac = {
+        let devices = inner.dual_devices.borrow();
+        let Some(mac) = dual_device_mac(&devices, index) else {
+            return;
+        };
+        mac
+    };
+    let action = action(mac);
+    if !inner.send_command(DeviceCommand::DualConnectionWrite(action)) {
+        // The worker of a previous failed write has closed the connection; the
+        // banner's Retry reconnects.
+        window
+            .global::<AppState>()
+            .set_error_label(DualFailure::Disconnected.action_label(action).into());
     }
 }
 
@@ -6602,12 +7118,85 @@ mod tests {
         frame
     }
 
+    /// The measured `01 01` body offset of the A3062 dual-connections flag.
+    const DUAL_CONNECTIONS_OFFSET: usize = 79;
+
+    /// Any measured `01 01` frame with its dual-connections flag (body offset
+    /// 79) set to `on`, the checksum recomputed and every other byte kept.
+    /// Worker tests that are not about the dual-connections list connect with
+    /// the flag off, so the automatic `0B 01` read never interrupts their
+    /// scripted sequence.
+    fn frame_with_dual(mut frame: Vec<u8>, on: bool) -> Vec<u8> {
+        frame[STATE_FRAME_HEADER_LEN + DUAL_CONNECTIONS_OFFSET] = u8::from(on);
+        let checksum_at = frame.len() - 1;
+        frame[checksum_at] = soundcore_protocol::checksum(&frame[..checksum_at]);
+        frame
+    }
+
     /// The committed capture with a valid firmware string (body 2..7, `04.39`),
     /// which the sanitized capture zeroes.
     fn a3062_state_with_firmware() -> DeviceState {
         let frame = a3062_frame_with(&[(2, b'0'), (3, b'4'), (4, b'.'), (5, b'3'), (6, b'9')]);
         let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
         soundcore_models::parse_state_frame(model, &frame).expect("the patched capture parses")
+    }
+
+    /// A3062 state with the measured dual-connections flag (body offset 79) set
+    /// to `on`, every other setting as captured.
+    fn a3062_state_with_dual(on: bool) -> DeviceState {
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        soundcore_models::parse_state_frame(model, &frame_with_dual(captured_a3062_frame(), on))
+            .expect("the patched capture parses")
+    }
+
+    /// The committed real A3062 `0B 01` reply: one frame with the two
+    /// remembered devices "Desktop" (connected) and "Phone model" (not
+    /// connected), in reply order.
+    fn captured_dual_reply() -> Vec<u8> {
+        captured_frame(include_str!("../../core/data/a3062-dual-connections.json"))
+    }
+
+    /// The two remembered devices of [`captured_dual_reply`].
+    fn captured_dual_devices() -> Vec<DualConnectionDevice> {
+        soundcore_models::parse_dual_connections_frame(&captured_dual_reply())
+            .expect("the real dual-connections reply parses")
+            .devices
+    }
+
+    /// The address bytes of the committed reply's first device, in reply order.
+    const DESKTOP_MAC: [u8; 6] = [2, 0, 0, 0, 0, 1];
+    /// The address bytes of the committed reply's second device, in reply order.
+    const PHONE_MAC: [u8; 6] = [2, 0, 0, 0, 0, 2];
+
+    /// A `0B 01` reply frame carrying `devices` in the given order, in the
+    /// measured 40-byte record layout: a length byte, the connected flag, six
+    /// address bytes in reply order and a 32-byte NUL-padded name.
+    fn dual_reply(devices: &[(&str, [u8; 6], bool)]) -> Vec<u8> {
+        let mut body = vec![1u8, 1u8];
+        for (name, mac, connected) in devices {
+            body.push(40);
+            body.push(u8::from(*connected));
+            body.extend_from_slice(mac);
+            let mut name_field = [0u8; 32];
+            let bytes = name.as_bytes();
+            let length = bytes.len().min(name_field.len());
+            name_field[..length].copy_from_slice(&bytes[..length]);
+            body.extend_from_slice(&name_field);
+        }
+        soundcore_protocol::encode(
+            soundcore_protocol::Direction::Inbound,
+            soundcore_protocol::Command::new(0x0B, 0x01),
+            &body,
+        )
+    }
+
+    /// The option strings of one list row, in panel order.
+    fn list_options(panel: &SettingsPanel, index: usize) -> Vec<String> {
+        let row: SettingRow = panel.rows.iter().nth(index).expect("the row exists");
+        row.options
+            .iter()
+            .map(|option| option.to_string())
+            .collect()
     }
 
     fn panel_kinds(panels: &[SettingsPanel]) -> Vec<PanelKind> {
@@ -6678,7 +7267,7 @@ mod tests {
             Page::Effects,
         ] {
             assert!(
-                panels_for_page(page, &state).is_empty(),
+                panels_for_page(page, &state, &[]).is_empty(),
                 "{page:?} must have no panels"
             );
         }
@@ -6687,7 +7276,7 @@ mod tests {
     #[test]
     fn the_controls_page_has_the_presses_and_cycle_panels() {
         let state = a3062_state();
-        let panels = panels_for_page(Page::Controls, &state);
+        let panels = panels_for_page(Page::Controls, &state, &[]);
         assert_eq!(
             panel_kinds(&panels),
             vec![PanelKind::Presses, PanelKind::Cycle]
@@ -6723,7 +7312,7 @@ mod tests {
     #[test]
     fn the_comfort_page_has_the_side_tone_and_volume_panels() {
         let state = a3062_state();
-        let panels = panels_for_page(Page::Comfort, &state);
+        let panels = panels_for_page(Page::Comfort, &state, &[]);
         assert_eq!(
             panel_kinds(&panels),
             vec![PanelKind::Plain, PanelKind::Volume]
@@ -6768,7 +7357,7 @@ mod tests {
     #[test]
     fn the_power_page_has_the_auto_power_off_and_prompts() {
         let state = a3062_state();
-        let panels = panels_for_page(Page::Power, &state);
+        let panels = panels_for_page(Page::Power, &state, &[]);
         assert_eq!(panel_kinds(&panels), vec![PanelKind::Plain]);
         assert_eq!(
             row_ids(&panels[0]),
@@ -6798,23 +7387,105 @@ mod tests {
     }
 
     #[test]
-    fn the_connections_page_has_the_dual_connections_toggle_only() {
-        // The remembered-device list and its forget action belong to the
-        // follow-up dual-connections slice, so this page has one panel and one
-        // row.
+    fn the_connections_page_shows_the_dual_list_while_dual_connections_are_on() {
+        // The list panel belongs to the dual-connections setting: the toggle
+        // panel stays, and the remembered devices are a list row under it.
         let state = a3062_state();
-        let panels = panels_for_page(Page::Connections, &state);
-        assert_eq!(panel_kinds(&panels), vec![PanelKind::Plain]);
-        assert_eq!(panels.len(), 1);
+        assert!(
+            state
+                .settings
+                .expect("the A3062 reports settings")
+                .dual_connections,
+            "the measured capture has dual connections on"
+        );
+        let panels = panels_for_page(Page::Connections, &state, &captured_dual_devices());
+        assert_eq!(
+            panel_kinds(&panels),
+            vec![PanelKind::Plain, PanelKind::DualDevices]
+        );
         assert_eq!(row_ids(&panels[0]), ["dualConnections"]);
-        let row: SettingRow = panels[0].rows.iter().next().expect("the toggle row");
-        assert!(row.checked, "the measured dual connections are on");
+        let toggle: SettingRow = panels[0].rows.iter().next().expect("the toggle row");
+        assert!(toggle.checked, "the measured dual connections are on");
+
+        assert_eq!(row_ids(&panels[1]), [DUAL_DEVICES_ROW_ID]);
+        let list: SettingRow = panels[1].rows.iter().next().expect("the list row");
+        assert_eq!(list.kind, RowKind::List);
+        assert_eq!(
+            list_options(&panels[1], 0),
+            ["Desktop — connected", "Phone model"],
+            "the options are the reply order with the connected marker"
+        );
+        assert!(
+            list_options(&panels[1], 0)
+                .iter()
+                .all(|option| !option.contains("02:00")),
+            "no address reaches the UI"
+        );
+    }
+
+    #[test]
+    fn the_connections_page_hides_the_dual_list_while_dual_connections_are_off() {
+        let state = a3062_state_with_dual(false);
+        let panels = panels_for_page(Page::Connections, &state, &captured_dual_devices());
+        assert_eq!(panel_kinds(&panels), vec![PanelKind::Plain]);
+        assert_eq!(row_ids(&panels[0]), ["dualConnections"]);
+        assert!(
+            !panels[0]
+                .rows
+                .iter()
+                .next()
+                .expect("the toggle row")
+                .checked
+        );
+    }
+
+    #[test]
+    fn dual_list_options_and_the_actions_share_one_index() {
+        // The option strings and the click mapping both come from the same
+        // list, so index 0 is the first reply device and index 1 the second.
+        let devices = captured_dual_devices();
+        let panels = panels_for_page(Page::Connections, &a3062_state(), &devices);
+        assert_eq!(
+            list_options(&panels[1], 0),
+            ["Desktop — connected", "Phone model"]
+        );
+        assert_eq!(dual_device_mac(&devices, 0), Some(DESKTOP_MAC));
+        assert_eq!(dual_device_mac(&devices, 1), Some(PHONE_MAC));
+        assert_eq!(dual_device_mac(&devices, -1), None);
+        assert_eq!(dual_device_mac(&devices, 2), None);
+
+        // After a re-read drops the first device the second becomes index 0.
+        let remaining = vec![devices[1].clone()];
+        let panels = panels_for_page(Page::Connections, &a3062_state(), &remaining);
+        assert_eq!(list_options(&panels[1], 0), ["Phone model"]);
+        assert_eq!(dual_device_mac(&remaining, 0), Some(PHONE_MAC));
+        assert_eq!(dual_device_mac(&remaining, 1), None);
+    }
+
+    #[test]
+    fn a_dual_list_option_names_an_unnamed_device_without_an_address() {
+        let unnamed = DualConnectionDevice {
+            name: String::new(),
+            mac: DESKTOP_MAC,
+            connected: true,
+        };
+        assert_eq!(dual_device_option(&unnamed), "Unknown device — connected");
+    }
+
+    #[test]
+    fn a_model_without_settings_has_no_connections_page_or_dual_list() {
+        // The A3949 is deferred: even when a list is somehow in memory, its
+        // Connections page has no panel, so it can neither show nor write one.
+        let state = a3949_state();
+        assert_eq!(state.settings, None);
+        let panels = panels_for_page(Page::Connections, &state, &captured_dual_devices());
+        assert!(panels.is_empty());
     }
 
     #[test]
     fn the_effects_page_has_the_ldac_and_dolby_toggles() {
         let state = a3062_state();
-        let panels = panels_for_page(Page::Effects, &state);
+        let panels = panels_for_page(Page::Effects, &state, &[]);
         assert_eq!(panel_kinds(&panels), vec![PanelKind::Plain]);
         assert_eq!(row_ids(&panels[0]), ["ldac", "dolbyAudio"]);
         assert_eq!(
@@ -6832,7 +7503,7 @@ mod tests {
     #[test]
     fn the_about_page_has_the_charging_battery_and_firmware_information() {
         let state = a3062_state_with_firmware();
-        let panels = panels_for_page(Page::About, &state);
+        let panels = panels_for_page(Page::About, &state, &[]);
         assert_eq!(panel_kinds(&panels), vec![PanelKind::Info]);
         assert_eq!(
             row_ids(&panels[0]),
@@ -7123,10 +7794,11 @@ mod tests {
 
     #[test]
     fn one_settings_write_is_one_frame_and_one_re_poll() {
-        // The connect state, then the device's answer after the write: side
-        // tone off.
+        // The connect state with dual connections off (so the connect worker
+        // reads no list), then the device's answer after the write: side tone
+        // off.
         let transport =
-            FakeTransport::scripted([captured_a3062_frame(), a3062_frame_with(&[(85, 0)])]);
+            FakeTransport::scripted([a3062_frame_with(&[(79, 0)]), a3062_frame_with(&[(85, 0)])]);
         let session = session_with("A3062", &transport);
         let (events, received) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
@@ -7174,9 +7846,10 @@ mod tests {
 
     #[test]
     fn a_failed_settings_write_surfaces_and_ends_the_worker() {
-        // Only the connect state is scripted, so the re-poll times out and the
-        // click queued behind the failing one must not be written.
-        let transport = FakeTransport::scripted([captured_a3062_frame()]);
+        // Only a dual-off connect state is scripted (no automatic list read), so
+        // the re-poll times out and the click queued behind the failing one must
+        // not be written.
+        let transport = FakeTransport::scripted([a3062_frame_with(&[(79, 0)])]);
         let session = session_with("A3062", &transport);
         let (events, received) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
@@ -7225,6 +7898,479 @@ mod tests {
             received.try_recv().is_err(),
             "the worker ended without running the queued click"
         );
+    }
+
+    #[test]
+    fn the_worker_reads_the_dual_list_after_connecting_when_it_is_on() {
+        // The connect poll, then the device's `0B 01` answer.
+        let transport = FakeTransport::scripted([captured_a3062_frame(), captured_dual_reply()]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![state_request(), hex("08 EE 00 00 00 0B 01 0A 00 0C")],
+            "the connect poll, then exactly one empty 0B 01 list request"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected {
+                attempt: 9,
+                outcome: ConnectOutcome::Connected(..)
+            }
+        ));
+        match received.try_recv().expect("the dual-connections list") {
+            Event::DualConnectionsRead {
+                attempt: 9,
+                outcome: Ok(devices),
+            } => assert_eq!(
+                devices,
+                captured_dual_devices(),
+                "the reply order and the connected flags are kept"
+            ),
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(
+            received.try_recv().is_err(),
+            "the worker ended with the closed command channel"
+        );
+    }
+
+    #[test]
+    fn the_worker_reads_no_dual_list_when_the_setting_is_off() {
+        // Dual connections off: the Connections page has no list, so the
+        // connect worker writes no `0B 01` and reports no list.
+        let transport = FakeTransport::scripted([a3062_frame_with(&[(79, 0)])]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![state_request()],
+            "only the connect poll is written"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected {
+                attempt: 9,
+                outcome: ConnectOutcome::Connected(..)
+            }
+        ));
+        assert!(
+            received.try_recv().is_err(),
+            "no dual-connections event is reported"
+        );
+    }
+
+    #[test]
+    fn the_deferred_a3949_never_reads_or_writes_a_dual_list() {
+        // The A3949 has no settings block, so the worker neither reads a `0B 01`
+        // list on connect nor keeps a session that could write one.
+        let transport = FakeTransport::scripted([captured_a3949_frame()]);
+        let session = session_with("A3949", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![state_request()],
+            "only the connect poll is written"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected { .. }
+        ));
+        assert!(
+            received.try_recv().is_err(),
+            "the deferred model reports no dual-connections list"
+        );
+    }
+
+    #[test]
+    fn each_dual_action_writes_its_measured_frame_and_re_reads_the_list() {
+        let cases = [
+            (
+                DualAction::Connect(PHONE_MAC),
+                soundcore_models::dual_connections_connect_frame(PHONE_MAC),
+                dual_reply(&[
+                    ("Desktop", DESKTOP_MAC, true),
+                    ("Phone model", PHONE_MAC, true),
+                ]),
+                vec![
+                    ("Desktop", DESKTOP_MAC, true),
+                    ("Phone model", PHONE_MAC, true),
+                ],
+            ),
+            (
+                DualAction::Disconnect(PHONE_MAC),
+                soundcore_models::dual_connections_disconnect_frame(PHONE_MAC),
+                dual_reply(&[
+                    ("Desktop", DESKTOP_MAC, true),
+                    ("Phone model", PHONE_MAC, false),
+                ]),
+                vec![
+                    ("Desktop", DESKTOP_MAC, true),
+                    ("Phone model", PHONE_MAC, false),
+                ],
+            ),
+            (
+                DualAction::Forget(PHONE_MAC),
+                soundcore_models::dual_connections_forget_frame(PHONE_MAC),
+                dual_reply(&[("Desktop", DESKTOP_MAC, true)]),
+                vec![("Desktop", DESKTOP_MAC, true)],
+            ),
+        ];
+        for (action, frame, reply, expected) in cases {
+            // A dual-off connect state keeps the automatic list read out of the
+            // script, so the write and its one re-read are the whole exchange.
+            let transport = FakeTransport::scripted([a3062_frame_with(&[(79, 0)]), reply]);
+            let session = session_with("A3062", &transport);
+            let (events, received) = mpsc::channel();
+            let (commands, command_receiver) = mpsc::channel();
+            commands
+                .send(DeviceCommand::DualConnectionWrite(action))
+                .expect("the list-row action is queued");
+            drop(commands);
+
+            serve_device(session, 9, events, command_receiver);
+
+            assert_eq!(
+                transport.writes(),
+                vec![state_request(), frame, hex("08 EE 00 00 00 0B 01 0A 00 0C"),],
+                "{action:?}: one measured action frame, then the list re-read"
+            );
+            assert!(matches!(
+                received.try_recv().expect("the state report"),
+                Event::Connected {
+                    attempt: 9,
+                    outcome: ConnectOutcome::Connected(..)
+                }
+            ));
+            match received.try_recv().expect("the re-read list") {
+                Event::DualConnectionsWritten {
+                    attempt: 9,
+                    action: reported,
+                    outcome: Ok(devices),
+                } => {
+                    assert_eq!(reported, action, "the event names the action it ran");
+                    let devices: Vec<(&str, [u8; 6], bool)> = devices
+                        .iter()
+                        .map(|device| (device.name.as_str(), device.mac, device.connected))
+                        .collect();
+                    assert_eq!(devices, expected, "{action:?}: the re-read list");
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+            assert!(received.try_recv().is_err(), "the worker ended");
+        }
+    }
+
+    #[test]
+    fn a_connecting_device_is_re_read_until_the_list_reports_it_connected() {
+        // The first answer still shows the phone disconnected; the bounded
+        // re-read settles on the answer that reports the connection.
+        let transport = FakeTransport::scripted([
+            a3062_frame_with(&[(79, 0)]),
+            dual_reply(&[
+                ("Desktop", DESKTOP_MAC, true),
+                ("Phone model", PHONE_MAC, false),
+            ]),
+            dual_reply(&[
+                ("Desktop", DESKTOP_MAC, true),
+                ("Phone model", PHONE_MAC, true),
+            ]),
+        ]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::DualConnectionWrite(DualAction::Connect(
+                PHONE_MAC,
+            )))
+            .expect("the connect action is queued");
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        let list_request = hex("08 EE 00 00 00 0B 01 0A 00 0C");
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                soundcore_models::dual_connections_connect_frame(PHONE_MAC),
+                list_request.clone(),
+                list_request,
+            ],
+            "the connect frame and two list reads while the device settles"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected { .. }
+        ));
+        match received.try_recv().expect("the settled re-read") {
+            Event::DualConnectionsWritten {
+                action: DualAction::Connect(mac),
+                outcome: Ok(devices),
+                ..
+            } => {
+                assert_eq!(mac, PHONE_MAC);
+                assert!(
+                    devices
+                        .iter()
+                        .any(|device| device.mac == PHONE_MAC && device.connected),
+                    "the settled list reports the phone connected"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dual_read_failure_reports_its_label_and_keeps_the_worker_serving() {
+        // Only the connect poll is scripted, so both page refreshes time out;
+        // the worker keeps serving instead of ending the session.
+        let transport = FakeTransport::scripted([a3062_frame_with(&[(79, 0)])]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::ReadDualConnections)
+            .expect("the first refresh is queued");
+        commands
+            .send(DeviceCommand::ReadDualConnections)
+            .expect("the second refresh is queued");
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                hex("08 EE 00 00 00 0B 01 0A 00 0C"),
+                hex("08 EE 00 00 00 0B 01 0A 00 0C"),
+            ],
+            "both refreshes wrote their own list request"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected { .. }
+        ));
+        for _ in 0..2 {
+            match received.try_recv().expect("the failed read") {
+                Event::DualConnectionsRead {
+                    attempt: 9,
+                    outcome: Err(failure),
+                } => {
+                    assert_eq!(failure, DualFailure::TimedOut);
+                    assert_eq!(failure.list_label(), "Dual connections list (no answer)");
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert!(
+            received.try_recv().is_err(),
+            "the worker read both refreshes"
+        );
+    }
+
+    #[test]
+    fn a_lost_link_during_a_dual_write_ends_the_worker() {
+        let transport = FakeTransport::scripted([a3062_frame_with(&[(79, 0)])]);
+        transport
+            .reads
+            .borrow_mut()
+            .push_back(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "scripted link loss",
+            )));
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::DualConnectionWrite(DualAction::Forget(
+                PHONE_MAC,
+            )))
+            .expect("the forget action is queued");
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                soundcore_models::dual_connections_forget_frame(PHONE_MAC),
+                hex("08 EE 00 00 00 0B 01 0A 00 0C"),
+            ],
+            "the forget frame and its list request were written; the dropped link ended the worker"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected { .. }
+        ));
+        match received.try_recv().expect("the lost link") {
+            Event::DualConnectionsWritten {
+                attempt: 9,
+                action: DualAction::Forget(mac),
+                outcome: Err(failure),
+            } => {
+                assert_eq!(mac, PHONE_MAC);
+                assert_eq!(failure, DualFailure::Disconnected);
+                assert_eq!(
+                    failure.action_label(DualAction::Forget(mac)),
+                    "Forget device (connection lost)"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(received.try_recv().is_err(), "the worker ended");
+    }
+
+    #[test]
+    fn turning_dual_connections_on_reads_the_list_but_turning_it_off_does_not() {
+        // One worker run: connect with dual connections off, toggle on (the
+        // `0B 84` write, its state re-poll, then the list read), then toggle off
+        // (the `0B 84` write and its state re-poll only, no second list read).
+        let on_frame = soundcore_protocol::encode(
+            soundcore_protocol::Direction::Outbound,
+            soundcore_protocol::Command::new(0x0B, 0x84),
+            &[1],
+        );
+        let off_frame = soundcore_protocol::encode(
+            soundcore_protocol::Direction::Outbound,
+            soundcore_protocol::Command::new(0x0B, 0x84),
+            &[0],
+        );
+        let transport = FakeTransport::scripted([
+            a3062_frame_with(&[(79, 0)]),
+            a3062_frame_with(&[(79, 1)]),
+            captured_dual_reply(),
+            a3062_frame_with(&[(79, 0)]),
+        ]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::SetSetting {
+                request: 1,
+                setting: SettingCommand::DualConnections(true),
+            })
+            .expect("the toggle on is queued");
+        commands
+            .send(DeviceCommand::SetSetting {
+                request: 2,
+                setting: SettingCommand::DualConnections(false),
+            })
+            .expect("the toggle off is queued behind it");
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        let list_request = hex("08 EE 00 00 00 0B 01 0A 00 0C");
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                on_frame,
+                state_request(),
+                list_request,
+                off_frame,
+                state_request(),
+            ],
+            "on: the 0B 84 write, its state re-poll, then the list read; \
+             off: the 0B 84 write and its state re-poll only"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected { .. }
+        ));
+        assert!(matches!(
+            received.try_recv().expect("the toggle on result"),
+            Event::SettingChanged {
+                attempt: 9,
+                request: 1,
+                setting: SettingCommand::DualConnections(true),
+                outcome: Ok(_)
+            }
+        ));
+        match received.try_recv().expect("the list after turning on") {
+            Event::DualConnectionsRead {
+                attempt: 9,
+                outcome: Ok(devices),
+            } => assert_eq!(devices, captured_dual_devices()),
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(matches!(
+            received.try_recv().expect("the toggle off result"),
+            Event::SettingChanged {
+                attempt: 9,
+                request: 2,
+                setting: SettingCommand::DualConnections(false),
+                outcome: Ok(_)
+            }
+        ));
+        assert!(
+            received.try_recv().is_err(),
+            "turning the setting off reports no list"
+        );
+    }
+
+    #[test]
+    fn a_dual_failure_names_the_list_or_the_action_and_the_reason() {
+        let cases = [
+            (SessionError::Timeout, DualFailure::TimedOut),
+            (
+                SessionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "connection reset by peer",
+                )),
+                DualFailure::Disconnected,
+            ),
+            (
+                SessionError::Protocol(soundcore_session::ProtocolError::State(
+                    soundcore_models::StateError::NotAStateFrame,
+                )),
+                DualFailure::Unreadable,
+            ),
+            (
+                SessionError::UnsupportedDualConnections,
+                DualFailure::Unreadable,
+            ),
+        ];
+        for (error, expected) in cases {
+            let failure = DualFailure::from_session(error);
+            assert_eq!(failure, expected);
+            assert_eq!(
+                failure.list_label(),
+                format!("Dual connections list ({})", failure.reason())
+            );
+            assert_eq!(
+                failure.action_label(DualAction::Forget(PHONE_MAC)),
+                format!("Forget device ({})", failure.reason())
+            );
+        }
+        // Each action names itself; none names the address the frame carries.
+        for (action, label) in [
+            (DualAction::Connect(PHONE_MAC), "Connect device"),
+            (DualAction::Disconnect(PHONE_MAC), "Disconnect device"),
+            (DualAction::Forget(PHONE_MAC), "Forget device"),
+        ] {
+            let shown = DualFailure::TimedOut.action_label(action);
+            assert_eq!(shown, format!("{label} (no answer)"));
+            assert!(!shown.contains("02:00"), "{shown:?} leaks no address");
+        }
     }
 
     #[test]
@@ -8282,10 +9428,10 @@ mod tests {
 
     #[test]
     fn a_failed_change_ends_the_worker_without_running_the_queued_click() {
-        // The initial state is a real masked A3062 capture (normal mode); no
-        // read is scripted after it, so the re-poll of the first change times
-        // out.
-        let transport = FakeTransport::scripted([captured_a3062_frame()]);
+        // The initial state is a real masked A3062 capture with dual connections
+        // off, so the connect worker reads no list; no read is scripted after
+        // it, so the re-poll of the first change times out.
+        let transport = FakeTransport::scripted([a3062_frame_with(&[(79, 0)])]);
         let session = session_with("A3062", &transport);
         let (events, received) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
@@ -8518,7 +9664,7 @@ mod tests {
     #[test]
     fn the_worker_writes_one_custom_frame_and_reports_the_custom_state() {
         let transport = FakeTransport::scripted([
-            captured_before_custom_eq_frame(),
+            frame_with_dual(captured_before_custom_eq_frame(), false),
             captured_custom_eq_frame(),
         ]);
         let session = session_with("A3062", &transport);
@@ -8568,7 +9714,7 @@ mod tests {
         // preserved — and is the same measured frame as from the Signature
         // state.
         let transport = FakeTransport::scripted([
-            captured_before_custom_eq_frame(),
+            frame_with_dual(captured_before_custom_eq_frame(), false),
             captured_custom_eq_frame(),
             captured_eq_frame("Bass Reducer"),
         ]);
@@ -8630,7 +9776,7 @@ mod tests {
         let mut mode_answer = mode_ack();
         mode_answer.extend_from_slice(&captured_mode_frame("Transparency"));
         let transport = FakeTransport::scripted([
-            captured_a3062_frame(),
+            a3062_frame_with(&[(79, 0)]),
             mode_answer,
             captured_eq_frame("Bass Reducer"),
         ]);
@@ -8691,7 +9837,8 @@ mod tests {
 
     #[test]
     fn an_unknown_preset_id_writes_no_equalizer_frame() {
-        let transport = FakeTransport::scripted([captured_a3062_frame()]);
+        // A dual-off connect state, so the only scripted read is the state poll.
+        let transport = FakeTransport::scripted([a3062_frame_with(&[(79, 0)])]);
         let session = session_with("A3062", &transport);
         let (events, received) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
@@ -8728,9 +9875,10 @@ mod tests {
 
     #[test]
     fn a_failed_preset_change_ends_the_worker_without_running_the_queued_click() {
-        // The initial state is a real masked A3062 capture; no read is scripted
-        // after it, so the re-poll of the first change times out.
-        let transport = FakeTransport::scripted([captured_a3062_frame()]);
+        // The initial state is a real masked A3062 capture with dual connections
+        // off, so the connect worker reads no list; no read is scripted after
+        // it, so the re-poll of the first change times out.
+        let transport = FakeTransport::scripted([a3062_frame_with(&[(79, 0)])]);
         let session = session_with("A3062", &transport);
         let (events, received) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
@@ -8960,6 +10108,7 @@ mod tests {
             curve_change: Cell::new(0),
             setting_change: Cell::new(0),
             device: RefCell::new(None),
+            dual_devices: RefCell::new(Vec::new()),
             profiles: RefCell::new(load_profiles(&path)),
             profiles_path: Some(path),
             import_text: RefCell::new(None),
@@ -9331,9 +10480,31 @@ mod tests {
         assert_eq!(select_options(&panels[0], 1), ["None", "Bass Up"]);
         assert_eq!(panels[1].rows.row_count(), 3, "the three cycle toggles");
         ui.global::<Actions>().invoke_navigate(Page::Connections);
-        let panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
+        // Entering the page queued a fresh list read; the remembered devices
+        // arrive as a second panel once the worker reports them.
+        let mut panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
+        if initial.dual_connections {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while panels.len() < 2
+                && state.get_error_label().is_empty()
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(100));
+                drain_events(&inner);
+                panels = state.get_panels().iter().collect();
+            }
+        }
         assert_eq!(row_ids(&panels[0]), ["dualConnections"]);
-        assert_eq!(panels.len(), 1, "no remembered-device list in this slice");
+        if initial.dual_connections {
+            assert_eq!(
+                panel_kinds(&panels),
+                vec![PanelKind::Plain, PanelKind::DualDevices],
+                "the remembered devices are listed while dual connections are on"
+            );
+            println!("  dual devices: {:?}", list_options(&panels[1], 0));
+        } else {
+            assert_eq!(panels.len(), 1, "dual connections off hides the list");
+        }
         ui.global::<Actions>().invoke_navigate(Page::About);
         let panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
         let about_ids = row_ids(&panels[0]);
@@ -9451,6 +10622,113 @@ mod tests {
         );
         println!("  final settings: {final_settings:?}");
         disconnect(&ui, &inner);
+    }
+
+    /// Manual hardware check of the Connections page's remembered-device list on
+    /// the real Space One Pro, read-only:
+    ///
+    /// ```text
+    /// cargo test -p soundcore-desktop manual_dual_connections_list -- --ignored --nocapture
+    /// ```
+    ///
+    /// Connects the suggested A3062 and enters the Connections page through the
+    /// wired action, which asks the worker for a fresh `0B 01` list. Asserts the
+    /// page is the toggle plus the device list while the setting is on, that
+    /// every option is built from the same reply order the row actions index, and
+    /// prints only counts and flags: no device name, address or serial. It writes
+    /// no list-row action, so the earbuds' pairing is left as found.
+    #[test]
+    #[ignore = "manual hardware check: needs a paired A3062"]
+    fn manual_dual_connections_list() {
+        let ui = AppWindow::new().expect("the shell window builds");
+        let inner = test_inner(&ui);
+        wire_actions(&ui, &inner);
+        let state = ui.global::<AppState>();
+        let model = selected_model("A3062").expect("the A3062 is in the catalog");
+        let found = enumerate_candidates(Some((model.code, model.name))).expect("enumeration");
+        println!("  {} A3062 candidate(s)", found.len());
+        if found.is_empty() {
+            println!("  no paired A3062; nothing to verify");
+            return;
+        }
+        // `pair` reads the chosen model from the dialog state. Stale pairing
+        // entries do not answer, so try each candidate until one connects.
+        state.set_add_model_code(model.code.into());
+        state.set_add_model_name(model.name.into());
+        let mut connected = false;
+        for (index, candidate) in found.iter().enumerate() {
+            println!(
+                "  candidate {index}: {}",
+                masked_mac(&format_mac(candidate.address))
+            );
+            pair(&ui, &inner, &format_mac(candidate.address), &candidate.name);
+            if wait_for_connection(&inner, &ui, Connection::Connected, Duration::from_secs(20)) {
+                connected = true;
+                break;
+            }
+            println!("    no answer ({:?})", state.get_failure_kind());
+        }
+        if !connected {
+            println!("  no paired A3062 answered; nothing to verify");
+            return;
+        }
+        let settings = current_settings(&inner).expect("the A3062 reports settings");
+        println!(
+            "  connected; dual connections on: {}",
+            settings.dual_connections
+        );
+
+        ui.global::<Actions>().invoke_navigate(Page::Connections);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
+        while settings.dual_connections
+            && panels.len() < 2
+            && state.get_error_label().is_empty()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(100));
+            drain_events(&inner);
+            panels = state.get_panels().iter().collect();
+        }
+        assert_eq!(row_ids(&panels[0]), ["dualConnections"]);
+        if !settings.dual_connections {
+            assert_eq!(panels.len(), 1, "dual connections off hides the list");
+            println!("  dual connections off: no list panel and no 0B 01");
+        } else {
+            assert_eq!(
+                panel_kinds(&panels),
+                vec![PanelKind::Plain, PanelKind::DualDevices],
+                "the list panel follows the toggle panel"
+            );
+            let devices = inner.dual_devices.borrow().clone();
+            let options = list_options(&panels[1], 0);
+            println!("  remembered devices: {} option(s)", options.len());
+            assert_eq!(options.len(), devices.len(), "one option per device");
+            for (option, device) in options.iter().zip(devices.iter()) {
+                assert_eq!(
+                    *option,
+                    dual_device_option(device),
+                    "the option is built from the same report the row actions index"
+                );
+                assert_eq!(
+                    option.ends_with(" — connected"),
+                    device.connected,
+                    "the connected marker follows the reported flag"
+                );
+                println!(
+                    "    connected={} name-empty={} option-length={}",
+                    device.connected,
+                    device.name.trim().is_empty(),
+                    option.len()
+                );
+            }
+            assert!(
+                options.iter().all(|option| !option.contains("__:__")),
+                "no address reaches the option strings"
+            );
+        }
+        disconnect(&ui, &inner);
+        println!("  disconnected; the run wrote only the state polls and the read-only 0B 01");
     }
 
     /// Manual hardware check that a P20i never offers the Sound mode page:
@@ -11231,6 +12509,134 @@ mod tests {
             let content = inner.tray_content.borrow().clone();
             assert!(content.has_device);
             assert!(!content.connected);
+        });
+    }
+
+    #[test]
+    fn a_dual_list_row_action_writes_the_device_at_that_option_index() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            let (commands, queued) = mpsc::channel();
+            *inner.commands.borrow_mut() = Some(commands);
+            *inner.device.borrow_mut() = Some(Box::new(a3062_state()));
+            *inner.dual_devices.borrow_mut() = captured_dual_devices();
+
+            let expect = |queued: &mpsc::Receiver<DeviceCommand>, action: DualAction| {
+                assert_eq!(
+                    queued
+                        .recv_timeout(Duration::from_secs(1))
+                        .expect("the row action queued a write"),
+                    DeviceCommand::DualConnectionWrite(action),
+                    "the option index names the device at that reply position"
+                );
+            };
+            answer_dual_item(ui, &inner, DUAL_DEVICES_ROW_ID, 1, DualAction::Forget);
+            expect(&queued, DualAction::Forget(PHONE_MAC));
+            answer_dual_item(ui, &inner, DUAL_DEVICES_ROW_ID, 0, DualAction::Connect);
+            expect(&queued, DualAction::Connect(DESKTOP_MAC));
+            answer_dual_item(ui, &inner, DUAL_DEVICES_ROW_ID, 0, DualAction::Disconnect);
+            expect(&queued, DualAction::Disconnect(DESKTOP_MAC));
+
+            // An index the last read no longer has or a row of another kind
+            // writes no invented address.
+            answer_dual_item(ui, &inner, DUAL_DEVICES_ROW_ID, 2, DualAction::Forget);
+            answer_dual_item(ui, &inner, "anotherRow", 0, DualAction::Forget);
+            assert!(
+                queued.try_recv().is_err(),
+                "nothing is written for an index or row that names no device"
+            );
+            assert_eq!(state.get_error_label().as_str(), "", "nothing failed");
+        });
+    }
+
+    #[test]
+    fn a_dual_row_action_is_refused_while_the_list_is_hidden_or_the_worker_is_gone() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            let (commands, queued) = mpsc::channel();
+            *inner.commands.borrow_mut() = Some(commands);
+            // Dual connections off: the page has no list, so even a stale row
+            // click writes nothing.
+            *inner.device.borrow_mut() = Some(Box::new(a3062_state_with_dual(false)));
+            *inner.dual_devices.borrow_mut() = captured_dual_devices();
+            answer_dual_item(ui, &inner, DUAL_DEVICES_ROW_ID, 0, DualAction::Forget);
+            assert!(queued.try_recv().is_err(), "the hidden list writes nothing");
+
+            // On, but the worker of a failed write closed: the banner names the
+            // action instead of writing on a dead connection.
+            *inner.device.borrow_mut() = Some(Box::new(a3062_state()));
+            inner.stop_worker();
+            answer_dual_item(ui, &inner, DUAL_DEVICES_ROW_ID, 0, DualAction::Disconnect);
+            assert_eq!(
+                state.get_error_label().as_str(),
+                "Disconnect device (connection lost)"
+            );
+        });
+    }
+
+    #[test]
+    fn turning_dual_connections_off_clears_the_remembered_device_list() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            state.set_page(Page::Connections);
+            *inner.device.borrow_mut() = Some(Box::new(a3062_state()));
+            *inner.dual_devices.borrow_mut() = captured_dual_devices();
+            show_section_pages(&state, &inner);
+            let panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
+            assert_eq!(
+                panel_kinds(&panels),
+                vec![PanelKind::Plain, PanelKind::DualDevices]
+            );
+
+            // The device's own answer to the toggle switches the setting off, so
+            // the re-polled state must take the list and the panel away.
+            apply_setting_outcome(
+                ui,
+                &inner,
+                SettingCommand::DualConnections(false),
+                Ok(Box::new(a3062_state_with_dual(false))),
+            );
+
+            assert!(
+                inner.dual_devices.borrow().is_empty(),
+                "no stale row can be forgotten or connected while dual is off"
+            );
+            let panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
+            assert_eq!(panel_kinds(&panels), vec![PanelKind::Plain]);
+            assert_eq!(row_ids(&panels[0]), ["dualConnections"]);
+        });
+    }
+
+    #[test]
+    fn entering_the_connections_page_asks_for_a_fresh_dual_list() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            wire_actions(ui, &inner);
+            let (commands, queued) = mpsc::channel();
+            *inner.commands.borrow_mut() = Some(commands);
+            *inner.device.borrow_mut() = Some(Box::new(a3062_state()));
+
+            ui.global::<Actions>().invoke_navigate(Page::Connections);
+            assert_eq!(
+                queued
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("entering the page queued a fresh list read"),
+                DeviceCommand::ReadDualConnections
+            );
+
+            // With dual connections off the page has no list to refresh, so
+            // entering it writes no `0B 01`.
+            *inner.device.borrow_mut() = Some(Box::new(a3062_state_with_dual(false)));
+            state.set_page(Page::About);
+            ui.global::<Actions>().invoke_navigate(Page::Connections);
+            assert!(
+                queued.try_recv().is_err(),
+                "no list read is queued while the list is hidden"
+            );
         });
     }
 }
