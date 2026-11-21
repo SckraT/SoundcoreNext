@@ -39,18 +39,33 @@ layout, components, pages, icons, fonts and art.
   acknowledgement) and selects the mode the device reports. A model without a
   measured sound mode, e.g. the P20i (A3949), gets no Sound mode page and no
   mode frame.
+- The **Equalizer** page is implemented for the models the core measures an
+  equalizer for — today the Space One Pro (A3062). On connect the page shows the
+  device's current built-in preset and its read-only curve: the 22 catalog
+  presets as chips (the current one checked) and the eight visible band values
+  in the measured −12.0…+13.4 dB range on the vendored chart. Choosing another
+  chip writes one `03 87` preset frame, then re-reads the `01 01` state and
+  selects the preset, its name and its curve from what the device reports.
+  Custom band editing, saved profiles and import/export stay out of scope: the
+  page is read-only, so the band sliders/fields and those controls are hidden
+  and no band value can be written. A model without a measured equalizer, e.g.
+  the P20i (A3949), gets no Equalizer page and no preset frame.
 - Connecting shows “Connecting…”, and Bluetooth off, not found, timeout and
   unsupported-layout failures each show a readable message instead of a crash.
   Cancel and Retry are wired. The vendored UI has no disconnect control; the
   controller's `disconnect` action clears the current device and returns to My
   Devices.
-- Only the `01 01` state request and the `06 81` sound-mode frame are written to
-  the device; pairing stays in Windows settings and the app never changes it.
+- Only the `01 01` state request, the `06 81` sound-mode frame and the `03 87`
+  equalizer-preset frame are written to the device; pairing stays in Windows
+  settings and the app never changes it.
 - ANC strength, wind noise, adaptive ANC and the 1-to-11 strength scale are not
   part of this slice, so the Sound mode page shows only the three mode tiles.
-- Pages other than Overview, My Devices and Sound mode still open in their
-  placeholder state, which is expected: this shell does not implement
-  equalizer, presets, controls, comfort or connections.
+  Equalizer custom bands (the `eq-commit`/`eq-preview`/`eq-type`/`eq-reset`
+  controls), saved profiles and import/export are out of scope too: the page is
+  read-only and offers only the built-in presets.
+- Pages other than Overview, My Devices, Sound mode and (for an A3062) the
+  Equalizer still open in their placeholder state, which is expected: this shell
+  does not implement controls, comfort or connections.
 
 ## Screenshots
 
@@ -68,6 +83,17 @@ Space One Pro** (A3062) is connected over RFCOMM and its current mode (normal)
 is selected; noise canceling, transparency and normal are the three choices.
 Choosing another mode writes one `06 81` frame and re-reads the `01 01` state.
 No Bluetooth address or serial number appears on this page or in the capture.
+
+![Equalizer with a connected Space One Pro](equalizer-connected.png)
+
+The Equalizer page from the running app on Windows: a paired **soundcore
+Space One Pro** (A3062) is connected over RFCOMM and its current built-in
+preset (Soundcore Signature) is checked. All 22 catalog preset chips are shown,
+and the “Equalizer bands: 8” panel holds the eight read-only band values as the
+measured curve in the −12.0…+13.4 dB range. Choosing another chip writes one
+`03 87` preset frame and re-reads the `01 01` state; custom band editing, saved
+profiles and import/export are out of scope and the page is read-only. No
+Bluetooth address or serial number appears on this page or in the capture.
 
 ![Add device](add-device.png)
 
