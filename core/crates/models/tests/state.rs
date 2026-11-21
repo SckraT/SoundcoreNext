@@ -1,9 +1,10 @@
 //! State parser tests against real and synthetic frames.
 
 use soundcore_models::{
-    A3954, BatteryScale, HostDevice, Layout, StateError, model_by_code, parse_state_body,
-    parse_state_frame,
+    A3954, BatteryScale, HostDevice, Layout, SoundMode, StateError, model_by_code,
+    parse_state_body, parse_state_frame,
 };
+use soundcore_protocol::{Command, Direction, encode};
 
 fn hex(text: &str) -> Vec<u8> {
     text.split_whitespace()
@@ -43,6 +44,27 @@ struct SingleExpected {
     serial: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+struct SoundModeFixture {
+    state_offset: usize,
+    modes: Vec<SoundModeFrame>,
+}
+
+#[derive(serde::Deserialize)]
+struct SoundModeFrame {
+    mode: String,
+    frame_hex: String,
+}
+
+fn named_sound_mode(name: &str) -> SoundMode {
+    match name {
+        "NoiseCanceling" => SoundMode::NoiseCanceling,
+        "Transparency" => SoundMode::Transparency,
+        "Normal" => SoundMode::Normal,
+        other => panic!("the fixture names an unknown mode {other:?}"),
+    }
+}
+
 #[test]
 fn parses_the_real_a3949_state() {
     let fixture: Fixture =
@@ -75,6 +97,8 @@ fn parses_the_real_a3949_state() {
     );
     assert_eq!(state.serial, fixture.expected.serial);
     assert_eq!(state.single_battery, None);
+    // The P20i has no ANC modes, and this parser does not invent any.
+    assert_eq!(state.sound_mode, None);
 }
 
 #[test]
@@ -100,6 +124,120 @@ fn parses_the_real_a3062_single_battery_state() {
     );
     assert_eq!(state.serial, fixture.expected.serial);
     assert_eq!(state.battery, None);
+    // The fixture was captured while the device was in normal mode; the mode
+    // byte at body offset 69 is `02`.
+    assert_eq!(state.sound_mode, Some(SoundMode::Normal));
+}
+
+#[test]
+fn parses_each_measured_a3062_sound_mode() {
+    let fixture: SoundModeFixture =
+        serde_json::from_str(include_str!("../../../data/a3062-sound-modes.json"))
+            .expect("fixture");
+    let model = model_by_code("A3062").expect("A3062");
+    let capability = model.sound_mode.expect("A3062 has a measured sound mode");
+    assert_eq!(capability.state_offset, fixture.state_offset);
+    assert_eq!(fixture.modes.len(), SoundMode::ALL.len());
+
+    let mut frames = Vec::new();
+    for (entry, expected) in fixture.modes.iter().zip(SoundMode::ALL) {
+        assert_eq!(named_sound_mode(&entry.mode), expected);
+        let frame = hex(&entry.frame_hex);
+        // The measured mode byte is at the fixture's declared body offset.
+        assert_eq!(frame[9 + fixture.state_offset], expected.value());
+        let state = parse_state_frame(model, &frame).expect("parse");
+        assert_eq!(state.sound_mode, Some(expected), "{}", entry.mode);
+        // The mode write does not disturb the measured battery and firmware.
+        let single = state.single_battery.expect("the single-battery layout");
+        assert_eq!(single.firmware.as_deref(), Some("04.39"));
+        frames.push(frame);
+    }
+
+    // The three real captures differ only in the mode byte and the checksum.
+    for window in frames.windows(2) {
+        let (before, after) = (&window[0], &window[1]);
+        let changed: Vec<usize> = before
+            .iter()
+            .zip(after)
+            .enumerate()
+            .filter(|(_, (before, after))| before != after)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            changed,
+            [9 + fixture.state_offset, before.len() - 1],
+            "only the mode byte and the checksum may differ"
+        );
+    }
+}
+
+#[test]
+fn the_a3062_sound_mode_command_is_the_measured_six_byte_body() {
+    let model = model_by_code("A3062").expect("A3062");
+    for (mode, expected_frame) in [
+        (
+            SoundMode::NoiseCanceling,
+            "08 EE 00 00 00 06 81 10 00 00 51 01 01 00 05 E5",
+        ),
+        (
+            SoundMode::Transparency,
+            "08 EE 00 00 00 06 81 10 00 01 51 01 01 00 05 E6",
+        ),
+        (
+            SoundMode::Normal,
+            "08 EE 00 00 00 06 81 10 00 02 51 01 01 00 05 E7",
+        ),
+    ] {
+        let body = model.sound_mode_body(mode).expect("A3062 has a mode body");
+        assert_eq!(body, [mode.value(), 0x51, 0x01, 0x01, 0x00, 0x05]);
+        assert_eq!(
+            encode(Direction::Outbound, Command::ACK_AMBIENT_SOUND_MODE, &body),
+            hex(expected_frame),
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
+fn models_without_a_measured_sound_mode_have_no_command_body() {
+    for code in ["A3949", "A3947", "A3954", "A3035", "A3040"] {
+        let model = model_by_code(code).expect("the catalog lists the model");
+        assert!(model.sound_mode.is_none(), "{code}");
+        assert_eq!(model.sound_mode_body(SoundMode::Normal), None, "{code}");
+    }
+}
+
+#[test]
+fn sound_mode_values_are_the_measured_ones() {
+    assert_eq!(SoundMode::ALL.map(SoundMode::value), [0, 1, 2]);
+    for mode in SoundMode::ALL {
+        assert_eq!(SoundMode::from_value(mode.value()), Some(mode));
+    }
+    assert_eq!(SoundMode::from_value(3), None);
+}
+
+#[test]
+fn rejects_an_unknown_sound_mode_byte() {
+    let model = model_by_code("A3062").expect("A3062");
+    let mut body = single_battery_body(5);
+    body[69] = 3;
+    assert!(matches!(
+        parse_state_body(model, &body),
+        Err(StateError::InvalidSoundMode(3))
+    ));
+}
+
+#[test]
+fn a_truncated_a3062_body_is_short_of_the_mode_byte() {
+    let model = model_by_code("A3062").expect("A3062");
+    let body = single_battery_body(5);
+    assert!(matches!(
+        parse_state_body(model, &body[..23]),
+        Err(StateError::ShortBody {
+            actual: 23,
+            minimum: 70
+        })
+    ));
 }
 
 #[test]
@@ -213,12 +351,19 @@ fn synthetic_body(
     body
 }
 
-/// The measured A3062 prefix: battery, reserved `0xFF`, single firmware, serial.
+/// The measured A3062 prefix and mode byte: battery, reserved `0xFF`, single
+/// firmware, serial, and the mode at the capability's measured offset.
 fn single_battery_body(battery: u8) -> Vec<u8> {
-    let mut body = Vec::with_capacity(23);
-    body.extend_from_slice(&[battery, 0xFF]);
-    body.extend_from_slice(b"04.39");
-    body.extend_from_slice(&[0; 16]);
-    debug_assert_eq!(body.len(), 23);
+    let mode = SoundMode::NoiseCanceling;
+    let model = model_by_code("A3062").expect("A3062");
+    let offset = model
+        .sound_mode
+        .expect("A3062 has a measured sound mode")
+        .state_offset;
+    let mut body = vec![0; offset + 1];
+    body[0] = battery;
+    body[1] = 0xFF;
+    body[2..7].copy_from_slice(b"04.39");
+    body[offset] = mode.value();
     body
 }

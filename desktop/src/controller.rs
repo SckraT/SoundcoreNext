@@ -2,9 +2,12 @@
 //! transport and the clean-room session.
 //!
 //! The controller keeps every `AppWindow` access on the Slint thread. Bluetooth
-//! work happens on short-lived worker threads that report back over one `mpsc`
-//! channel; a [`slint::Timer`] drains that channel on the UI thread. Nothing
-//! here waits for Bluetooth on the UI thread.
+//! work happens on worker threads that report results over one `mpsc` channel;
+//! a [`slint::Timer`] drains that channel on the UI thread. A connection
+//! attempt is short-lived, but when the model reports a sound mode its worker
+//! outlives the connect: it keeps the session open and serves mode writes from
+//! a second `mpsc` command channel, dropped by the UI to end the worker and
+//! close the connection. Nothing here waits for Bluetooth on the UI thread.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -14,8 +17,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
-use soundcore_models::{DeviceModel, DeviceState};
-use soundcore_session::{DeviceSession, SessionError};
+use soundcore_models::{DeviceModel, DeviceState, SoundMode};
+use soundcore_session::{DeviceSession, SessionError, Transport};
 use windows::core::GUID;
 
 use crate::catalog_adapter::{self, Chip};
@@ -24,7 +27,8 @@ use crate::transport_windows::{
     list_paired_devices, parse_mac, pick_service, vendor_service,
 };
 use crate::{
-    Actions, AppState, AppWindow, Battery, Connection, DeviceCard, FailureKind, Page, PairedOption,
+    Actions, AppState, AppWindow, Battery, Connection, DeviceCard, FailureKind, ModeOption, Page,
+    PairedOption,
 };
 
 /// The model chosen in the Add Device dialog: what the catalog card shows plus
@@ -107,6 +111,121 @@ pub fn batteries(state: &DeviceState) -> Vec<Battery> {
     ]
 }
 
+/// The `ModeOption.value` the vendored `ModeText.icon` recognises for a mode.
+/// These strings are part of the UI contract, not the protocol values.
+pub const fn mode_value(mode: SoundMode) -> &'static str {
+    match mode {
+        SoundMode::NoiseCanceling => "NoiseCanceling",
+        SoundMode::Transparency => "Transparency",
+        SoundMode::Normal => "Normal",
+    }
+}
+
+/// The tile label of a mode, in the words the vendored Sound mode page uses.
+pub const fn mode_label(mode: SoundMode) -> &'static str {
+    match mode {
+        SoundMode::NoiseCanceling => "Noise canceling",
+        SoundMode::Transparency => "Transparency",
+        SoundMode::Normal => "Normal",
+    }
+}
+
+/// The `AppState.modes` tiles of a parsed state: the three measured modes in
+/// page order, or nothing for a model without a sound-mode control.
+pub fn mode_options(sound_mode: Option<SoundMode>) -> Vec<ModeOption> {
+    if sound_mode.is_none() {
+        return Vec::new();
+    }
+    SoundMode::ALL
+        .into_iter()
+        .map(|mode| ModeOption {
+            value: mode_value(mode).into(),
+            label: mode_label(mode).into(),
+        })
+        .collect()
+}
+
+/// The index of a reported mode in `AppState.modes`, or -1 when the device has
+/// no sound mode.
+pub fn mode_index(sound_mode: Option<SoundMode>) -> i32 {
+    sound_mode
+        .and_then(|mode| {
+            SoundMode::ALL
+                .iter()
+                .position(|candidate| *candidate == mode)
+        })
+        .map_or(-1, |index| index as i32)
+}
+
+/// The mode a `Actions.set-option("ambientSoundMode", index)` click names, or
+/// `None` for an index outside the three tiles.
+pub fn mode_for_index(index: i32) -> Option<SoundMode> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| SoundMode::ALL.get(index).copied())
+}
+
+/// The sidebar pages of a parsed state: Sound mode only when the device reports
+/// a mode, so a P20i never shows the page.
+pub fn sound_pages(sound_mode: Option<SoundMode>) -> Vec<Page> {
+    if sound_mode.is_some() {
+        vec![Page::SoundModes]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Why a sound-mode change did not take, in the words the vendored error banner
+/// shows above the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeFailure {
+    /// The device did not answer the write or the state re-read in time.
+    TimedOut,
+    /// The Bluetooth link dropped before the new mode was confirmed.
+    Disconnected,
+    /// The device answered with something this app cannot read.
+    Unreadable,
+}
+
+impl ModeFailure {
+    /// Reduces a session failure to the case the page has words for.
+    pub fn from_session(error: SessionError) -> Self {
+        match error {
+            SessionError::Timeout => Self::TimedOut,
+            SessionError::Io(_) => Self::Disconnected,
+            // A change is only written for a model whose state reported a sound
+            // mode, so the session always has a `06 81` body to write; the
+            // write-only variant keeps the mapping total.
+            SessionError::Protocol(_)
+            | SessionError::UnsupportedLayout
+            | SessionError::UnsupportedSoundMode => Self::Unreadable,
+        }
+    }
+
+    /// The `AppState.error-label` of a failed change; the vendored banner wraps
+    /// it as "Could not change “{}”.".
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TimedOut => "Sound mode (no answer)",
+            Self::Disconnected => "Sound mode (connection lost)",
+            Self::Unreadable => "Sound mode (unreadable answer)",
+        }
+    }
+}
+
+/// Writes the mode and re-reads the state, returning the mode the device
+/// reports. Blocking: only the device worker calls this, never the UI thread.
+pub fn change_sound_mode<T: Transport>(
+    session: &mut DeviceSession<T>,
+    mode: SoundMode,
+) -> Result<SoundMode, ModeFailure> {
+    session
+        .set_sound_mode(mode)
+        .map_err(ModeFailure::from_session)?;
+    let state = session.poll_state().map_err(ModeFailure::from_session)?;
+    state.sound_mode.ok_or(ModeFailure::Unreadable)
+}
+
 /// A failed connection, reduced to the cases the window has words for. It
 /// deliberately holds no Bluetooth address, so nothing built from it can leak a
 /// MAC into the UI.
@@ -152,7 +271,9 @@ impl ConnectFailure {
         match error {
             SessionError::Timeout => Self::TimedOut,
             SessionError::Io(error) => Self::Transport(error.to_string()),
-            SessionError::Protocol(_) => Self::Protocol,
+            // A connection attempt only polls `01 01`; `UnsupportedSoundMode`
+            // only comes from a mode write, so it cannot reach this mapping.
+            SessionError::Protocol(_) | SessionError::UnsupportedSoundMode => Self::Protocol,
             SessionError::UnsupportedLayout => Self::UnsupportedLayout,
         }
     }
@@ -337,6 +458,14 @@ enum ConnectOutcome {
     Failed(ConnectFailure),
 }
 
+/// A write the connected device worker has to perform.
+#[derive(Debug, Clone, Copy)]
+enum DeviceCommand {
+    /// Write a sound mode and re-read the state; `request` identifies the click
+    /// so the UI can drop a result a newer click has superseded.
+    SetSoundMode { request: u64, mode: SoundMode },
+}
+
 /// A worker-to-UI message; the sequence number tells the UI whether the result
 /// still belongs to the attempt the user is waiting for.
 #[derive(Debug)]
@@ -349,10 +478,16 @@ enum Event {
         attempt: u64,
         outcome: ConnectOutcome,
     },
+    /// A device worker finished a sound-mode change and re-read the state.
+    ModeChanged {
+        attempt: u64,
+        request: u64,
+        outcome: Result<SoundMode, ModeFailure>,
+    },
 }
 
 /// State shared between the UI callbacks and the polling timer. Every field is
-/// touched on the Slint thread only; workers only hold a clone of `sender`.
+/// touched on the Slint thread only; workers only hold clones of the channels.
 struct Inner {
     ui: slint::Weak<AppWindow>,
     sender: Sender<Event>,
@@ -363,6 +498,11 @@ struct Inner {
     connect: Cell<u64>,
     /// Cancels the in-flight connect attempt without waiting for it.
     cancel: RefCell<Option<Arc<AtomicBool>>>,
+    /// The command channel of the connected device worker; dropping it stops the
+    /// worker and closes the device connection.
+    commands: RefCell<Option<Sender<DeviceCommand>>>,
+    /// The newest sound-mode change; results of older changes are stale.
+    mode_change: Cell<u64>,
 }
 
 impl Inner {
@@ -392,24 +532,22 @@ impl Inner {
         }
     }
 
-    /// Connects and polls the state on a worker thread.
+    /// Connects on a worker thread and keeps that worker for sound-mode writes.
     fn request_connect(&self, request: ConnectRequest) {
         let attempt = self.connect.get() + 1;
         self.connect.set(attempt);
+        self.mode_change.set(0);
         let cancel = Arc::new(AtomicBool::new(false));
         *self.cancel.borrow_mut() = Some(Arc::clone(&cancel));
+        let (commands, command_receiver) = mpsc::channel();
+        // Replacing the channel stops a worker of an older attempt.
+        *self.commands.borrow_mut() = Some(commands);
         let sender = self.sender.clone();
         let spawned = std::thread::Builder::new()
-            .name("bluetooth-connect".into())
-            .spawn(move || {
-                if cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                if let Some(outcome) = connect_device(&request, &cancel) {
-                    let _ = sender.send(Event::Connected { attempt, outcome });
-                }
-            });
+            .name("bluetooth-device".into())
+            .spawn(move || run_device_worker(request, attempt, cancel, sender, command_receiver));
         if spawned.is_err() {
+            self.stop_worker();
             let _ = self.sender.send(Event::Connected {
                 attempt,
                 outcome: ConnectOutcome::Failed(ConnectFailure::Transport(
@@ -424,7 +562,17 @@ impl Inner {
         if let Some(cancel) = self.cancel.borrow_mut().take() {
             cancel.store(true, Ordering::Relaxed);
         }
-        self.connect.set(0);
+        // A cancelled worker may still send its result, so move past its number
+        // instead of reusing it for the next attempt.
+        self.connect.set(self.connect.get() + 1);
+        self.stop_worker();
+    }
+
+    /// Drops the device worker's command channel, which stops the worker and
+    /// closes the connection once any change in flight has finished.
+    fn stop_worker(&self) {
+        self.commands.borrow_mut().take();
+        self.mode_change.set(0);
     }
 }
 
@@ -447,6 +595,8 @@ impl Controller {
             enumeration: Cell::new(0),
             connect: Cell::new(0),
             cancel: RefCell::new(None),
+            commands: RefCell::new(None),
+            mode_change: Cell::new(0),
         });
         initial_state(ui);
         wire_actions(ui, &inner);
@@ -468,9 +618,9 @@ fn initial_state(ui: &AppWindow) {
     // settings deep links to offer.
     state.set_linux(false);
     state.set_system_settings_available(false);
-    // Only Add Device, the device cards and the Overview battery are wired in
-    // this MVP; every other page's content stays empty.
-    state.set_sound_pages(ModelRc::default());
+    // Only Add Device, the device cards, the Overview battery and the Sound
+    // mode page are wired in this shell; every other page's content stays empty.
+    show_sound_mode(&state, None);
     state.set_device_pages(ModelRc::default());
     state.set_overview_rows(ModelRc::default());
     state.set_panels(ModelRc::default());
@@ -571,6 +721,15 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         }
     });
 
+    actions.on_set_option({
+        let inner = Rc::clone(inner);
+        move |setting_id, index| {
+            if let Some(window) = inner.ui.upgrade() {
+                set_option(&window, &inner, setting_id.as_str(), index);
+            }
+        }
+    });
+
     actions.on_navigate({
         let inner = Rc::clone(inner);
         move |page| {
@@ -588,6 +747,23 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
             }
         }
     });
+}
+
+/// Whether a finished sound-mode change still updates the page.
+///
+/// A success is page data: it only applies when it belongs to the current
+/// connection attempt and to the newest click. A failure is not stale page
+/// data — the worker stops after it, so no newer result can replace it, and a
+/// click queued behind the failed one will never run. Surfacing the failure is
+/// then the only report the user gets, and the banner's Retry stays available.
+fn mode_result_applies(
+    outcome: &Result<SoundMode, ModeFailure>,
+    attempt: u64,
+    request: u64,
+    current_attempt: u64,
+    newest_request: u64,
+) -> bool {
+    attempt == current_attempt && (outcome.is_err() || request == newest_request)
 }
 
 /// Drains everything the workers sent since the last tick and applies it on the
@@ -608,7 +784,33 @@ fn drain_events(inner: &Rc<Inner>) {
                 if attempt == inner.connect.get()
                     && let Some(window) = inner.ui.upgrade()
                 {
+                    // Only a connected model with a measured sound mode keeps its
+                    // worker (and socket) for writes; everything else ends as in
+                    // the MVP.
+                    let keeps_worker = matches!(
+                        &outcome,
+                        ConnectOutcome::Connected(state) if state.sound_mode.is_some()
+                    );
+                    if !keeps_worker {
+                        inner.stop_worker();
+                    }
                     apply_outcome(&window, outcome);
+                }
+            }
+            Ok(Event::ModeChanged {
+                attempt,
+                request,
+                outcome,
+            }) => {
+                let applies = mode_result_applies(
+                    &outcome,
+                    attempt,
+                    request,
+                    inner.connect.get(),
+                    inner.mode_change.get(),
+                );
+                if applies && let Some(window) = inner.ui.upgrade() {
+                    apply_mode_outcome(&window, inner, outcome);
                 }
             }
             // Both an empty queue and a closed channel mean nothing more will
@@ -636,48 +838,118 @@ fn enumerate_candidates(model: Option<(&str, &str)>) -> Result<Vec<Candidate>, B
     Ok(candidates(&with_services, model))
 }
 
-/// Opens the RFCOMM connection, writes the single `01 01` state request, and
-/// parses the answer. Returns `None` when the attempt was cancelled first.
-fn connect_device(request: &ConnectRequest, cancel: &AtomicBool) -> Option<ConnectOutcome> {
+/// The beginning of a device connection: an open session, or why it stopped.
+enum OpenOutcome {
+    Opened(DeviceSession<WindowsRfcommTransport>),
+    Cancelled,
+    Failed(ConnectFailure),
+}
+
+/// Opens the RFCOMM connection and picks the model's vendor service. Blocking.
+fn open_session(request: &ConnectRequest, cancel: &AtomicBool) -> OpenOutcome {
     let cancelled = || cancel.load(Ordering::Relaxed);
     let Some(model) = request.protocol else {
-        return Some(ConnectOutcome::Failed(ConnectFailure::NoParser));
+        return OpenOutcome::Failed(ConnectFailure::NoParser);
     };
     if cancelled() {
-        return None;
+        return OpenOutcome::Cancelled;
     }
     let services = match installed_services(request.address) {
         Ok(services) => services,
-        Err(error) => {
-            return Some(ConnectOutcome::Failed(ConnectFailure::from_bluetooth(
-                error,
-            )));
-        }
+        Err(error) => return OpenOutcome::Failed(ConnectFailure::from_bluetooth(error)),
     };
     if cancelled() {
-        return None;
+        return OpenOutcome::Cancelled;
     }
     let Some(service) = pick_service(&services, &request.model_code) else {
-        return Some(ConnectOutcome::Failed(ConnectFailure::NoService));
+        return OpenOutcome::Failed(ConnectFailure::NoService);
     };
     let transport = match WindowsRfcommTransport::connect(request.address, service) {
         Ok(transport) => transport,
-        Err(error) => {
-            return Some(ConnectOutcome::Failed(ConnectFailure::from_bluetooth(
-                error,
-            )));
-        }
+        Err(error) => return OpenOutcome::Failed(ConnectFailure::from_bluetooth(error)),
     };
     if cancelled() {
         // Dropping the transport closes the socket.
-        return None;
+        return OpenOutcome::Cancelled;
     }
-    // `poll_state` is the only place that writes: one `01 01` state request.
-    let mut session = DeviceSession::new(model, transport);
-    Some(match session.poll_state() {
-        Ok(state) => ConnectOutcome::Connected(state),
-        Err(error) => ConnectOutcome::Failed(ConnectFailure::from_session(error)),
-    })
+    OpenOutcome::Opened(DeviceSession::new(model, transport))
+}
+
+/// The connected device worker: connects, then hands the open session to
+/// [`serve_device`] for the initial state report and the sound-mode writes.
+///
+/// Every change runs on this worker, so the UI thread never blocks on
+/// Bluetooth, and a re-poll after each write keeps `mode-index` in step with the
+/// device.
+fn run_device_worker(
+    request: ConnectRequest,
+    attempt: u64,
+    cancel: Arc<AtomicBool>,
+    events: Sender<Event>,
+    commands: Receiver<DeviceCommand>,
+) {
+    let session = match open_session(&request, &cancel) {
+        OpenOutcome::Opened(session) => session,
+        OpenOutcome::Cancelled => return,
+        OpenOutcome::Failed(failure) => {
+            let _ = events.send(Event::Connected {
+                attempt,
+                outcome: ConnectOutcome::Failed(failure),
+            });
+            return;
+        }
+    };
+    serve_device(session, attempt, events, commands);
+}
+
+/// Reports the initial state, then serves sound-mode changes on the same
+/// session until the UI drops the command channel or a change fails.
+///
+/// Generic over the transport so the tests can drive it with a scripted one.
+fn serve_device<T: Transport>(
+    mut session: DeviceSession<T>,
+    attempt: u64,
+    events: Sender<Event>,
+    commands: Receiver<DeviceCommand>,
+) {
+    // `poll_state` here is the MVP's one initial `01 01` request.
+    let state = match session.poll_state() {
+        Ok(state) => state,
+        Err(error) => {
+            let _ = events.send(Event::Connected {
+                attempt,
+                outcome: ConnectOutcome::Failed(ConnectFailure::from_session(error)),
+            });
+            return;
+        }
+    };
+    let has_sound_mode = state.sound_mode.is_some();
+    let _ = events.send(Event::Connected {
+        attempt,
+        outcome: ConnectOutcome::Connected(state),
+    });
+    // A model without a measured mode has nothing this worker can write; ending
+    // it closes the socket as the MVP did. A model with a mode keeps its session
+    // open for the `06 81` writes.
+    if !has_sound_mode {
+        return;
+    }
+    while let Ok(DeviceCommand::SetSoundMode { request, mode }) = commands.recv() {
+        let outcome = change_sound_mode(&mut session, mode);
+        let failed = outcome.is_err();
+        let _ = events.send(Event::ModeChanged {
+            attempt,
+            request,
+            outcome,
+        });
+        if failed {
+            // The session is out of step after a failed write or read; the
+            // banner's Retry opens a fresh connection instead of writing on a
+            // broken one. Any click already queued behind this one is dropped
+            // with the channel, and the surfaced failure explains why.
+            return;
+        }
+    }
 }
 
 /// Resets the dialog to its model step and starts the paired enumeration.
@@ -849,7 +1121,9 @@ fn begin_connecting(state: &AppState<'_>, inner: &Rc<Inner>, request: ConnectReq
     state.set_connection_reason("".into());
     state.set_failure_kind(FailureKind::None);
     state.set_failure_text("".into());
+    state.set_error_label("".into());
     state.set_batteries(ModelRc::default());
+    show_sound_mode(state, None);
     inner.request_connect(request);
 }
 
@@ -867,6 +1141,8 @@ fn cancel_connect(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_connection_reason("".into());
     state.set_failure_kind(FailureKind::None);
     state.set_failure_text("".into());
+    state.set_error_label("".into());
+    show_sound_mode(&state, None);
 }
 
 /// Drops the current device and returns to My Devices.
@@ -892,6 +1168,8 @@ fn disconnect(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_connection_reason("".into());
     state.set_failure_kind(FailureKind::None);
     state.set_failure_text("".into());
+    state.set_error_label("".into());
+    show_sound_mode(&state, None);
     state.set_page(Page::Devices);
 }
 
@@ -936,10 +1214,12 @@ fn apply_outcome(window: &AppWindow, outcome: ConnectOutcome) {
     match outcome {
         ConnectOutcome::Connected(device_state) => {
             state.set_batteries(ModelRc::new(VecModel::from(batteries(&device_state))));
+            show_sound_mode(&state, device_state.sound_mode);
             state.set_connection(Connection::Connected);
             state.set_connection_reason("".into());
             state.set_failure_kind(FailureKind::None);
             state.set_failure_text("".into());
+            state.set_error_label("".into());
         }
         // An unsupported battery layout reads as a failure with no tiles; the
         // ConnectionState then shows the readable message.
@@ -951,10 +1231,89 @@ fn apply_outcome(window: &AppWindow, outcome: ConnectOutcome) {
 /// readable explanation.
 fn apply_failure(state: &AppState<'_>, failure: ConnectFailure) {
     state.set_batteries(ModelRc::default());
+    show_sound_mode(state, None);
     state.set_connection(failure.connection());
     state.set_connection_reason("".into());
     state.set_failure_kind(failure.kind());
     state.set_failure_text(failure.text().into());
+    state.set_error_label("".into());
+}
+
+/// Fills the vendored Sound mode page from a parsed state.
+///
+/// A device that reports a mode gets the three tiles, their labels and the
+/// Sound mode page; a P20i gets none of them, so it never offers a mode change.
+/// The 1-to-11 scale and the per-mode strength/wind rows stay out of scope, so
+/// `mode-scale` is false and `mode-rows` stays empty.
+fn show_sound_mode(state: &AppState<'_>, sound_mode: Option<SoundMode>) {
+    state.set_modes(ModelRc::new(VecModel::from(mode_options(sound_mode))));
+    state.set_mode_index(mode_index(sound_mode));
+    state.set_mode_scale(false);
+    state.set_mode_rows(ModelRc::default());
+    state.set_sound_pages(ModelRc::new(VecModel::from(sound_pages(sound_mode))));
+    let label = |mode: SoundMode| {
+        if sound_mode.is_some() {
+            mode_label(mode)
+        } else {
+            ""
+        }
+    };
+    state.set_noise_canceling_label(label(SoundMode::NoiseCanceling).into());
+    state.set_transparency_label(label(SoundMode::Transparency).into());
+    state.set_normal_label(label(SoundMode::Normal).into());
+}
+
+/// Applies a finished sound-mode change: the mode the device reports becomes the
+/// selected tile, or the error banner names the setting that failed.
+fn apply_mode_outcome(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    outcome: Result<SoundMode, ModeFailure>,
+) {
+    let state = window.global::<AppState>();
+    match outcome {
+        Ok(reported) => {
+            state.set_mode_index(mode_index(Some(reported)));
+            state.set_error_label("".into());
+        }
+        Err(failure) => {
+            // The worker closes the session after a failed change; Retry in the
+            // banner opens a fresh connection.
+            inner.stop_worker();
+            state.set_error_label(failure.label().into());
+        }
+    }
+}
+
+/// Answers a choice control on the UI thread. Only the Sound mode tiles are
+/// wired in this slice; every other setting id and any index outside them is
+/// ignored, so no other frame can be written.
+fn set_option(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, index: i32) {
+    if setting_id != "ambientSoundMode" {
+        return;
+    }
+    let state = window.global::<AppState>();
+    // No connection, or a model without a measured sound mode, means no tiles
+    // and no `06 81` frame. The session refuses the write as well.
+    if state.get_connection() != Connection::Connected || state.get_modes().row_count() == 0 {
+        return;
+    }
+    let Some(mode) = mode_for_index(index) else {
+        return;
+    };
+    let request = inner.mode_change.get() + 1;
+    inner.mode_change.set(request);
+    let command = DeviceCommand::SetSoundMode { request, mode };
+    let sent = inner
+        .commands
+        .borrow()
+        .as_ref()
+        .is_some_and(|sender| sender.send(command).is_ok());
+    if !sent {
+        // The worker of a previous failed change has closed the connection; the
+        // banner's Retry reconnects.
+        state.set_error_label(ModeFailure::Disconnected.label().into());
+    }
 }
 
 /// Replaces the dialog's model list with the models for a query and chip; an
@@ -977,7 +1336,9 @@ fn reset_models(state: &AppState<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soundcore_models::{BatteryScale, BatteryState, FirmwareVersions, HostDevice, Layout};
+    use soundcore_models::{
+        BatteryScale, BatteryState, FirmwareVersions, HostDevice, Layout, SoundMode,
+    };
 
     #[test]
     fn a_chosen_p20i_resolves_to_its_catalog_card_and_state_parser() {
@@ -1063,6 +1424,7 @@ mod tests {
                 scale,
             }),
             single_battery: None,
+            sound_mode: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,
@@ -1082,6 +1444,7 @@ mod tests {
                 charging: None,
                 firmware: Some("04.39".into()),
             }),
+            sound_mode: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,
@@ -1459,6 +1822,325 @@ mod tests {
         assert_ratio(tiles[0].progress, 0.2);
     }
 
+    fn hex(bytes: &str) -> Vec<u8> {
+        bytes
+            .split_whitespace()
+            .map(|byte| u8::from_str_radix(byte, 16).expect("the fixture stores hex bytes"))
+            .collect()
+    }
+
+    /// The masked real A3062 `01 01` frame of one mode from the core fixtures.
+    fn captured_mode_frame(mode: &str) -> Vec<u8> {
+        let json = include_str!("../../core/data/a3062-sound-modes.json");
+        let anchor = format!("\"mode\": \"{mode}\"");
+        let at = json.find(&anchor).expect("the fixture lists every mode");
+        captured_frame(&json[at..])
+    }
+
+    #[test]
+    fn the_real_a3062_capture_exposes_the_sound_mode_page() {
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        let state =
+            soundcore_models::parse_state_frame(model, &captured_a3062_frame()).expect("parses");
+        // The committed capture was taken while the device was in normal mode.
+        assert_eq!(state.sound_mode, Some(SoundMode::Normal));
+        assert_eq!(sound_pages(state.sound_mode), vec![Page::SoundModes]);
+        assert_eq!(mode_index(state.sound_mode), 2);
+    }
+
+    #[test]
+    fn the_real_a3949_capture_has_no_sound_mode_page() {
+        let model = soundcore_models::model_by_code("A3949").expect("A3949 is a state model");
+        let state =
+            soundcore_models::parse_state_frame(model, &captured_a3949_frame()).expect("parses");
+        assert_eq!(state.sound_mode, None);
+        assert!(sound_pages(state.sound_mode).is_empty());
+        assert!(mode_options(state.sound_mode).is_empty());
+        assert_eq!(mode_index(state.sound_mode), -1);
+    }
+
+    #[test]
+    fn the_sound_mode_tiles_are_the_three_measured_modes_in_page_order() {
+        let options = mode_options(Some(SoundMode::NoiseCanceling));
+        let values: Vec<&str> = options.iter().map(|option| option.value.as_str()).collect();
+        let labels: Vec<&str> = options.iter().map(|option| option.label.as_str()).collect();
+        // `ModeText.icon` recognises exactly these value strings.
+        assert_eq!(values, ["NoiseCanceling", "Transparency", "Normal"]);
+        assert_eq!(labels, ["Noise canceling", "Transparency", "Normal"]);
+    }
+
+    #[test]
+    fn a_device_without_a_sound_mode_has_no_tiles() {
+        assert!(mode_options(None).is_empty());
+    }
+
+    #[test]
+    fn a_mode_index_maps_to_its_mode_and_unknown_indexes_are_ignored() {
+        for (index, mode) in [
+            (0, SoundMode::NoiseCanceling),
+            (1, SoundMode::Transparency),
+            (2, SoundMode::Normal),
+        ] {
+            assert_eq!(mode_for_index(index), Some(mode));
+            assert_eq!(mode_index(Some(mode)), index);
+        }
+        for index in [-1, 3, 11, i32::MAX] {
+            assert_eq!(mode_for_index(index), None, "index {index} is not a tile");
+        }
+    }
+
+    #[test]
+    fn a_failed_mode_change_maps_to_a_readable_label() {
+        let cases = [
+            (SessionError::Timeout, ModeFailure::TimedOut),
+            (
+                SessionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "connection reset by peer",
+                )),
+                ModeFailure::Disconnected,
+            ),
+            (
+                SessionError::Protocol(soundcore_session::ProtocolError::State(
+                    soundcore_models::StateError::NotAStateFrame,
+                )),
+                ModeFailure::Unreadable,
+            ),
+            (SessionError::UnsupportedLayout, ModeFailure::Unreadable),
+        ];
+        for (error, expected) in cases {
+            let failure = ModeFailure::from_session(error);
+            assert_eq!(failure, expected);
+            let label = readable(failure.label());
+            assert!(label.contains("sound mode"), "{label:?} names the setting");
+        }
+    }
+
+    /// A scripted transport: writes are recorded and reads come from a queue.
+    #[derive(Clone, Default)]
+    struct FakeTransport {
+        writes: Rc<RefCell<Vec<Vec<u8>>>>,
+        reads: Rc<RefCell<std::collections::VecDeque<std::io::Result<Vec<u8>>>>>,
+    }
+
+    impl FakeTransport {
+        fn scripted(chunks: impl IntoIterator<Item = Vec<u8>>) -> Self {
+            let transport = Self::default();
+            for chunk in chunks {
+                let mut reads = transport.reads.borrow_mut();
+                reads.push_back(Ok(chunk));
+            }
+            transport
+        }
+
+        fn failing(kind: std::io::ErrorKind) -> Self {
+            let transport = Self::default();
+            transport
+                .reads
+                .borrow_mut()
+                .push_back(Err(std::io::Error::new(kind, "scripted read failure")));
+            transport
+        }
+
+        fn writes(&self) -> Vec<Vec<u8>> {
+            self.writes.borrow().clone()
+        }
+    }
+
+    impl Transport for FakeTransport {
+        fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.writes.borrow_mut().push(bytes.to_vec());
+            Ok(())
+        }
+
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let next = self.reads.borrow_mut().pop_front();
+            match next {
+                Some(Ok(chunk)) => {
+                    assert!(
+                        chunk.len() <= buffer.len(),
+                        "a scripted chunk fits in one read"
+                    );
+                    buffer[..chunk.len()].copy_from_slice(&chunk);
+                    Ok(chunk.len())
+                }
+                Some(Err(error)) => Err(error),
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "no read was scripted",
+                )),
+            }
+        }
+    }
+
+    /// The masked empty inbound `06 81` acknowledgement the real A3062 sends.
+    fn mode_ack() -> Vec<u8> {
+        hex("09 FF 00 00 01 06 81 0A 00 9A")
+    }
+
+    fn session_with(model_code: &str, transport: &FakeTransport) -> DeviceSession<FakeTransport> {
+        let model = soundcore_models::model_by_code(model_code).expect("the model is supported");
+        DeviceSession::new(model, transport.clone())
+    }
+
+    #[test]
+    fn each_measured_mode_switch_writes_exactly_its_frame_and_re_reads_it() {
+        let expected_frames = [
+            "08 EE 00 00 00 06 81 10 00 00 51 01 01 00 05 E5",
+            "08 EE 00 00 00 06 81 10 00 01 51 01 01 00 05 E6",
+            "08 EE 00 00 00 06 81 10 00 02 51 01 01 00 05 E7",
+        ];
+        let names = ["NoiseCanceling", "Transparency", "Normal"];
+        for ((mode, name), expected) in SoundMode::ALL.into_iter().zip(names).zip(expected_frames) {
+            // The real device acknowledges the write, then answers the 01 01
+            // re-poll with the mode it now reports.
+            let mut answer = mode_ack();
+            answer.extend_from_slice(&captured_mode_frame(name));
+            let transport = FakeTransport::scripted([answer]);
+            let mut session = session_with("A3062", &transport);
+
+            let reported = change_sound_mode(&mut session, mode).expect("the change takes");
+
+            assert_eq!(reported, mode);
+            assert_eq!(mode_index(Some(reported)), mode_index(Some(mode)));
+            assert_eq!(
+                transport.writes(),
+                vec![hex(expected), hex("08 EE 00 00 00 01 01 0A 00 02")],
+                "{name}: one 06 81 frame, then the 01 01 re-poll"
+            );
+        }
+    }
+
+    #[test]
+    fn the_page_shows_the_mode_the_device_reports_after_the_write() {
+        // The write was acknowledged but the device reports another mode: the
+        // page follows the device, not the click.
+        let mut answer = mode_ack();
+        answer.extend_from_slice(&captured_mode_frame("Transparency"));
+        let transport = FakeTransport::scripted([answer]);
+        let mut session = session_with("A3062", &transport);
+
+        let reported =
+            change_sound_mode(&mut session, SoundMode::NoiseCanceling).expect("the change is read");
+
+        assert_eq!(reported, SoundMode::Transparency);
+        assert_eq!(mode_index(Some(reported)), 1);
+    }
+
+    #[test]
+    fn a_silent_device_after_the_write_is_a_timeout() {
+        let transport = FakeTransport::failing(std::io::ErrorKind::TimedOut);
+        let mut session = session_with("A3062", &transport);
+
+        let failure =
+            change_sound_mode(&mut session, SoundMode::Transparency).expect_err("no answer");
+
+        assert_eq!(failure, ModeFailure::TimedOut);
+        assert_eq!(failure.label(), "Sound mode (no answer)");
+        assert_eq!(
+            transport.writes(),
+            vec![
+                hex("08 EE 00 00 00 06 81 10 00 01 51 01 01 00 05 E6"),
+                hex("08 EE 00 00 00 01 01 0A 00 02"),
+            ],
+            "the mode frame and the 01 01 re-poll were written"
+        );
+    }
+
+    #[test]
+    fn a_dropped_link_after_the_write_is_a_lost_connection() {
+        let transport = FakeTransport::failing(std::io::ErrorKind::ConnectionReset);
+        let mut session = session_with("A3062", &transport);
+
+        let failure =
+            change_sound_mode(&mut session, SoundMode::Normal).expect_err("the link dropped");
+
+        assert_eq!(failure, ModeFailure::Disconnected);
+        assert_eq!(failure.label(), "Sound mode (connection lost)");
+    }
+
+    #[test]
+    fn a_failed_change_surfaces_although_a_newer_click_was_queued() {
+        // Regression: request 1 fails while request 2 is already queued.
+        // Request 1 is superseded, but the worker stops after the failure, so
+        // request 2 never runs: the failure must still reach the page or the
+        // click leaves no feedback at all.
+        let failure = Err(ModeFailure::TimedOut);
+        assert!(
+            mode_result_applies(&failure, 4, 1, 4, 2),
+            "a failure of the current attempt always surfaces"
+        );
+        // A superseded success is still stale; the newest result applies.
+        let success = Ok(SoundMode::Normal);
+        assert!(!mode_result_applies(&success, 4, 1, 4, 2));
+        assert!(mode_result_applies(&success, 4, 2, 4, 2));
+        assert!(mode_result_applies(&failure, 4, 2, 4, 2));
+        // Results of an older connection attempt never apply, failure or not.
+        assert!(!mode_result_applies(&failure, 3, 1, 4, 1));
+        assert!(!mode_result_applies(&success, 3, 2, 4, 2));
+    }
+
+    #[test]
+    fn a_failed_change_ends_the_worker_without_running_the_queued_click() {
+        // The initial state is a real masked A3062 capture (normal mode); no
+        // read is scripted after it, so the re-poll of the first change times
+        // out.
+        let transport = FakeTransport::scripted([captured_a3062_frame()]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::SetSoundMode {
+                request: 1,
+                mode: SoundMode::Transparency,
+            })
+            .expect("the first click is queued");
+        commands
+            .send(DeviceCommand::SetSoundMode {
+                request: 2,
+                mode: SoundMode::Normal,
+            })
+            .expect("the newer click is queued behind the first");
+
+        serve_device(session, 9, events, command_receiver);
+
+        // Only the first change reached the device: the connect `01 01`, its
+        // `06 81`, and the `01 01` re-poll that timed out. The queued click
+        // wrote nothing.
+        assert_eq!(
+            transport.writes(),
+            vec![
+                hex("08 EE 00 00 00 01 01 0A 00 02"),
+                hex("08 EE 00 00 00 06 81 10 00 01 51 01 01 00 05 E6"),
+                hex("08 EE 00 00 00 01 01 0A 00 02"),
+            ],
+            "the queued click must not be written after the failure"
+        );
+        // The page gets the state, then the failure of the request that was in
+        // flight; the drain surfaces it even though request 2 is newer.
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected {
+                attempt: 9,
+                outcome: ConnectOutcome::Connected(_)
+            }
+        ));
+        assert!(matches!(
+            received.try_recv().expect("the failed change"),
+            Event::ModeChanged {
+                attempt: 9,
+                request: 1,
+                outcome: Err(ModeFailure::TimedOut)
+            }
+        ));
+        // The worker ended instead of running the queued click, so the banner's
+        // Retry is the way back to a working connection.
+        assert!(
+            received.try_recv().is_err(),
+            "the worker reports nothing else and stops"
+        );
+    }
+
     /// Manual hardware check, not part of the automated suite:
     ///
     /// ```text
@@ -1512,27 +2194,33 @@ mod tests {
                 model_code: code.to_owned(),
                 protocol: Some(protocol),
             };
-            match connect_device(&request, &AtomicBool::new(false)) {
-                Some(ConnectOutcome::Connected(state)) => {
-                    let shown: Vec<String> = batteries(&state)
-                        .iter()
-                        .map(|tile| format!("label {}={}", tile.label, tile.value))
-                        .collect();
-                    println!("  connected: {}", shown.join(" "));
-                    // Firmware is part of the acceptance record; the serial is
-                    // deliberately not printed.
-                    let firmware = state
-                        .single_battery
-                        .as_ref()
-                        .and_then(|single| single.firmware.clone())
-                        .or_else(|| state.firmware.left.clone())
-                        .or_else(|| state.firmware.right.clone());
-                    println!("  firmware: {}", firmware.as_deref().unwrap_or("unknown"));
-                }
-                Some(ConnectOutcome::Failed(failure)) => {
+            match open_session(&request, &AtomicBool::new(false)) {
+                OpenOutcome::Opened(mut session) => match session.poll_state() {
+                    Ok(state) => {
+                        let shown: Vec<String> = batteries(&state)
+                            .iter()
+                            .map(|tile| format!("label {}={}", tile.label, tile.value))
+                            .collect();
+                        println!("  connected: {}", shown.join(" "));
+                        // Firmware is part of the acceptance record; the serial is
+                        // deliberately not printed.
+                        let firmware = state
+                            .single_battery
+                            .as_ref()
+                            .and_then(|single| single.firmware.clone())
+                            .or_else(|| state.firmware.left.clone())
+                            .or_else(|| state.firmware.right.clone());
+                        println!("  firmware: {}", firmware.as_deref().unwrap_or("unknown"));
+                    }
+                    Err(error) => {
+                        let failure = ConnectFailure::from_session(error);
+                        println!("  failed ({:?}): {}", failure.kind(), failure.text());
+                    }
+                },
+                OpenOutcome::Failed(failure) => {
                     println!("  failed ({:?}): {}", failure.kind(), failure.text());
                 }
-                None => println!("  cancelled"),
+                OpenOutcome::Cancelled => println!("  cancelled"),
             }
         }
     }
@@ -1553,15 +2241,7 @@ mod tests {
     #[ignore = "manual hardware check: needs a paired Soundcore device"]
     fn manual_disconnect_and_retry() {
         let ui = AppWindow::new().expect("the shell window builds");
-        let (sender, receiver) = mpsc::channel();
-        let inner = Rc::new(Inner {
-            ui: ui.as_weak(),
-            sender,
-            receiver: RefCell::new(receiver),
-            enumeration: Cell::new(0),
-            connect: Cell::new(0),
-            cancel: RefCell::new(None),
-        });
+        let inner = test_inner(&ui);
         let state = ui.global::<AppState>();
 
         let model = selected_model("A3062").expect("A3062 has a catalog entry and a parser");
@@ -1617,6 +2297,256 @@ mod tests {
         let tiles = shown_batteries(&state);
         println!("  retry connected: {tiles:?}");
         assert!(!tiles.is_empty(), "the retry shows battery tiles");
+    }
+
+    /// The controller state of a manual test: the same fields `Controller::new`
+    /// fills, with the worker channel drained by hand instead of by the timer.
+    fn test_inner(ui: &AppWindow) -> Rc<Inner> {
+        let (sender, receiver) = mpsc::channel();
+        Rc::new(Inner {
+            ui: ui.as_weak(),
+            sender,
+            receiver: RefCell::new(receiver),
+            enumeration: Cell::new(0),
+            connect: Cell::new(0),
+            cancel: RefCell::new(None),
+            commands: RefCell::new(None),
+            mode_change: Cell::new(0),
+        })
+    }
+
+    /// Connects the suggested real device of a catalog code through the same
+    /// `pair` path the window uses; `None` when no device answered.
+    fn connect_real_device(ui: &AppWindow, inner: &Rc<Inner>, code: &str) -> Option<String> {
+        let model = selected_model(code).expect("the model is in the catalog");
+        println!("== {} {} ==", model.code, model.name);
+        let found = match enumerate_candidates(Some((model.code, model.name))) {
+            Ok(found) => found,
+            Err(error) => {
+                println!("  enumeration failed: {error}");
+                return None;
+            }
+        };
+        for candidate in &found {
+            println!(
+                "  candidate {} suggested={} ({})",
+                candidate.name,
+                candidate.suggested,
+                masked_mac(&format_mac(candidate.address))
+            );
+        }
+        let candidate = found
+            .iter()
+            .find(|candidate| candidate.suggested)
+            .or_else(|| found.first())?;
+        let mac = format_mac(candidate.address);
+        let state = ui.global::<AppState>();
+        // `pair` reads the chosen model from the dialog state; set what
+        // `choose_model` would set and skip its own enumeration worker.
+        state.set_add_model_code(model.code.into());
+        state.set_add_model_name(model.name.into());
+        pair(ui, inner, &mac, &candidate.name);
+        if !wait_for_connection(inner, ui, Connection::Connected, Duration::from_secs(20)) {
+            println!(
+                "  connect failed ({:?}): {}",
+                state.get_failure_kind(),
+                state.get_failure_text()
+            );
+            return None;
+        }
+        println!("  connected via {}", masked_mac(&mac));
+        Some(mac)
+    }
+
+    /// Pumps the worker channel until the page shows `want` as the current
+    /// mode. `None` when the error banner appeared first or the timeout expired.
+    fn wait_for_mode(ui: &AppWindow, inner: &Rc<Inner>, want: i32) -> Option<i32> {
+        let state = ui.global::<AppState>();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            drain_events(inner);
+            if !state.get_error_label().is_empty() {
+                println!("  error banner: {}", state.get_error_label());
+                return None;
+            }
+            if state.get_mode_index() == want {
+                return Some(want);
+            }
+            if std::time::Instant::now() >= deadline {
+                println!(
+                    "  timed out waiting for mode index {want}; current {}",
+                    state.get_mode_index()
+                );
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Clicks a sound-mode tile through the same function the `Actions.set-option`
+    /// callback calls, then pumps the worker channel until the re-polled state
+    /// selects it. `None` when the change showed an error instead.
+    fn switch_mode(ui: &AppWindow, inner: &Rc<Inner>, index: i32) -> Option<i32> {
+        click_mode(ui, index);
+        wait_for_mode(ui, inner, index)
+    }
+
+    /// Presses a Sound mode tile through the wired `Actions.set-option` callback,
+    /// as the vendored page's touch area does.
+    fn click_mode(ui: &AppWindow, index: i32) {
+        ui.global::<Actions>()
+            .invoke_set_option("ambientSoundMode".into(), index);
+    }
+
+    /// Manual hardware check of the Sound mode page on the real Space One Pro:
+    ///
+    /// ```text
+    /// cargo test -p soundcore-desktop manual_sound_mode_switch -- --ignored --nocapture
+    /// ```
+    ///
+    /// Connects the suggested A3062, asserts the vendored page state (three
+    /// tiles, labels, a current mode, no strength/wind rows, no 1-to-11 scale),
+    /// then clicks every mode through the `ambientSoundMode` action and checks
+    /// that the mode index follows the `01 01` re-poll after each one. Three
+    /// quick clicks then check that only the last result is applied, and a
+    /// stopped worker checks the readable error banner and its Retry. The mode
+    /// found on connect is left in place. Addresses are masked.
+    #[test]
+    #[ignore = "manual hardware check: needs a paired A3062"]
+    fn manual_sound_mode_switch() {
+        let ui = AppWindow::new().expect("the shell window builds");
+        let inner = test_inner(&ui);
+        // The page's tiles call `Actions.set-option`; wire the same callbacks the
+        // running app wires and press them.
+        wire_actions(&ui, &inner);
+        if connect_real_device(&ui, &inner, "A3062").is_none() {
+            return;
+        }
+        let state = ui.global::<AppState>();
+        let pages: Vec<Page> = state.get_sound_pages().iter().collect();
+        let modes: Vec<ModeOption> = state.get_modes().iter().collect();
+        let values: Vec<String> = modes.iter().map(|mode| mode.value.to_string()).collect();
+        let labels: Vec<String> = modes.iter().map(|mode| mode.label.to_string()).collect();
+        println!("  sound-pages: {pages:?}");
+        println!("  modes: {values:?} labels: {labels:?}");
+        println!(
+            "  mode-index: {} (mode-scale: {}, mode-rows: {})",
+            state.get_mode_index(),
+            state.get_mode_scale(),
+            state.get_mode_rows().row_count()
+        );
+        assert_eq!(pages, vec![Page::SoundModes]);
+        assert_eq!(values, ["NoiseCanceling", "Transparency", "Normal"]);
+        assert_eq!(labels, ["Noise canceling", "Transparency", "Normal"]);
+        assert!(!state.get_mode_scale(), "the 1-to-11 scale is out of scope");
+        assert_eq!(
+            state.get_mode_rows().row_count(),
+            0,
+            "strength/wind rows are out of scope"
+        );
+        let initial = state.get_mode_index();
+        assert!((0..3).contains(&initial), "the page reports a current mode");
+        println!("  reported mode on connect: index {initial}");
+
+        // Open the page the way the sidebar does.
+        state.set_page(Page::SoundModes);
+        assert_eq!(state.get_page(), Page::SoundModes);
+
+        // Visit every other tile first and the starting mode last, so each
+        // click expects a different mode than the one shown before it.
+        let mut clicked = Vec::new();
+        for offset in [1, 2, 0] {
+            let index = (initial + offset) % 3;
+            let reported = switch_mode(&ui, &inner, index)
+                .unwrap_or_else(|| panic!("switching to tile {index} fails"));
+            clicked.push(reported);
+            println!("  tile {index} -> re-polled mode index {reported}");
+            assert_eq!(reported, index);
+        }
+        assert_eq!(clicked.len(), 3, "all three modes were switched");
+
+        // Three clicks before the first answer: the worker applies them in order
+        // and the page shows only the last re-polled mode; older results are
+        // stale and dropped.
+        let first = (initial + 1) % 3;
+        let second = (initial + 2) % 3;
+        click_mode(&ui, first);
+        click_mode(&ui, second);
+        click_mode(&ui, initial);
+        let settled =
+            wait_for_mode(&ui, &inner, initial).expect("three quick clicks settle on the last one");
+        println!("  quick clicks {first}, {second}, {initial} -> settled on {settled}");
+
+        // A failed change closes the session. The next click shows the readable
+        // error banner instead of writing, and the banner's Retry reconnects.
+        inner.stop_worker();
+        click_mode(&ui, first);
+        let error = state.get_error_label().to_string();
+        println!("  after a failed worker: error-label {error:?}");
+        assert!(error.contains("Sound mode"), "{error:?} names the setting");
+        // Give the stopped worker time to drop its socket: a real Retry click
+        // comes much later than this line.
+        std::thread::sleep(Duration::from_millis(1000));
+        ui.global::<Actions>().invoke_retry();
+        assert!(
+            wait_for_connection(&inner, &ui, Connection::Connected, Duration::from_secs(20)),
+            "the banner's Retry reconnects"
+        );
+        println!(
+            "  retry: connected={:?} sound-pages={} error-label={:?}",
+            state.get_connection(),
+            state.get_sound_pages().row_count(),
+            state.get_error_label()
+        );
+        assert_eq!(state.get_sound_pages().row_count(), 1, "the page is back");
+        assert_eq!(state.get_error_label().as_str(), "", "the banner is gone");
+        let reported = state.get_mode_index();
+        println!("  retried connection reports mode index {reported}");
+        assert_eq!(reported, initial, "the device kept the last mode");
+        disconnect(&ui, &inner);
+    }
+
+    /// Manual hardware check that a P20i never offers the Sound mode page:
+    ///
+    /// ```text
+    /// cargo test -p soundcore-desktop manual_p20i_has_no_sound_mode -- --ignored --nocapture
+    /// ```
+    ///
+    /// Connects the suggested A3949 and asserts the page, the tiles and the mode
+    /// index stay empty; the `ambientSoundMode` action is then ignored, so no
+    /// `06 81` write has a path on this model. Addresses are masked.
+    #[test]
+    #[ignore = "manual hardware check: needs a paired P20i"]
+    fn manual_p20i_has_no_sound_mode() {
+        let ui = AppWindow::new().expect("the shell window builds");
+        let inner = test_inner(&ui);
+        wire_actions(&ui, &inner);
+        if connect_real_device(&ui, &inner, "A3949").is_none() {
+            return;
+        }
+        let state = ui.global::<AppState>();
+        println!(
+            "  sound-pages: {} modes: {} mode-index: {}",
+            state.get_sound_pages().row_count(),
+            state.get_modes().row_count(),
+            state.get_mode_index()
+        );
+        assert_eq!(state.get_sound_pages().row_count(), 0, "no page");
+        assert_eq!(state.get_modes().row_count(), 0, "no tiles");
+        assert_eq!(state.get_mode_index(), -1, "no selected mode");
+
+        click_mode(&ui, 0);
+        std::thread::sleep(Duration::from_millis(300));
+        drain_events(&inner);
+        assert_eq!(state.get_modes().row_count(), 0);
+        assert_eq!(state.get_mode_index(), -1);
+        assert_eq!(
+            state.get_error_label().as_str(),
+            "",
+            "a P20i tile click changes nothing"
+        );
+        println!("  ambientSoundMode click ignored: no page, no 06 81 path");
+        disconnect(&ui, &inner);
     }
 
     /// The battery tiles of an Overview, as plain values for test output.

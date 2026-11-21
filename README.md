@@ -25,11 +25,12 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 | Model catalog | 39 models grouped into 5 form factors and 11 families |
 | A3949 real state | parsed, battery 5/4, firmware 14.43, masked serial |
 | A3062 real single-battery state | parsed, one battery tile, firmware 04.39, masked serial |
+| A3062 sound modes | parsed at state body offset 69 and writable through a measured `06 81` body (0 = noise canceling, 1 = transparency, 2 = normal); sanitized fixture per mode |
 | A3954 100-step state | synthetic test, battery 100/75 |
 | Other single-battery layouts | intentionally unimplemented (`UnsupportedLayout`) |
 | TLV D1203 | not started |
 | Diagnostics | read-only probes, session manifest, serial/MAC redaction, ZIP export |
-| Windows session/transport | clean-room session writes only `01 01` and parses the answer; the Windows RFCOMM transport lists paired devices and connects by vendor UUID with an SPP fallback |
+| Windows session/transport | clean-room session requests `01 01`, parses the answer and writes the measured A3062 `06 81` sound-mode frame; the Windows RFCOMM transport lists paired devices and connects by vendor UUID with an SPP fallback |
 | Desktop (OpenSCL4 2.0) | OpenSCL4 Slint shell vendored under GPL-3.0; Add Device populated from the 39-model catalog; real paired Soundcore devices connect over Windows RFCOMM and Overview shows their battery (P20i A3949 and Space One Pro A3062 verified on hardware) |
 | Android UI | not started |
 
@@ -62,6 +63,7 @@ core/
     conformance.json      # 503 sanitized frames
     a3949-state.json      # real capture, serial masked, checksum recalculated
     a3062-state.json      # real capture, serial masked, checksum recalculated
+    a3062-sound-modes.json # real captures, one per sound mode, serial masked
   crates/
     protocol/             # framing, checksum, request builders
     models/               # registry, catalog taxonomy and state parsers
@@ -77,6 +79,7 @@ desktop/                  # Slint shell vendored from OpenSCL4 (GPL-3.0)
 .scratch/
   openscl4-2.0/           # spec and tickets for this 2.0 slice
   windows-mvp/            # spec and tickets for the Windows MVP
+  windows-sound-modes/    # spec and tickets for the Windows sound-modes slice
 ```
 
 The desktop crate depends on `core/crates/models` and `core/crates/session` by
