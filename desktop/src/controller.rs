@@ -264,12 +264,66 @@ pub fn signed_decibels(value: i16) -> String {
     format!("{sign}{}.{}", magnitude / 10, magnitude % 10)
 }
 
+/// The closest value a band may take in device units (dB×10): the measured
+/// `-12.0..+13.4 dB` range, i.e. the `0..=254` band-byte range minus the
+/// [`EQ_MIN`] offset.
+pub fn clamp_band_value(value: i32) -> i16 {
+    value.clamp(i32::from(EQ_MIN), i32::from(EQ_MAX)) as i16
+}
+
+/// The device value a typed band field names, in dB×10 units, or `None` when
+/// the text is not one the device can store.
+///
+/// The field shows decibels with at most one fraction digit ("13.4", "-12",
+/// "0"), so a point or a comma, an optional sign (`-`, `+` or the vendored
+/// minus U+2212) and at most one non-zero fraction digit are accepted. The
+/// value is not range-checked: the commit path clamps it, exactly like a
+/// dragged value.
+pub fn parse_band_text(text: &str) -> Option<i32> {
+    let text = text.trim().replace(',', ".");
+    let (negative, digits) = match text
+        .strip_prefix('-')
+        .or_else(|| text.strip_prefix('\u{2212}'))
+    {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(&text)),
+    };
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    if whole.is_empty() && fraction.is_empty()
+        || !whole
+            .chars()
+            .chain(fraction.chars())
+            .all(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    // The device stores tenths of a decibel: digits past the first fraction
+    // digit may only be zeros.
+    let (kept, dropped) = fraction.split_at(fraction.len().min(1));
+    if dropped.chars().any(|character| character != '0') {
+        return None;
+    }
+    let whole: i32 = if whole.is_empty() {
+        0
+    } else {
+        whole.parse().ok()?
+    };
+    let fraction: i32 = kept.parse().unwrap_or(0);
+    let units = whole.checked_mul(10)?.checked_add(fraction)?;
+    Some(if negative { -units } else { units })
+}
+
 /// The visible bands of a parsed state: the first eight band values with their
-/// measured frequencies. Read-only: this slice never writes band values.
+/// measured frequencies.
 pub fn equalizer_bands(equalizer: &EqualizerState) -> Vec<EqBand> {
+    equalizer_bands_from_values(&equalizer_values(equalizer))
+}
+
+/// The `EqBand` rows of eight visible band values in raw dB×10 units.
+fn equalizer_bands_from_values(values: &[i16]) -> Vec<EqBand> {
     EQ_BAND_HZ
         .iter()
-        .zip(equalizer.bands.iter())
+        .zip(values.iter())
         .map(|(hz, value)| {
             let (frequency, khz) = band_frequency(*hz);
             EqBand {
@@ -396,12 +450,16 @@ fn slopes(points: &[(f32, f32)]) -> Vec<f32> {
 pub struct EqualizerDisplay {
     /// Whether the device reported an equalizer this slice can show.
     pub available: bool,
+    /// Whether the page's band controls are enabled. Only a model whose custom
+    /// equalizer body this slice can write (the A3062) is editable: every other
+    /// model with an equalizer would get a read-only page.
+    pub editable: bool,
     /// The preset chips, their count, and the id string of the current preset
     /// (`""` when the device reports custom bands).
     pub presets: Vec<ModeOption>,
     pub preset_count: i32,
     pub preset: String,
-    /// The read-only band values, their count, and the decibel range.
+    /// The band values, their count, and the decibel range.
     pub band_count: i32,
     pub min: i32,
     pub max: i32,
@@ -417,11 +475,15 @@ pub struct EqualizerDisplay {
 
 impl EqualizerDisplay {
     /// The page data of a parsed state: presets from `model`'s catalog, the
-    /// current preset and its read-only curve from `equalizer`.
+    /// current preset and its curve from `equalizer`, and whether its band
+    /// controls may write a custom curve.
     pub fn new(model: Option<DeviceModel>, equalizer: Option<&EqualizerState>) -> Self {
         let Some(equalizer) = equalizer else {
             return Self::default();
         };
+        let editable = model
+            .and_then(|model| model.custom_equalizer_body(equalizer, [0; EQ_VISIBLE_BANDS]))
+            .is_some();
         let presets = preset_options(model);
         let bands = equalizer_bands(equalizer);
         let (chart_line, chart_area) =
@@ -429,6 +491,7 @@ impl EqualizerDisplay {
         let built_in = equalizer.preset();
         Self {
             available: true,
+            editable,
             preset_count: i32::try_from(presets.len()).unwrap_or(0),
             presets,
             preset: equalizer.preset_id.to_string(),
@@ -456,6 +519,175 @@ fn equalizer_values(equalizer: &EqualizerState) -> Vec<i16> {
         .take(EQ_VISIBLE_BANDS)
         .copied()
         .collect()
+}
+
+/// One edit of the Equalizer page's bands, as the vendored page's actions
+/// report it. A preview only moves the page; a commit and a reset also write
+/// the whole eight-band curve to the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BandAction {
+    /// `Actions.eq-preview(index, value)`: a drag. The page follows at once and
+    /// the device is not told; the release sends a commit.
+    Preview { index: i32, value: i32 },
+    /// `Actions.eq-commit(index, value)`: a slider release, arrow key or typed
+    /// value. The page follows and the curve is written.
+    Commit { index: i32, value: i32 },
+    /// `Actions.eq-reset()`: the flat 0 dB curve is written.
+    Reset,
+}
+
+/// The Equalizer page fields a band edit changes. The real implementation is
+/// the Slint `AppState`; the tests record the same calls so the wiring can be
+/// checked without a window.
+trait EqPage {
+    /// The eight band values the page currently shows, in raw dB×10 units.
+    fn shown_band_values(&self) -> Vec<i16>;
+    /// Shows `values` as the eight band rows and the curve through them.
+    fn show_curve(&self, values: &[i16]);
+    /// Shows the equalizer state the device reported: its preset id and name
+    /// (empty for custom bands) and its curve.
+    fn show_reported_curve(&self, equalizer: &EqualizerState);
+    /// Shows a readable error banner label; `""` clears the banner.
+    fn show_error(&self, label: &str);
+}
+
+impl EqPage for AppState<'_> {
+    fn shown_band_values(&self) -> Vec<i16> {
+        let bands: Vec<EqBand> = self.get_eq_bands().iter().collect();
+        bands
+            .iter()
+            .map(|band| clamp_band_value(band.value))
+            .collect()
+    }
+
+    fn show_curve(&self, values: &[i16]) {
+        let (chart_line, chart_area) = equalizer_chart(values, EQ_MIN, EQ_MAX);
+        self.set_eq_bands(ModelRc::new(VecModel::from(equalizer_bands_from_values(
+            values,
+        ))));
+        self.set_eq_chart_line(chart_line.into());
+        self.set_eq_chart_area(chart_area.into());
+    }
+
+    fn show_reported_curve(&self, equalizer: &EqualizerState) {
+        show_equalizer_state(self, equalizer);
+    }
+
+    fn show_error(&self, label: &str) {
+        self.set_error_label(label.into());
+    }
+}
+
+/// Queues a custom eight-band curve write on the connected device worker. The
+/// real implementation is [`Inner`]; the tests record the curves instead.
+trait BandWriter {
+    /// Queues `bands`; false when the worker is gone (a failed or stopped
+    /// connection), so the page can say why nothing was written.
+    fn write_curve(&self, bands: [i16; EQ_VISIBLE_BANDS]) -> bool;
+}
+
+impl BandWriter for Inner {
+    fn write_curve(&self, bands: [i16; EQ_VISIBLE_BANDS]) -> bool {
+        let request = self.curve_change.get() + 1;
+        self.curve_change.set(request);
+        let command = DeviceCommand::WriteCustomCurve { request, bands };
+        self.commands
+            .borrow()
+            .as_ref()
+            .is_some_and(|sender| sender.send(command).is_ok())
+    }
+}
+
+/// The eight band values after `index` is set to `value`, clamped to the
+/// device's range; `None` when the page does not show that band.
+fn edited_band_values(shown: &[i16], index: i32, value: i32) -> Option<Vec<i16>> {
+    let mut values = shown.to_vec();
+    let band = values.get_mut(usize::try_from(index).ok()?)?;
+    *band = clamp_band_value(value);
+    Some(values)
+}
+
+/// Answers one Equalizer page band action on the page, then queues the write a
+/// commit or a reset asks for. Returns whether a write was queued: a preview
+/// only moves the page and never writes.
+fn answer_band_action(page: &impl EqPage, writer: &impl BandWriter, action: BandAction) -> bool {
+    match action {
+        BandAction::Preview { index, value } => {
+            let Some(values) = edited_band_values(&page.shown_band_values(), index, value) else {
+                return false;
+            };
+            page.show_curve(&values);
+            false
+        }
+        BandAction::Commit { index, value } => {
+            let Some(values) = edited_band_values(&page.shown_band_values(), index, value) else {
+                return false;
+            };
+            page.show_curve(&values);
+            write_curve(page, writer, &values)
+        }
+        BandAction::Reset => {
+            let values = vec![0i16; EQ_VISIBLE_BANDS];
+            page.show_curve(&values);
+            write_curve(page, writer, &values)
+        }
+    }
+}
+
+/// Queues the whole visible curve; a stopped worker becomes the readable error
+/// instead of a silent no-op.
+fn write_curve(page: &impl EqPage, writer: &impl BandWriter, values: &[i16]) -> bool {
+    let Ok(bands) = <[i16; EQ_VISIBLE_BANDS]>::try_from(values) else {
+        return false;
+    };
+    if writer.write_curve(bands) {
+        true
+    } else {
+        page.show_error(EqFailure::Disconnected.bands_label());
+        false
+    }
+}
+
+/// Applies a finished custom-curve change to the page: the state the device
+/// reports, or the readable label of what failed. A failed change stops the
+/// worker (`stop`), as every failed equalizer change does.
+fn apply_curve_outcome(
+    page: &impl EqPage,
+    stop: &impl Fn(),
+    outcome: Result<EqualizerState, EqFailure>,
+) {
+    match outcome {
+        Ok(reported) => {
+            page.show_reported_curve(&reported);
+            page.show_error("");
+        }
+        Err(failure) => {
+            stop();
+            page.show_error(failure.bands_label());
+        }
+    }
+}
+
+/// Whether the page's band controls may act: a connected device whose
+/// equalizer is editable. A model without a custom equalizer body (the A3949)
+/// has no page and no editable controls, so no band frame can be written for
+/// it.
+fn band_edit_allowed(state: &AppState<'_>) -> bool {
+    state.get_connection() == Connection::Connected
+        && state.get_eq_available()
+        && !state.get_eq_read_only()
+}
+
+/// Answers a band action on the window's page when it is alive and editable.
+fn answer_band_edit(inner: &Rc<Inner>, action: BandAction) {
+    let Some(window) = inner.ui.upgrade() else {
+        return;
+    };
+    let state = window.global::<AppState>();
+    if !band_edit_allowed(&state) {
+        return;
+    }
+    answer_band_action(&state, &**inner, action);
 }
 
 /// Why a sound-mode change did not take, in the words the vendored error banner
@@ -538,13 +770,23 @@ impl EqFailure {
         }
     }
 
-    /// The `AppState.error-label` of a failed change; the vendored banner wraps
-    /// it as "Could not change “{}”.".
+    /// The `AppState.error-label` of a failed preset change; the vendored banner
+    /// wraps it as "Could not change “{}”.".
     pub fn label(self) -> &'static str {
         match self {
             Self::TimedOut => "Equalizer profile (no answer)",
             Self::Disconnected => "Equalizer profile (connection lost)",
             Self::Unreadable => "Equalizer profile (unreadable answer)",
+        }
+    }
+
+    /// The `AppState.error-label` of a failed custom-curve change, worded like
+    /// [`Self::label`] but naming the bands that were being written.
+    pub fn bands_label(self) -> &'static str {
+        match self {
+            Self::TimedOut => "Equalizer bands (no answer)",
+            Self::Disconnected => "Equalizer bands (connection lost)",
+            Self::Unreadable => "Equalizer bands (unreadable answer)",
         }
     }
 }
@@ -561,6 +803,24 @@ pub fn change_equalizer_preset<T: Transport>(
 ) -> Result<EqualizerState, EqFailure> {
     session
         .set_equalizer_preset(current, preset)
+        .map_err(EqFailure::from_session)?;
+    let state = session.poll_state().map_err(EqFailure::from_session)?;
+    state.equalizer.ok_or(EqFailure::Unreadable)
+}
+
+/// Writes the eight visible bands as a custom curve, re-reads the state and
+/// returns the equalizer the device reports. `current` is the last state the
+/// worker read: the write keeps its HearID block, exactly as OpenSCL4's A3062
+/// equalizer does.
+///
+/// Blocking: only the device worker calls this, never the UI thread.
+pub fn change_custom_equalizer<T: Transport>(
+    session: &mut DeviceSession<T>,
+    current: &EqualizerState,
+    visible_bands: [i16; EQ_VISIBLE_BANDS],
+) -> Result<EqualizerState, EqFailure> {
+    session
+        .set_custom_equalizer(current, visible_bands)
         .map_err(EqFailure::from_session)?;
     let state = session.poll_state().map_err(EqFailure::from_session)?;
     state.equalizer.ok_or(EqFailure::Unreadable)
@@ -808,10 +1068,17 @@ enum ConnectOutcome {
 enum DeviceCommand {
     /// Write a sound mode and re-read the state; `request` identifies the click
     /// so the UI can drop a result a newer click has superseded.
-    SetSoundMode { request: u64, mode: SoundMode },
+    ChangeSoundMode { request: u64, mode: SoundMode },
     /// Write an equalizer preset and re-read the state; `request` identifies the
-    /// click the same way `SetSoundMode` does.
-    SetEqualizerPreset { request: u64, preset_id: u16 },
+    /// click the same way `ChangeSoundMode` does.
+    ChangeEqualizerPreset { request: u64, preset_id: u16 },
+    /// Write a custom eight-band equalizer curve and re-read the state;
+    /// `request` identifies the drag release or typed value the same way
+    /// `ChangeSoundMode` does.
+    WriteCustomCurve {
+        request: u64,
+        bands: [i16; EQ_VISIBLE_BANDS],
+    },
 }
 
 /// A worker-to-UI message; the sequence number tells the UI whether the result
@@ -839,6 +1106,12 @@ enum Event {
         request: u64,
         outcome: Result<EqualizerState, EqFailure>,
     },
+    /// A device worker finished a custom-curve write and re-read the state.
+    CurveChanged {
+        attempt: u64,
+        request: u64,
+        outcome: Result<EqualizerState, EqFailure>,
+    },
 }
 
 /// State shared between the UI callbacks and the polling timer. Every field is
@@ -860,6 +1133,9 @@ struct Inner {
     mode_change: Cell<u64>,
     /// The newest equalizer preset change; results of older changes are stale.
     preset_change: Cell<u64>,
+    /// The newest custom equalizer curve change; results of older changes are
+    /// stale.
+    curve_change: Cell<u64>,
 }
 
 impl Inner {
@@ -896,6 +1172,7 @@ impl Inner {
         self.connect.set(attempt);
         self.mode_change.set(0);
         self.preset_change.set(0);
+        self.curve_change.set(0);
         let cancel = Arc::new(AtomicBool::new(false));
         *self.cancel.borrow_mut() = Some(Arc::clone(&cancel));
         let (commands, command_receiver) = mpsc::channel();
@@ -933,6 +1210,7 @@ impl Inner {
         self.commands.borrow_mut().take();
         self.mode_change.set(0);
         self.preset_change.set(0);
+        self.curve_change.set(0);
     }
 }
 
@@ -958,6 +1236,7 @@ impl Controller {
             commands: RefCell::new(None),
             mode_change: Cell::new(0),
             preset_change: Cell::new(0),
+            curve_change: Cell::new(0),
         });
         initial_state(ui);
         wire_actions(ui, &inner);
@@ -1102,6 +1381,31 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         }
     });
 
+    actions.on_eq_preview({
+        let inner = Rc::clone(inner);
+        move |index, value| answer_band_edit(&inner, BandAction::Preview { index, value })
+    });
+
+    actions.on_eq_commit({
+        let inner = Rc::clone(inner);
+        move |index, value| answer_band_edit(&inner, BandAction::Commit { index, value })
+    });
+
+    actions.on_eq_type({
+        let inner = Rc::clone(inner);
+        move |index, text| {
+            let Some(value) = parse_band_text(text.as_str()) else {
+                return;
+            };
+            answer_band_edit(&inner, BandAction::Commit { index, value });
+        }
+    });
+
+    actions.on_eq_reset({
+        let inner = Rc::clone(inner);
+        move || answer_band_edit(&inner, BandAction::Reset)
+    });
+
     actions.on_navigate({
         let inner = Rc::clone(inner);
         move |page| {
@@ -1138,10 +1442,10 @@ fn mode_result_applies(
     attempt == current_attempt && (outcome.is_err() || request == newest_request)
 }
 
-/// Whether a finished equalizer preset change still updates the page, for the
-/// same reasons as [`mode_result_applies`].
-fn preset_result_applies(
-    outcome: &Result<EqualizerState, EqFailure>,
+/// Whether a finished equalizer change (a preset or a custom curve) still
+/// updates the page, for the same reasons as [`mode_result_applies`].
+fn equalizer_change_applies<T>(
+    outcome: &Result<T, EqFailure>,
     attempt: u64,
     request: u64,
     current_attempt: u64,
@@ -1203,7 +1507,7 @@ fn drain_events(inner: &Rc<Inner>) {
                 request,
                 outcome,
             }) => {
-                let applies = preset_result_applies(
+                let applies = equalizer_change_applies(
                     &outcome,
                     attempt,
                     request,
@@ -1212,6 +1516,23 @@ fn drain_events(inner: &Rc<Inner>) {
                 );
                 if applies && let Some(window) = inner.ui.upgrade() {
                     apply_preset_outcome(&window, inner, outcome);
+                }
+            }
+            Ok(Event::CurveChanged {
+                attempt,
+                request,
+                outcome,
+            }) => {
+                let applies = equalizer_change_applies(
+                    &outcome,
+                    attempt,
+                    request,
+                    inner.connect.get(),
+                    inner.curve_change.get(),
+                );
+                if applies && let Some(window) = inner.ui.upgrade() {
+                    let state = window.global::<AppState>();
+                    apply_curve_outcome(&state, &|| inner.stop_worker(), outcome);
                 }
             }
             // Both an empty queue and a closed channel mean nothing more will
@@ -1307,8 +1628,9 @@ fn run_device_worker(
 /// Reports the initial state, then serves sound-mode and equalizer changes on
 /// the same session until the UI drops the command channel or a change fails.
 ///
-/// The last read equalizer state is kept for the preset writes: the `03 87`
-/// body preserves its HearID block.
+/// The last read equalizer state is kept for the equalizer writes: the `03 87`
+/// body preserves its HearID block, and it is replaced by each re-polled state
+/// so a preset can follow a custom curve and the other way round.
 ///
 /// Generic over the transport so the tests can drive it with a scripted one.
 fn serve_device<T: Transport>(
@@ -1345,7 +1667,7 @@ fn serve_device<T: Transport>(
     }
     while let Ok(command) = commands.recv() {
         match command {
-            DeviceCommand::SetSoundMode { request, mode } => {
+            DeviceCommand::ChangeSoundMode { request, mode } => {
                 let outcome = change_sound_mode(&mut session, mode);
                 let failed = outcome.is_err();
                 let _ = events.send(Event::ModeChanged {
@@ -1362,7 +1684,7 @@ fn serve_device<T: Transport>(
                     return;
                 }
             }
-            DeviceCommand::SetEqualizerPreset { request, preset_id } => {
+            DeviceCommand::ChangeEqualizerPreset { request, preset_id } => {
                 // The UI only offers catalog ids; an id that is not one of the
                 // model's presets is treated as an unreadable answer rather than
                 // writing an invented body.
@@ -1388,6 +1710,32 @@ fn serve_device<T: Transport>(
                 });
                 if failed {
                     // Same rule as a failed mode change: stop writing on a
+                    // session that is out of step and let Retry reconnect.
+                    return;
+                }
+            }
+            DeviceCommand::WriteCustomCurve { request, bands } => {
+                // A curve written from the state the worker last read keeps
+                // that state's HearID block; the re-polled state becomes the
+                // base of the next preset or curve write.
+                let outcome = match equalizer.as_ref() {
+                    Some(current) => {
+                        let reported = change_custom_equalizer(&mut session, current, bands);
+                        if let Ok(reported) = &reported {
+                            equalizer = Some(*reported);
+                        }
+                        reported
+                    }
+                    None => Err(EqFailure::Unreadable),
+                };
+                let failed = outcome.is_err();
+                let _ = events.send(Event::CurveChanged {
+                    attempt,
+                    request,
+                    outcome,
+                });
+                if failed {
+                    // Same rule as a failed preset change: stop writing on a
                     // session that is out of step and let Retry reconnect.
                     return;
                 }
@@ -1718,12 +2066,14 @@ fn show_sound_mode(state: &AppState<'_>, sound_mode: Option<SoundMode>, has_equa
 
 /// Fills the vendored Equalizer page from the parsed state.
 ///
-/// The page is read-only: this slice selects built-in presets but never writes
-/// band values, so the custom band controls stay hidden. The saved profiles,
-/// the legacy banner and import/export stay empty — they are out of scope.
+/// The page is editable exactly when this slice can write a custom equalizer
+/// body for the model (the A3062): the band controls, the range note and the
+/// reset button are enabled and the eight visible bands are editable. The saved
+/// profiles, the legacy banner and import/export stay empty — they are out of
+/// scope.
 fn show_equalizer(state: &AppState<'_>, display: &EqualizerDisplay) {
     state.set_eq_available(display.available);
-    state.set_eq_read_only(display.available);
+    state.set_eq_read_only(!display.editable);
     state.set_eq_presets(ModelRc::new(VecModel::from(display.presets.clone())));
     state.set_eq_preset(display.preset.as_str().into());
     state.set_eq_preset_count(display.preset_count);
@@ -1828,7 +2178,7 @@ fn set_option(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, index: i3
     };
     let request = inner.mode_change.get() + 1;
     inner.mode_change.set(request);
-    let command = DeviceCommand::SetSoundMode { request, mode };
+    let command = DeviceCommand::ChangeSoundMode { request, mode };
     let sent = inner
         .commands
         .borrow()
@@ -1842,9 +2192,9 @@ fn set_option(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, index: i3
 }
 
 /// Answers an Equalizer preset chip. Only a preset id the page offers is
-/// accepted, so an unknown or stale value never writes; the custom band
-/// callbacks (`eq-commit`, `eq-preview`, `eq-type`, `eq-reset`) have no wired
-/// callback, so no band value can be written.
+/// accepted, so an unknown or stale value never writes. A chip written after a
+/// custom curve switches the device back to that built-in preset; the custom
+/// band callbacks live in [`answer_band_edit`].
 fn select_equalizer_preset(window: &AppWindow, inner: &Rc<Inner>, value: &str) {
     let state = window.global::<AppState>();
     // No connection, or a model whose equalizer is deferred (the A3949), means
@@ -1858,7 +2208,7 @@ fn select_equalizer_preset(window: &AppWindow, inner: &Rc<Inner>, value: &str) {
     };
     let request = inner.preset_change.get() + 1;
     inner.preset_change.set(request);
-    let command = DeviceCommand::SetEqualizerPreset { request, preset_id };
+    let command = DeviceCommand::ChangeEqualizerPreset { request, preset_id };
     let sent = inner
         .commands
         .borrow()
@@ -2324,13 +2674,14 @@ mod tests {
         assert!(updated[1].current);
     }
 
-    /// The frame of a real, masked capture the core keeps in `core/data`, read
-    /// from the JSON without a JSON parser.
-    fn captured_frame(json: &str) -> Vec<u8> {
-        let key = json
-            .find("\"frame_hex\"")
-            .expect("the capture names its frame");
-        let after_key = &json[key..];
+    /// A hex frame field of a real, masked capture the core keeps in
+    /// `core/data`, read from the JSON without a JSON parser.
+    fn captured_hex_field(json: &str, key: &str) -> Vec<u8> {
+        let anchor = format!("\"{key}\"");
+        let at = json
+            .find(&anchor)
+            .unwrap_or_else(|| panic!("the capture has no {key:?} field"));
+        let after_key = &json[at..];
         let colon = after_key.find(':').expect("the key has a value");
         let after_colon = &after_key[colon..];
         let open = after_colon.find('"').expect("the frame is quoted");
@@ -2340,6 +2691,51 @@ mod tests {
             .split_whitespace()
             .map(|byte| u8::from_str_radix(byte, 16).expect("the capture stores hex bytes"))
             .collect()
+    }
+
+    /// The `frame_hex` of a real, masked capture: the frame it is about.
+    fn captured_frame(json: &str) -> Vec<u8> {
+        captured_hex_field(json, "frame_hex")
+    }
+
+    /// The real A3062 equalizer capture of this ticket: the state found on
+    /// connect (Soundcore Signature), the custom write frame and the `01 01`
+    /// answers before and after it.
+    fn custom_eq_capture() -> &'static str {
+        include_str!("../../core/data/a3062-eq-custom.json")
+    }
+
+    /// The `01 01` answer found on connect in the custom-capture fixture: the
+    /// Soundcore Signature preset.
+    fn captured_before_custom_eq_frame() -> Vec<u8> {
+        captured_hex_field(custom_eq_capture(), "before_frame_hex")
+    }
+
+    /// The exact custom `03 87` frame the real device accepted from that state:
+    /// the curve +3.0, −3.0, +6.0, 0, −6.0, +2.0, 0, −2.0 dB.
+    fn captured_custom_eq_write_frame() -> Vec<u8> {
+        captured_frame(custom_eq_capture())
+    }
+
+    /// The `01 01` answer after that custom write: preset id `0xFEFE` and the
+    /// written curve.
+    fn captured_custom_eq_frame() -> Vec<u8> {
+        captured_hex_field(custom_eq_capture(), "custom_frame_hex")
+    }
+
+    /// The parsed equalizer of a capture frame.
+    fn captured_equalizer(frame: &[u8]) -> EqualizerState {
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        soundcore_models::parse_state_frame(model, frame)
+            .expect("the real capture parses")
+            .equalizer
+            .expect("the real capture reports an equalizer")
+    }
+
+    /// The parsed custom equalizer of the committed real A3062 custom capture:
+    /// curve +3.0, −3.0, +6.0, 0, −6.0, +2.0, 0, −2.0 dB.
+    fn custom_equalizer_state() -> EqualizerState {
+        captured_equalizer(&captured_custom_eq_frame())
     }
 
     fn captured_a3949_frame() -> Vec<u8> {
@@ -2418,6 +2814,50 @@ mod tests {
         hex(
             "08 EE 00 00 00 03 87 3F 00 03 00 00 00 50 5A 6E 78 78 78 78 78 78 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 50 5A 6E 78 78 78 78 78 78 00 00 7E",
         )
+    }
+
+    /// The exact 63-byte `03 87` frame of a 53-byte equalizer body: the measured
+    /// header, the body and the checksum over every preceding frame byte.
+    fn equalizer_frame(body: &[u8]) -> Vec<u8> {
+        let mut frame = hex("08 EE 00 00 00 03 87 3F 00");
+        frame.extend_from_slice(body);
+        let checksum = frame.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+        frame.push(checksum);
+        frame
+    }
+
+    /// The parsed Soundcore Signature state the real device reported on connect
+    /// in the custom-capture fixture.
+    fn signature_equalizer() -> EqualizerState {
+        captured_equalizer(&captured_before_custom_eq_frame())
+    }
+
+    /// The `01 01` answer of a custom curve with `visible_bands`, built from the
+    /// real capture frame of `base` by replacing its preset id and band bytes
+    /// and recomputing the checksum.
+    ///
+    /// The measured state body holds the preset id at body offset 23 and the ten
+    /// band bytes at 25; the body starts after the 9-byte frame header and the
+    /// last frame byte is the checksum.
+    fn custom_state_frame(base: &[u8], visible_bands: [i16; EQ_VISIBLE_BANDS]) -> Vec<u8> {
+        const HEADER_LEN: usize = 9;
+        const PRESET_AT: usize = HEADER_LEN + 23;
+        const BANDS_AT: usize = HEADER_LEN + 25;
+        let mut frame = base.to_vec();
+        frame[PRESET_AT..PRESET_AT + 2]
+            .copy_from_slice(&soundcore_models::CUSTOM_EQUALIZER_PRESET_ID.to_le_bytes());
+        let bands: Vec<i16> = visible_bands
+            .into_iter()
+            .chain(soundcore_models::FIXED_EQ_BANDS)
+            .collect();
+        for (index, band) in bands.iter().enumerate() {
+            frame[BANDS_AT + index] = u8::try_from(band + 120).expect("a band byte is value + 120");
+        }
+        let checksum_at = frame.len() - 1;
+        frame[checksum_at] = frame[..checksum_at]
+            .iter()
+            .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+        frame
     }
 
     #[test]
@@ -2567,11 +3007,58 @@ mod tests {
     }
 
     #[test]
-    fn the_custom_band_actions_have_no_write_path() {
-        // `eq-commit`/`eq-preview`/`eq-type`/`eq-reset` are never wired in
-        // `wire_actions`, and the only equalizer command the controller sends
-        // names a catalog preset: no command carries band values, so the
-        // read-only page cannot write them.
+    fn a_band_text_parses_decibels_into_device_units() {
+        // The field shows decibels with at most one fraction digit; the device
+        // stores tenths, so "3.5" is 35.
+        for (text, expected) in [
+            ("3.5", 35),
+            ("-3.5", -35),
+            ("\u{2212}1,5", -15),
+            ("+13.4", 134),
+            ("0", 0),
+            ("0.0", 0),
+            ("13.40", 134),
+            (" 2,5 ", 25),
+            ("-12", -120),
+        ] {
+            assert_eq!(parse_band_text(text), Some(expected), "{text:?}");
+        }
+        for text in [
+            "",
+            " ",
+            "abc",
+            "3.55",
+            "1.2.3",
+            "3,5,5",
+            "++1",
+            "--1",
+            "1 000",
+            "\u{221E}",
+            "999999999999999999999",
+        ] {
+            assert_eq!(parse_band_text(text), None, "{text:?} is not a value");
+        }
+    }
+
+    #[test]
+    fn a_band_value_clamps_to_the_measured_range() {
+        assert_eq!(clamp_band_value(0), 0);
+        assert_eq!(clamp_band_value(EQ_MAX.into()), EQ_MAX);
+        assert_eq!(clamp_band_value(EQ_MIN.into()), EQ_MIN);
+        assert_eq!(clamp_band_value(135), EQ_MAX);
+        assert_eq!(clamp_band_value(i32::MAX), EQ_MAX);
+        assert_eq!(clamp_band_value(-121), EQ_MIN);
+        assert_eq!(clamp_band_value(i32::MIN), EQ_MIN);
+        // The clamped value is what the band field and the chart show: the
+        // device range is -12.0…+13.4 dB.
+        assert_eq!(band_value_text(clamp_band_value(999)), "13.4");
+        assert_eq!(band_value_text(clamp_band_value(-999)), "-12");
+    }
+
+    #[test]
+    fn the_custom_preset_id_is_never_a_chip() {
+        // Custom bands are written by the band controls, never by a chip: the
+        // 0xFEFE id is not one of the catalog values.
         let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
         let presets = preset_options(Some(model));
         assert_eq!(
@@ -2591,13 +3078,276 @@ mod tests {
         }
     }
 
+    /// A page that records what a band edit shows, in place of the Slint
+    /// `AppState`.
+    #[derive(Default)]
+    struct RecordedPage {
+        shown: RefCell<Vec<i16>>,
+        curves: RefCell<Vec<Vec<i16>>>,
+        reported: RefCell<Vec<EqualizerState>>,
+        errors: RefCell<Vec<String>>,
+    }
+
+    impl RecordedPage {
+        fn showing(values: impl IntoIterator<Item = i16>) -> Self {
+            Self {
+                shown: RefCell::new(values.into_iter().collect()),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl EqPage for RecordedPage {
+        fn shown_band_values(&self) -> Vec<i16> {
+            self.shown.borrow().clone()
+        }
+
+        fn show_curve(&self, values: &[i16]) {
+            *self.shown.borrow_mut() = values.to_vec();
+            self.curves.borrow_mut().push(values.to_vec());
+        }
+
+        fn show_reported_curve(&self, equalizer: &EqualizerState) {
+            *self.shown.borrow_mut() = equalizer.visible_bands().to_vec();
+            self.reported.borrow_mut().push(*equalizer);
+        }
+
+        fn show_error(&self, label: &str) {
+            self.errors.borrow_mut().push(label.to_owned());
+        }
+    }
+
+    /// A writer that records the curves a band edit queues, in place of the
+    /// device worker's command channel.
+    struct RecordedWriter {
+        curves: RefCell<Vec<[i16; EQ_VISIBLE_BANDS]>>,
+        connected: Cell<bool>,
+    }
+
+    impl Default for RecordedWriter {
+        fn default() -> Self {
+            Self {
+                curves: RefCell::default(),
+                connected: Cell::new(true),
+            }
+        }
+    }
+
+    impl BandWriter for RecordedWriter {
+        fn write_curve(&self, bands: [i16; EQ_VISIBLE_BANDS]) -> bool {
+            if !self.connected.get() {
+                return false;
+            }
+            self.curves.borrow_mut().push(bands);
+            true
+        }
+    }
+
     #[test]
-    fn the_real_a3062_capture_shows_its_preset_and_eight_read_only_bands() {
+    fn a_preview_moves_the_page_without_a_curve_write() {
+        let page = RecordedPage::showing([0; EQ_VISIBLE_BANDS]);
+        let writer = RecordedWriter::default();
+
+        let wrote = answer_band_action(
+            &page,
+            &writer,
+            BandAction::Preview {
+                index: 2,
+                value: 40,
+            },
+        );
+
+        assert!(!wrote, "a preview never queues a write");
+        assert!(
+            writer.curves.borrow().is_empty(),
+            "a preview does not tell the device"
+        );
+        assert_eq!(*page.shown.borrow(), [0, 0, 40, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            page.curves.borrow().len(),
+            1,
+            "the page curve follows the drag at once"
+        );
+    }
+
+    #[test]
+    fn a_commit_clamps_the_band_and_writes_the_whole_curve_once() {
+        let page = RecordedPage::showing([0; EQ_VISIBLE_BANDS]);
+        let writer = RecordedWriter::default();
+
+        let wrote = answer_band_action(
+            &page,
+            &writer,
+            BandAction::Commit {
+                index: 1,
+                value: 999,
+            },
+        );
+
+        assert!(wrote);
+        assert_eq!(writer.curves.borrow().len(), 1, "exactly one write");
+        assert_eq!(
+            writer.curves.borrow()[0],
+            [0, EQ_MAX, 0, 0, 0, 0, 0, 0],
+            "the out-of-range value is clamped and the whole curve is written"
+        );
+        assert_eq!(
+            *page.shown.borrow(),
+            [0, EQ_MAX, 0, 0, 0, 0, 0, 0],
+            "the page shows the clamped value"
+        );
+    }
+
+    #[test]
+    fn a_commit_keeps_the_other_bands_the_page_shows() {
+        let page = RecordedPage::showing([30, -30, 60, 0, -60, 20, 0, -20]);
+        let writer = RecordedWriter::default();
+
+        answer_band_action(
+            &page,
+            &writer,
+            BandAction::Commit {
+                index: 6,
+                value: -50,
+            },
+        );
+
+        assert_eq!(
+            writer.curves.borrow()[0],
+            [30, -30, 60, 0, -60, 20, -50, -20],
+            "a commit writes every band the page shows, not only the edited one"
+        );
+    }
+
+    #[test]
+    fn a_reset_shows_and_writes_the_flat_curve() {
+        let page = RecordedPage::showing([30, -30, 60, 0, -60, 20, 0, -20]);
+        let writer = RecordedWriter::default();
+
+        let wrote = answer_band_action(&page, &writer, BandAction::Reset);
+
+        assert!(wrote);
+        assert_eq!(writer.curves.borrow().len(), 1, "one flat custom curve");
+        assert_eq!(
+            writer.curves.borrow()[0],
+            [0; EQ_VISIBLE_BANDS],
+            "every visible band is 0 dB"
+        );
+        assert_eq!(*page.shown.borrow(), [0; EQ_VISIBLE_BANDS]);
+    }
+
+    #[test]
+    fn a_band_index_the_page_does_not_show_is_ignored() {
+        let page = RecordedPage::showing([0; EQ_VISIBLE_BANDS]);
+        let writer = RecordedWriter::default();
+
+        for index in [-1, EQ_VISIBLE_BANDS as i32, 100] {
+            for action in [
+                BandAction::Preview { index, value: 40 },
+                BandAction::Commit { index, value: 40 },
+            ] {
+                assert!(
+                    !answer_band_action(&page, &writer, action),
+                    "{action:?} matches no band"
+                );
+            }
+        }
+        assert!(writer.curves.borrow().is_empty());
+        assert!(page.curves.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_stopped_worker_shows_the_readable_curve_error() {
+        let page = RecordedPage::showing([0; EQ_VISIBLE_BANDS]);
+        let writer = RecordedWriter::default();
+        writer.connected.set(false);
+
+        let wrote = answer_band_action(
+            &page,
+            &writer,
+            BandAction::Commit {
+                index: 0,
+                value: 30,
+            },
+        );
+
+        assert!(!wrote);
+        assert_eq!(
+            page.errors.borrow()[0],
+            EqFailure::Disconnected.bands_label(),
+            "the banner names the bands and why nothing was written"
+        );
+    }
+
+    #[test]
+    fn a_failed_curve_change_maps_to_a_readable_label() {
+        let cases = [
+            (SessionError::Timeout, EqFailure::TimedOut),
+            (
+                SessionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "connection reset by peer",
+                )),
+                EqFailure::Disconnected,
+            ),
+            (
+                SessionError::Protocol(soundcore_session::ProtocolError::State(
+                    soundcore_models::StateError::NotAStateFrame,
+                )),
+                EqFailure::Unreadable,
+            ),
+            (SessionError::UnsupportedEqualizer, EqFailure::Unreadable),
+        ];
+        for (error, expected) in cases {
+            let failure = EqFailure::from_session(error);
+            assert_eq!(failure, expected);
+            let label = readable(failure.bands_label());
+            assert!(
+                label.contains("equalizer bands"),
+                "{label:?} names the bands"
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_curve_change_shows_the_reported_state_or_the_error() {
+        let custom = custom_equalizer_state();
+        let page = RecordedPage::showing([0; EQ_VISIBLE_BANDS]);
+        let stopped = Cell::new(0);
+        let stop = || stopped.set(stopped.get() + 1);
+
+        apply_curve_outcome(&page, &stop, Ok(custom));
+
+        assert_eq!(page.reported.borrow().len(), 1);
+        assert_eq!(page.reported.borrow()[0], custom);
+        assert_eq!(
+            *page.shown.borrow(),
+            custom.visible_bands(),
+            "the page follows the re-polled device state"
+        );
+        assert_eq!(stopped.get(), 0);
+        assert_eq!(
+            page.errors.borrow().last().map(String::as_str),
+            Some(""),
+            "a success clears the banner"
+        );
+
+        apply_curve_outcome(&page, &stop, Err(EqFailure::TimedOut));
+        assert_eq!(stopped.get(), 1, "a failed change stops the worker");
+        assert_eq!(
+            page.errors.borrow().last().map(String::as_str),
+            Some("Equalizer bands (no answer)")
+        );
+    }
+
+    #[test]
+    fn the_real_a3062_capture_shows_its_preset_and_eight_editable_bands() {
         let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
         let equalizer = captured_a3062_equalizer();
         let display = EqualizerDisplay::new(Some(model), Some(&equalizer));
 
         assert!(display.available);
+        assert!(display.editable, "the A3062 page writes custom band values");
         // The committed capture was taken on Soundcore Signature.
         assert_eq!(display.preset, "0");
         assert_eq!(display.name, "Soundcore Signature");
@@ -2667,29 +3417,28 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_preset_is_read_only_with_no_selected_chip() {
+    fn a_custom_state_shows_the_custom_preset_id_and_no_built_in_name() {
         let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
-        let mut frame = captured_a3062_frame();
-        // Report custom bands: the state's preset id becomes 0xFEFE and the
-        // frame checksum is recomputed.
-        frame[9 + 23] = 0xFE;
-        frame[9 + 24] = 0xFE;
-        let last = frame.len() - 1;
-        frame[last] = frame[..last]
-            .iter()
-            .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
-        let state =
-            soundcore_models::parse_state_frame(model, &frame).expect("the custom state parses");
-        let equalizer = state.equalizer.expect("the state reports an equalizer");
+        let equalizer = custom_equalizer_state();
         assert!(equalizer.is_custom());
 
         let display = EqualizerDisplay::new(Some(model), Some(&equalizer));
         assert!(display.available);
-        assert_eq!(display.preset, "65278", "the custom id string");
-        assert_eq!(display.name, "", "custom bands have no built-in name");
+        assert!(
+            display.editable,
+            "custom bands stay editable after a re-poll"
+        );
         assert_eq!(
-            display.band_count, 8,
-            "the read-only curve still follows the device"
+            display.preset,
+            soundcore_models::CUSTOM_EQUALIZER_PRESET_ID.to_string(),
+            "the custom id string"
+        );
+        assert_eq!(display.name, "", "custom bands have no built-in name");
+        let values: Vec<i32> = display.bands.iter().map(|band| band.value).collect();
+        assert_eq!(
+            values,
+            [30, -30, 60, 0, -60, 20, 0, -20],
+            "the re-polled curve is the one the device reports"
         );
         // No chip is selected: the custom id is not one of the catalog values.
         assert!(
@@ -2697,6 +3446,10 @@ mod tests {
                 .presets
                 .iter()
                 .any(|preset| preset.value.as_str() == display.preset)
+        );
+        assert_eq!(
+            display.preset_count, 22,
+            "the preset chips stay available after custom bands"
         );
     }
 
@@ -2709,12 +3462,16 @@ mod tests {
             sound_pages(a3062_state.sound_mode, a3062_state.equalizer.is_some()),
             vec![Page::SoundModes, Page::Equalizer]
         );
+        assert!(
+            EqualizerDisplay::new(Some(a3062), a3062_state.equalizer.as_ref()).editable,
+            "the A3062 page is editable"
+        );
 
         // The A3949's equalizer is deliberately deferred in this slice: the
         // real capture's block (body 32..44) is known, but no A3949 `03 87`
         // write body is verified, so the model has no capability, catalog or
-        // page and no chip value is selectable. This is a limitation, not a
-        // claim that the model has no equalizer.
+        // page, no editable controls and no chip value is selectable. This is a
+        // limitation, not a claim that the model has no equalizer.
         let a3949 = soundcore_models::model_by_code("A3949").expect("A3949 is a state model");
         let a3949_state = soundcore_models::parse_state_frame(a3949, &captured_a3949_frame())
             .expect("the A3949 capture parses");
@@ -2731,6 +3488,10 @@ mod tests {
         );
         let display = EqualizerDisplay::new(Some(a3949), a3949_state.equalizer.as_ref());
         assert!(!display.available);
+        assert!(
+            !display.editable,
+            "the deferred A3949 page has no band controls"
+        );
         assert_eq!(display.preset_count, 0);
         assert!(display.presets.is_empty());
         assert!(display.bands.is_empty());
@@ -2793,15 +3554,15 @@ mod tests {
 
     #[test]
     fn a_failed_preset_change_surfaces_although_a_newer_click_was_queued() {
-        let failure = Err(EqFailure::TimedOut);
+        let failure: Result<EqualizerState, EqFailure> = Err(EqFailure::TimedOut);
         assert!(
-            preset_result_applies(&failure, 4, 1, 4, 2),
+            equalizer_change_applies(&failure, 4, 1, 4, 2),
             "a failure of the current attempt always surfaces"
         );
         let success = Ok(captured_a3062_equalizer());
-        assert!(!preset_result_applies(&success, 4, 1, 4, 2));
-        assert!(preset_result_applies(&success, 4, 2, 4, 2));
-        assert!(!preset_result_applies(&failure, 3, 1, 4, 1));
+        assert!(!equalizer_change_applies(&success, 4, 1, 4, 2));
+        assert!(equalizer_change_applies(&success, 4, 2, 4, 2));
+        assert!(!equalizer_change_applies(&failure, 3, 1, 4, 1));
     }
 
     /// A scripted transport: writes are recorded and reads come from a queue.
@@ -2978,13 +3739,13 @@ mod tests {
         let (events, received) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
         commands
-            .send(DeviceCommand::SetSoundMode {
+            .send(DeviceCommand::ChangeSoundMode {
                 request: 1,
                 mode: SoundMode::Transparency,
             })
             .expect("the first click is queued");
         commands
-            .send(DeviceCommand::SetSoundMode {
+            .send(DeviceCommand::ChangeSoundMode {
                 request: 2,
                 mode: SoundMode::Normal,
             })
@@ -3115,6 +3876,205 @@ mod tests {
     }
 
     #[test]
+    fn a_custom_curve_write_writes_the_measured_frame_and_re_reads_it() {
+        let current = signature_equalizer();
+        let curve = [30, -30, 60, 0, -60, 20, 0, -20];
+        // The captured frame is exactly what the core body builder produces
+        // from the state found on connect: the fixture is a real accepted frame.
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        assert_eq!(
+            captured_custom_eq_write_frame(),
+            equalizer_frame(
+                &model
+                    .custom_equalizer_body(&current, curve)
+                    .expect("the A3062 custom body")
+            ),
+            "the captured write frame is the body of the captured state"
+        );
+
+        let transport = FakeTransport::scripted([captured_custom_eq_frame()]);
+        let mut session = session_with("A3062", &transport);
+
+        let reported =
+            change_custom_equalizer(&mut session, &current, curve).expect("the write is accepted");
+
+        assert!(reported.is_custom());
+        assert_eq!(
+            reported.preset_id,
+            soundcore_models::CUSTOM_EQUALIZER_PRESET_ID
+        );
+        assert_eq!(reported.visible_bands(), curve);
+        assert_eq!(
+            transport.writes(),
+            vec![captured_custom_eq_write_frame(), state_request()],
+            "one measured custom 03 87 frame, then the 01 01 re-poll"
+        );
+    }
+
+    #[test]
+    fn a_silent_device_after_the_custom_curve_write_is_a_timeout() {
+        let current = signature_equalizer();
+        let transport = FakeTransport::failing(std::io::ErrorKind::TimedOut);
+        let mut session = session_with("A3062", &transport);
+
+        let failure = change_custom_equalizer(&mut session, &current, [0; EQ_VISIBLE_BANDS])
+            .expect_err("the device stays silent");
+
+        assert_eq!(failure, EqFailure::TimedOut);
+        assert_eq!(failure.bands_label(), "Equalizer bands (no answer)");
+        let writes = transport.writes();
+        assert_eq!(writes.len(), 2, "the custom frame and the 01 01 re-poll");
+        assert_eq!(&writes[0][..9], &hex("08 EE 00 00 00 03 87 3F 00")[..]);
+        assert_eq!(&writes[0][9..11], &[0xFE, 0xFE], "the custom preset id");
+        assert_eq!(writes[0].len(), 63, "the measured 53-byte body");
+        assert_eq!(writes[1], state_request());
+    }
+
+    #[test]
+    fn a_reset_writes_a_flat_custom_curve_and_re_reads_it() {
+        let current = bass_reducer_equalizer();
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        let expected_body = model
+            .custom_equalizer_body(&current, [0; EQ_VISIBLE_BANDS])
+            .expect("the A3062 custom body");
+        // The measured flat custom body: custom preset id, the eight 0 dB bands
+        // and the two fixed bands, written in both band regions.
+        assert_eq!(&expected_body[..2], &[0xFE, 0xFE]);
+        assert_eq!(
+            &expected_body[4..14],
+            &[0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x00],
+            "eight 0 dB bands, then 0 dB and -12.0 dB"
+        );
+        assert_eq!(&expected_body[42..52], &expected_body[4..14]);
+
+        let reset_answer =
+            custom_state_frame(&captured_eq_frame("Bass Reducer"), [0; EQ_VISIBLE_BANDS]);
+        let transport = FakeTransport::scripted([reset_answer]);
+        let mut session = session_with("A3062", &transport);
+
+        let reported = change_custom_equalizer(&mut session, &current, [0; EQ_VISIBLE_BANDS])
+            .expect("the reset is accepted");
+
+        assert!(reported.is_custom());
+        assert_eq!(reported.visible_bands(), [0; EQ_VISIBLE_BANDS]);
+        assert_eq!(
+            transport.writes(),
+            vec![equalizer_frame(&expected_body), state_request()],
+            "one flat custom 03 87 frame, then the 01 01 re-poll"
+        );
+    }
+
+    #[test]
+    fn the_worker_writes_one_custom_frame_and_reports_the_custom_state() {
+        let transport = FakeTransport::scripted([
+            captured_before_custom_eq_frame(),
+            captured_custom_eq_frame(),
+        ]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::WriteCustomCurve {
+                request: 1,
+                bands: [30, -30, 60, 0, -60, 20, 0, -20],
+            })
+            .expect("the curve change is queued");
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                captured_custom_eq_write_frame(),
+                state_request(),
+            ],
+            "one custom 03 87 frame, then the 01 01 re-poll"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected {
+                attempt: 9,
+                outcome: ConnectOutcome::Connected(..)
+            }
+        ));
+        assert!(matches!(
+            received.try_recv().expect("the curve change"),
+            Event::CurveChanged {
+                attempt: 9,
+                request: 1,
+                outcome: Ok(reported)
+            } if reported.is_custom()
+                && reported.visible_bands() == [30, -30, 60, 0, -60, 20, 0, -20]
+        ));
+    }
+
+    #[test]
+    fn the_worker_switches_back_to_a_built_in_preset_after_a_custom_curve() {
+        // The worker keeps the re-polled custom state, so the preset frame is
+        // built from the custom state's HearID block — which the custom write
+        // preserved — and is the same measured frame as from the Signature
+        // state.
+        let transport = FakeTransport::scripted([
+            captured_before_custom_eq_frame(),
+            captured_custom_eq_frame(),
+            captured_eq_frame("Bass Reducer"),
+        ]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::WriteCustomCurve {
+                request: 1,
+                bands: [30, -30, 60, 0, -60, 20, 0, -20],
+            })
+            .expect("the curve change is queued");
+        commands
+            .send(DeviceCommand::ChangeEqualizerPreset {
+                request: 1,
+                preset_id: 3,
+            })
+            .expect("the preset change is queued behind it");
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                captured_custom_eq_write_frame(),
+                state_request(),
+                bass_reducer_frame(),
+                state_request(),
+            ],
+            "the custom curve, then the measured preset frame, each re-polled"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected { .. }
+        ));
+        assert!(matches!(
+            received.try_recv().expect("the curve change"),
+            Event::CurveChanged {
+                request: 1,
+                outcome: Ok(reported),
+                ..
+            } if reported.is_custom()
+        ));
+        assert!(matches!(
+            received.try_recv().expect("the preset change"),
+            Event::PresetChanged {
+                request: 1,
+                outcome: Ok(reported),
+                ..
+            } if reported.preset_id == 3
+                && reported.visible_bands() == [-40, -30, -10, 0, 0, 0, 0, 0]
+        ));
+    }
+
+    #[test]
     fn the_worker_serves_equalizer_presets_alongside_sound_modes() {
         let mut mode_answer = mode_ack();
         mode_answer.extend_from_slice(&captured_mode_frame("Transparency"));
@@ -3127,13 +4087,13 @@ mod tests {
         let (events, received) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
         commands
-            .send(DeviceCommand::SetSoundMode {
+            .send(DeviceCommand::ChangeSoundMode {
                 request: 1,
                 mode: SoundMode::Transparency,
             })
             .expect("the mode click is queued");
         commands
-            .send(DeviceCommand::SetEqualizerPreset {
+            .send(DeviceCommand::ChangeEqualizerPreset {
                 request: 1,
                 preset_id: 3,
             })
@@ -3187,7 +4147,7 @@ mod tests {
         // Id 2 is not in the A3062 catalog; the UI never offers it, and the
         // worker refuses to invent a body for it.
         commands
-            .send(DeviceCommand::SetEqualizerPreset {
+            .send(DeviceCommand::ChangeEqualizerPreset {
                 request: 1,
                 preset_id: 2,
             })
@@ -3224,13 +4184,13 @@ mod tests {
         let (events, received) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
         commands
-            .send(DeviceCommand::SetEqualizerPreset {
+            .send(DeviceCommand::ChangeEqualizerPreset {
                 request: 1,
                 preset_id: 1,
             })
             .expect("the first click is queued");
         commands
-            .send(DeviceCommand::SetEqualizerPreset {
+            .send(DeviceCommand::ChangeEqualizerPreset {
                 request: 2,
                 preset_id: 3,
             })
@@ -3438,6 +4398,7 @@ mod tests {
             commands: RefCell::new(None),
             mode_change: Cell::new(0),
             preset_change: Cell::new(0),
+            curve_change: Cell::new(0),
         })
     }
 
@@ -3681,6 +4642,59 @@ mod tests {
         ui.global::<Actions>().invoke_eq_preset(value.into());
     }
 
+    /// Drags a band through the wired `Actions.eq-preview` callback, as the
+    /// vendored chart and sliders do while the pointer moves.
+    fn preview_band(ui: &AppWindow, index: i32, value: i32) {
+        ui.global::<Actions>().invoke_eq_preview(index, value);
+    }
+
+    /// Lets a band go through the wired `Actions.eq-commit` callback, as the
+    /// vendored chart and sliders do on release.
+    fn commit_band(ui: &AppWindow, index: i32, value: i32) {
+        ui.global::<Actions>().invoke_eq_commit(index, value);
+    }
+
+    /// Types a band value and presses Enter through the wired `Actions.eq-type`
+    /// callback.
+    fn type_band(ui: &AppWindow, index: i32, text: &str) {
+        ui.global::<Actions>().invoke_eq_type(index, text.into());
+    }
+
+    /// Pumps the worker channel until the page shows `want` as the custom curve
+    /// (`0xFEFE`) and its eight band values, or the error banner appears.
+    fn wait_for_custom_curve(
+        ui: &AppWindow,
+        inner: &Rc<Inner>,
+        want: [i16; EQ_VISIBLE_BANDS],
+    ) -> Option<Vec<i32>> {
+        let state = ui.global::<AppState>();
+        let expected: Vec<i32> = want.iter().map(|value| i32::from(*value)).collect();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            drain_events(inner);
+            if !state.get_error_label().is_empty() {
+                println!("  error banner: {}", state.get_error_label());
+                return None;
+            }
+            let bands: Vec<EqBand> = state.get_eq_bands().iter().collect();
+            let values: Vec<i32> = bands.iter().map(|band| band.value).collect();
+            if state.get_eq_preset().as_str()
+                == soundcore_models::CUSTOM_EQUALIZER_PRESET_ID.to_string()
+                && values == expected
+            {
+                return Some(values);
+            }
+            if std::time::Instant::now() >= deadline {
+                println!(
+                    "  timed out waiting for the custom curve {expected:?}; current {:?} {values:?}",
+                    state.get_eq_preset()
+                );
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Pumps the worker channel until the page shows `want` as the current
     /// preset id. `None` when the error banner appeared first or the timeout
     /// expired.
@@ -3714,13 +4728,13 @@ mod tests {
     /// ```
     ///
     /// Connects the suggested A3062, asserts the vendored page state (22 preset
-    /// chips, the current preset selected, eight read-only bands with their
-    /// frequencies and values, the -12.0…+13.4 dB range, read-only), then clicks
-    /// three different presets through the `eq-preset` action and checks that
-    /// the selection and the bands follow the `01 01` re-poll after each one.
-    /// The preset found on connect is restored, a stopped worker checks the
-    /// readable error banner and its Retry, and the device is left as found.
-    /// Addresses are masked.
+    /// chips, the current preset selected, eight editable bands with their
+    /// frequencies and values, the -12.0…+13.4 dB range), then clicks three
+    /// different presets through the `eq-preset` action and checks that the
+    /// selection and the bands follow the `01 01` re-poll after each one. The
+    /// preset found on connect is restored, a stopped worker checks the readable
+    /// error banner and its Retry, and the device is left as found. Addresses
+    /// are masked.
     #[test]
     #[ignore = "manual hardware check: needs a paired A3062"]
     fn manual_equalizer_preset_switch() {
@@ -3768,7 +4782,10 @@ mod tests {
         );
         assert_eq!(pages, vec![Page::SoundModes, Page::Equalizer]);
         assert!(state.get_eq_available(), "the page is available");
-        assert!(state.get_eq_read_only(), "the page is read-only");
+        assert!(
+            !state.get_eq_read_only(),
+            "the A3062 band controls are editable"
+        );
         assert_eq!(values.len(), 22, "the catalog is the 22-entry list");
         assert_eq!(labels.len(), 22);
         assert_eq!(bands.len(), 8, "eight visible bands");
@@ -3884,6 +4901,218 @@ mod tests {
             state.get_eq_preset().as_str(),
             initial,
             "the device kept the restored preset"
+        );
+        disconnect(&ui, &inner);
+    }
+
+    /// Manual hardware check of the editable equalizer bands on the real Space
+    /// One Pro:
+    ///
+    /// ```text
+    /// cargo test -p soundcore-desktop manual_equalizer_custom_curve -- --ignored --nocapture
+    /// ```
+    ///
+    /// Connects the suggested A3062, asserts the band controls are editable,
+    /// types one band and drags another, commits both and checks the re-polled
+    /// custom state (`0xFEFE`, empty name) reports the written curve, resets to
+    /// flat, switches to a built-in preset and restores the state found on
+    /// connect. A stopped worker checks the readable error banner and its Retry.
+    /// Addresses are masked.
+    #[test]
+    #[ignore = "manual hardware check: needs a paired A3062"]
+    fn manual_equalizer_custom_curve() {
+        let ui = AppWindow::new().expect("the shell window builds");
+        let inner = test_inner(&ui);
+        wire_actions(&ui, &inner);
+        if connect_real_device(&ui, &inner, "A3062").is_none() {
+            return;
+        }
+        let state = ui.global::<AppState>();
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 has a parser");
+
+        // Record the state found on connect so the device can be left as found.
+        let initial_preset = state.get_eq_preset().to_string();
+        let initial_name = state.get_eq_name().to_string();
+        let initial_bands: Vec<i16> = state
+            .get_eq_bands()
+            .iter()
+            .map(|band| clamp_band_value(band.value))
+            .collect();
+        let initial_values: Vec<i32> = initial_bands
+            .iter()
+            .map(|value| i32::from(*value))
+            .collect();
+        println!(
+            "  eq-available: {} eq-read-only: {} bands: {} presets: {}",
+            state.get_eq_available(),
+            state.get_eq_read_only(),
+            state.get_eq_bands().row_count(),
+            state.get_eq_presets().row_count()
+        );
+        println!(
+            "  found: preset {:?} name {:?} bands {initial_values:?}",
+            initial_preset, initial_name
+        );
+        assert!(state.get_eq_available(), "the Equalizer page is available");
+        assert!(
+            !state.get_eq_read_only(),
+            "the A3062 band controls are editable"
+        );
+        assert_eq!(state.get_eq_bands().row_count(), 8, "eight visible bands");
+        assert_eq!(
+            state.get_eq_presets().row_count(),
+            22,
+            "the preset chips stay"
+        );
+        assert_eq!(state.get_eq_band_count(), 8);
+        assert_eq!(state.get_eq_min(), i32::from(EQ_MIN));
+        assert_eq!(state.get_eq_max(), i32::from(EQ_MAX));
+        assert!(
+            !state.get_eq_chart_line().is_empty(),
+            "the chart has a curve"
+        );
+        assert_eq!(
+            initial_bands.len(),
+            EQ_VISIBLE_BANDS,
+            "the page shows every visible band"
+        );
+
+        // Open the page the way the sidebar does.
+        state.set_page(Page::Equalizer);
+        assert_eq!(state.get_page(), Page::Equalizer);
+
+        // A typed value commits through the same path as a dragged one: the
+        // first band goes to +4.0 dB and the re-poll reports a custom curve.
+        type_band(&ui, 0, "4.0");
+        let mut typed: [i16; EQ_VISIBLE_BANDS] =
+            initial_bands.clone().try_into().expect("eight bands");
+        typed[0] = 40;
+        let reported =
+            wait_for_custom_curve(&ui, &inner, typed).expect("the typed band is re-polled");
+        println!("  eq-type band 0 4.0 -> re-polled custom curve {reported:?}");
+        assert_eq!(
+            state.get_eq_name().as_str(),
+            "",
+            "custom bands have no built-in name"
+        );
+        assert_eq!(
+            state.get_eq_preset().as_str(),
+            soundcore_models::CUSTOM_EQUALIZER_PRESET_ID.to_string(),
+            "the device reports the custom preset id"
+        );
+
+        // A drag previews locally only; the release commits the whole curve, so
+        // the second band goes to -4.0 dB while the first keeps its value.
+        let chart_before_preview = state.get_eq_chart_line().to_string();
+        preview_band(&ui, 3, -40);
+        let mut dragged = typed;
+        dragged[3] = -40;
+        let dragged_values: Vec<i32> = dragged.iter().map(|value| i32::from(*value)).collect();
+        let previewed: Vec<i32> = state.get_eq_bands().iter().map(|band| band.value).collect();
+        println!("  eq-preview band 3 -4.0 -> page curve {previewed:?}");
+        assert_eq!(
+            previewed, dragged_values,
+            "the page follows the drag at once"
+        );
+        assert_ne!(
+            state.get_eq_chart_line().as_str(),
+            chart_before_preview.as_str(),
+            "the chart follows the drag"
+        );
+        commit_band(&ui, 3, -40);
+        let reported =
+            wait_for_custom_curve(&ui, &inner, dragged).expect("the dragged band is re-polled");
+        println!(
+            "  eq-commit band 3 -4.0 -> re-polled custom curve {reported:?} preset {:?}",
+            state.get_eq_preset()
+        );
+
+        // Reset writes the flat custom curve.
+        ui.global::<Actions>().invoke_eq_reset();
+        let reset = wait_for_custom_curve(&ui, &inner, [0; EQ_VISIBLE_BANDS])
+            .expect("the flat curve is re-polled");
+        println!("  eq-reset -> re-polled flat custom curve {reset:?}");
+
+        // A built-in preset still works after a custom curve and switches the
+        // device back.
+        let target = model
+            .equalizer_presets()
+            .iter()
+            .find(|preset| preset.id.to_string() != initial_preset)
+            .expect("a preset other than the current one");
+        click_preset(&ui, &target.id.to_string());
+        wait_for_preset(&ui, &inner, &target.id.to_string())
+            .unwrap_or_else(|| panic!("switching to {} fails", target.name));
+        let target_values: Vec<i32> = state.get_eq_bands().iter().map(|band| band.value).collect();
+        println!(
+            "  preset {} ({}) after custom -> bands {target_values:?} name {:?}",
+            target.id,
+            target.name,
+            state.get_eq_name()
+        );
+        assert_eq!(state.get_eq_name().as_str(), target.name);
+        assert_eq!(
+            target_values,
+            target
+                .bands
+                .iter()
+                .take(EQ_VISIBLE_BANDS)
+                .map(|value| i32::from(*value))
+                .collect::<Vec<_>>()
+        );
+
+        // Put back what was found on connect: a built-in preset by clicking its
+        // chip, or the eight custom bands through the same band path.
+        let initial_is_built_in = initial_preset.parse::<u16>().ok().is_some_and(|id| {
+            model
+                .equalizer_presets()
+                .iter()
+                .any(|preset| preset.id == id)
+        });
+        if initial_is_built_in {
+            click_preset(&ui, &initial_preset);
+            wait_for_preset(&ui, &inner, &initial_preset)
+                .expect("the preset found on connect is restored");
+            let restored: Vec<i32> = state.get_eq_bands().iter().map(|band| band.value).collect();
+            println!("  restored preset {:?} bands {restored:?}", initial_preset);
+            assert_eq!(state.get_eq_name().as_str(), initial_name);
+            assert_eq!(restored, initial_values);
+        } else {
+            for (index, value) in initial_bands.iter().enumerate() {
+                preview_band(&ui, index as i32, i32::from(*value));
+            }
+            commit_band(&ui, 0, i32::from(initial_bands[0]));
+            let restored: [i16; EQ_VISIBLE_BANDS] =
+                initial_bands.clone().try_into().expect("eight bands");
+            let reported = wait_for_custom_curve(&ui, &inner, restored)
+                .expect("the custom curve found on connect is restored");
+            println!("  restored custom curve {reported:?}");
+        }
+
+        // A stopped worker shows the readable error banner instead of writing;
+        // the banner's Retry reconnects and reads the restored state back.
+        inner.stop_worker();
+        commit_band(&ui, 0, 0);
+        let error = state.get_error_label().to_string();
+        println!("  after a stopped worker: error-label {error:?}");
+        assert!(
+            error.contains("Equalizer bands"),
+            "{error:?} names the bands"
+        );
+        // Give the stopped worker time to drop its socket: a real Retry click
+        // comes much later than this line.
+        std::thread::sleep(Duration::from_millis(1000));
+        ui.global::<Actions>().invoke_retry();
+        assert!(
+            wait_for_connection(&inner, &ui, Connection::Connected, Duration::from_secs(20)),
+            "the banner's Retry reconnects"
+        );
+        assert_eq!(state.get_sound_pages().row_count(), 2, "the pages are back");
+        assert_eq!(state.get_error_label().as_str(), "", "the banner is gone");
+        assert_eq!(
+            state.get_eq_preset().as_str(),
+            initial_preset,
+            "the device kept the restored state"
         );
         disconnect(&ui, &inner);
     }
