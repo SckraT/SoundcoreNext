@@ -11,6 +11,9 @@
 //! UI thread.
 
 use std::cell::{Cell, RefCell};
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +24,7 @@ use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use soundcore_models::{
     DeviceModel, DeviceState, EqualizerPreset, EqualizerState, SoundMode, VISIBLE_EQ_BANDS,
 };
+use soundcore_profiles::{EqualizerProfile, ProfileSet};
 use soundcore_session::{DeviceSession, SessionError, Transport};
 use windows::core::GUID;
 
@@ -30,8 +34,8 @@ use crate::transport_windows::{
     list_paired_devices, parse_mac, pick_service, vendor_service,
 };
 use crate::{
-    Actions, AppState, AppWindow, Battery, Connection, DeviceCard, EqBand, EqLine, FailureKind,
-    ModeOption, Page, PairedOption,
+    Actions, AppState, AppWindow, Battery, Connection, DeviceCard, EqBand, EqLine, EqProfile,
+    FailureKind, ModeOption, Page, PairedOption,
 };
 
 /// The model chosen in the Add Device dialog: what the catalog card shows plus
@@ -196,6 +200,131 @@ pub const EQ_MAX: i16 = soundcore_models::EQ_BAND_MAX;
 /// A3062 equalizer settings and the Soundcore app's equalizer chart label them.
 pub const EQ_BAND_HZ: [u16; VISIBLE_EQ_BANDS] = [100, 200, 400, 800, 1600, 3200, 6400, 12800];
 
+/// The app's directory under `%APPDATA%`, where it keeps its own files.
+pub const APP_DATA_DIR_NAME: &str = "OpenSCL4";
+
+/// The saved equalizer profiles document inside [`APP_DATA_DIR_NAME`].
+pub const PROFILES_FILE_NAME: &str = "equalizer-profiles.json";
+
+/// The saved-profile document's path inside an app-data directory:
+/// `<app-data>\OpenSCL4\equalizer-profiles.json`.
+pub fn app_data_profiles_path(app_data: &Path) -> PathBuf {
+    app_data.join(APP_DATA_DIR_NAME).join(PROFILES_FILE_NAME)
+}
+
+/// The saved-profile document's path from the Windows `%APPDATA%` variable, or
+/// `None` when the variable is missing (the profiles then stay in memory only).
+///
+/// The standard library environment is deliberately used instead of a
+/// directory-lookup crate: the app targets Windows, where `%APPDATA%` is the
+/// roaming app-data directory the spec names.
+pub fn default_profiles_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|app_data| app_data_profiles_path(Path::new(&app_data)))
+}
+
+/// The temporary sibling file an atomic save writes before renaming it over the
+/// document: `<document>.tmp`.
+fn temporary_profile_path(path: &Path) -> PathBuf {
+    let mut temp = path.as_os_str().to_os_string();
+    temp.push(".tmp");
+    PathBuf::from(temp)
+}
+
+/// Logs one saved-profile file message to stderr. The app has no log view, and
+/// the spec asks the file problems to be reported without disturbing the page.
+fn log_profiles(message: &str, path: &Path) {
+    eprintln!("OpenSCL4: {message}: {}", path.display());
+}
+
+/// Logs that the shell has no app-data directory, so the saved profiles stay in
+/// memory only and are lost when the app closes. The startup load and a save use
+/// this one wording.
+fn log_no_app_data_directory() {
+    eprintln!("OpenSCL4: no app-data directory; saved equalizer profiles will not persist");
+}
+
+/// Loads the saved profile set from `path`.
+///
+/// A missing document is a normal first run and loads the empty set. Any other
+/// read or parse failure is logged to stderr and also loads the empty set, so a
+/// malformed document never crashes the app or blocks it from starting; the file
+/// itself is left untouched until the next save replaces it.
+pub fn load_profiles(path: &Path) -> ProfileSet {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            log_profiles("no saved equalizer profiles yet", path);
+            return ProfileSet::new();
+        }
+        Err(error) => {
+            log_profiles(
+                &format!("could not read the saved equalizer profiles ({error})"),
+                path,
+            );
+            return ProfileSet::new();
+        }
+    };
+    match ProfileSet::from_json(&text) {
+        Ok(set) => set,
+        Err(error) => {
+            log_profiles(
+                &format!("ignoring an unreadable saved equalizer profiles file ({error})"),
+                path,
+            );
+            ProfileSet::new()
+        }
+    }
+}
+
+/// Writes `set` to `path` atomically: the JSON goes to a temporary sibling file,
+/// is flushed to disk, and is then renamed over the document. A crash or a full
+/// disk therefore never leaves a half-written profile document behind.
+pub fn save_profiles(path: &Path, set: &ProfileSet) -> io::Result<()> {
+    if let Some(directory) = path.parent() {
+        fs::create_dir_all(directory)?;
+    }
+    let temp = temporary_profile_path(path);
+    let written = (|| {
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(set.to_json().as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        // A rename inside one directory is atomic on Windows and replaces the
+        // previous document as a whole.
+        fs::rename(&temp, path)
+    })();
+    if written.is_err() {
+        // Best effort: a failed save must not leave its temporary file behind.
+        let _ = fs::remove_file(&temp);
+    }
+    written
+}
+
+/// The chart's line through eight raw dB×10 values, in the 600×100 path box the
+/// vendored `ProfileCurve` draws a saved profile's curve in.
+pub fn profile_curve(bands: &[i16]) -> String {
+    smooth_path(&curve_points(bands, EQ_MIN, EQ_MAX, PROFILE_CURVE_HEIGHT))
+}
+
+/// The `AppState.eq-profiles` rows of the saved set against the bands the page
+/// currently shows: each row carries the profile's curve, its eight-band count,
+/// and whether it is applied (its bands are exactly the visible bands).
+///
+/// Export stays false: import/export is out of scope for this slice and its
+/// checkboxes never activate.
+pub fn profile_rows(profiles: &ProfileSet, current_bands: &[i16]) -> Vec<EqProfile> {
+    profiles
+        .iter()
+        .map(|profile| EqProfile {
+            name: profile.name.clone().into(),
+            curve: profile_curve(&profile.bands).into(),
+            bands: i32::try_from(VISIBLE_EQ_BANDS).unwrap_or(0),
+            in_effect: profile.bands.as_slice() == current_bands,
+            export: false,
+        })
+        .collect()
+}
+
 /// The `AppState.eq-presets` chips of a model: one per built-in preset, in the
 /// catalog's display order. The chip value is the decimal preset id the state
 /// reports, so a click names exactly one catalog entry (the page compares the
@@ -351,18 +480,19 @@ pub fn equalizer_lines() -> Vec<EqLine> {
 /// stretches it to its own size.
 const CHART_WIDTH: f32 = 600.0;
 const CHART_HEIGHT: f32 = 200.0;
+/// The saved-profile thumbnail's path box height; its width is [`CHART_WIDTH`].
+/// The vendored `ProfileCurve` draws its commands in a 600×100 viewbox.
+const PROFILE_CURVE_HEIGHT: f32 = 100.0;
 /// The part of the chart's height kept above the highest and below the lowest
 /// value, so the points are not cut off. `EqualizerChart` uses the same margin.
 const CHART_MARGIN: f32 = 0.06;
 
-/// The curve through `values` and the area under it, as path commands for the
-/// vendored chart. Empty when there is nothing to draw.
-pub fn equalizer_chart(values: &[i16], min: i16, max: i16) -> (String, String) {
-    if values.is_empty() || max <= min {
-        return (String::new(), String::new());
-    }
+/// The chart's points for `values` in raw dB×10: `x` spreads the bands evenly
+/// across [`CHART_WIDTH`], `y` maps each value into the `height` box keeping
+/// [`CHART_MARGIN`] free at both ends.
+fn curve_points(values: &[i16], min: i16, max: i16, height: f32) -> Vec<(f32, f32)> {
     let count = values.len() as f32;
-    let points: Vec<(f32, f32)> = values
+    values
         .iter()
         .copied()
         .enumerate()
@@ -371,9 +501,18 @@ pub fn equalizer_chart(values: &[i16], min: i16, max: i16) -> (String, String) {
             let span = f32::from((max - min).max(1));
             let fraction = f32::from(value.clamp(min, max) - min) / span;
             let y = CHART_MARGIN + (1.0 - fraction) * (1.0 - 2.0 * CHART_MARGIN);
-            (x * CHART_WIDTH, y * CHART_HEIGHT)
+            (x * CHART_WIDTH, y * height)
         })
-        .collect();
+        .collect()
+}
+
+/// The curve through `values` and the area under it, as path commands for the
+/// vendored chart. Empty when there is nothing to draw.
+pub fn equalizer_chart(values: &[i16], min: i16, max: i16) -> (String, String) {
+    if values.is_empty() || max <= min {
+        return (String::new(), String::new());
+    }
+    let points = curve_points(values, min, max, CHART_HEIGHT);
     let line = smooth_path(&points);
     let first = points[0].0;
     let last = points[points.len() - 1].0;
@@ -449,9 +588,10 @@ fn slopes(points: &[(f32, f32)]) -> Vec<f32> {
 pub struct EqualizerDisplay {
     /// Whether the device reported an equalizer this slice can show.
     pub available: bool,
-    /// Whether the page's band controls are enabled. Only a model whose custom
+    /// Whether the page's band controls are enabled, and with them the
+    /// saved-profile panel and its Save button. Only a model whose custom
     /// equalizer body this slice can write (the A3062) is editable: every other
-    /// model with an equalizer would get a read-only page.
+    /// model with an equalizer would get a read-only page without saved profiles.
     pub editable: bool,
     /// The preset chips, their count, and the id string of the current preset
     /// (`""` when the device reports custom bands).
@@ -593,6 +733,32 @@ impl BandWriter for Inner {
     }
 }
 
+/// What an `Actions.eq-apply(name)` click did with a saved profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplyOutcome {
+    /// The click names no saved profile; nothing was queued.
+    Unknown,
+    /// The profile's curve was queued on the device worker.
+    Queued,
+    /// The profile exists but the worker is gone (a failed or stopped
+    /// connection), so nothing was written.
+    Disconnected,
+}
+
+/// Queues a saved profile's bands through the same custom-curve command a band
+/// commit uses: the worker writes exactly one `03 87` frame built from its last
+/// re-polled state, then re-polls `01 01`.
+fn apply_saved_profile(set: &ProfileSet, name: &str, writer: &impl BandWriter) -> ApplyOutcome {
+    let Some(profile) = set.get(name) else {
+        return ApplyOutcome::Unknown;
+    };
+    if writer.write_curve(profile.bands) {
+        ApplyOutcome::Queued
+    } else {
+        ApplyOutcome::Disconnected
+    }
+}
+
 /// The eight band values after `index` is set to `value`, clamped to the
 /// device's range; `None` when the page does not show that band.
 fn edited_band_values(shown: &[i16], index: i32, value: i32) -> Option<Vec<i16>> {
@@ -673,7 +839,9 @@ fn band_edit_allowed(state: &AppState<'_>) -> bool {
         && !state.get_eq_read_only()
 }
 
-/// Answers a band action on the window's page when it is alive and editable.
+/// Answers a band action on the window's page when it is alive and editable,
+/// then refreshes the saved-profile rows: the profile shown as applied changes
+/// as soon as the page's curve moves away from (or back to) its bands.
 fn answer_band_edit(inner: &Rc<Inner>, action: BandAction) {
     let Some(window) = inner.ui.upgrade() else {
         return;
@@ -683,6 +851,7 @@ fn answer_band_edit(inner: &Rc<Inner>, action: BandAction) {
         return;
     }
     answer_band_action(&state, &**inner, action);
+    show_saved_profiles(&state, &inner.profiles.borrow());
 }
 
 /// Why a sound-mode change did not take, in the words the vendored error banner
@@ -1143,6 +1312,12 @@ struct Inner {
     /// The newest custom equalizer curve change; results of older changes are
     /// stale.
     curve_change: Cell<u64>,
+    /// The saved equalizer profiles, loaded from the document at startup and
+    /// edited by the Equalizer page's save/apply/delete actions. UI thread only.
+    profiles: RefCell<ProfileSet>,
+    /// The document the profiles are persisted to; `None` when Windows gives no
+    /// app-data directory, in which case the profiles stay in memory only.
+    profiles_path: Option<PathBuf>,
 }
 
 impl Inner {
@@ -1244,7 +1419,19 @@ pub struct Controller {
 impl Controller {
     /// Fills the shell's one-time state, answers the window's actions, and
     /// starts the worker-event timer. Every callback runs on the Slint thread.
+    ///
+    /// The saved profiles are loaded here, before the first window is filled, so
+    /// the panel already has them when a device connects. A missing or malformed
+    /// document loads as no profiles and is only logged to stderr.
     pub fn new(ui: &AppWindow) -> Self {
+        let profiles_path = default_profiles_path();
+        let profiles = match profiles_path.as_deref() {
+            Some(path) => load_profiles(path),
+            None => {
+                log_no_app_data_directory();
+                ProfileSet::new()
+            }
+        };
         let (sender, receiver) = mpsc::channel();
         let inner = Rc::new(Inner {
             ui: ui.as_weak(),
@@ -1257,8 +1444,11 @@ impl Controller {
             mode_change: Cell::new(0),
             preset_change: Cell::new(0),
             curve_change: Cell::new(0),
+            profiles: RefCell::new(profiles),
+            profiles_path,
         });
         initial_state(ui);
+        show_saved_profiles(&ui.global::<AppState>(), &inner.profiles.borrow());
         wire_actions(ui, &inner);
         let timer = Timer::default();
         let polling = Rc::clone(&inner);
@@ -1426,6 +1616,33 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         move || answer_band_edit(&inner, BandAction::Reset)
     });
 
+    actions.on_eq_save({
+        let inner = Rc::clone(inner);
+        move |name, replace| {
+            if let Some(window) = inner.ui.upgrade() {
+                save_equalizer_profile(&window, &inner, name.as_str(), replace);
+            }
+        }
+    });
+
+    actions.on_eq_apply({
+        let inner = Rc::clone(inner);
+        move |name| {
+            if let Some(window) = inner.ui.upgrade() {
+                apply_equalizer_profile(&window, &inner, name.as_str());
+            }
+        }
+    });
+
+    actions.on_eq_delete({
+        let inner = Rc::clone(inner);
+        move |name| {
+            if let Some(window) = inner.ui.upgrade() {
+                delete_equalizer_profile(&window, &inner, name.as_str());
+            }
+        }
+    });
+
     actions.on_navigate({
         let inner = Rc::clone(inner);
         move |page| {
@@ -1504,6 +1721,9 @@ fn drain_events(inner: &Rc<Inner>) {
                         inner.stop_worker();
                     }
                     apply_outcome(&window, outcome);
+                    // A connected A3062 shows the Saved profiles panel, so the
+                    // loaded rows and their Applied tags are filled here.
+                    show_saved_profiles(&window.global::<AppState>(), &inner.profiles.borrow());
                 }
             }
             Ok(Event::ModeChanged {
@@ -1536,6 +1756,7 @@ fn drain_events(inner: &Rc<Inner>) {
                 );
                 if applies && let Some(window) = inner.ui.upgrade() {
                     apply_preset_outcome(&window, inner, outcome);
+                    show_saved_profiles(&window.global::<AppState>(), &inner.profiles.borrow());
                 }
             }
             Ok(Event::CurveChanged {
@@ -1553,6 +1774,8 @@ fn drain_events(inner: &Rc<Inner>) {
                 if applies && let Some(window) = inner.ui.upgrade() {
                     let state = window.global::<AppState>();
                     apply_curve_outcome(&state, &|| inner.stop_worker(), outcome);
+                    // A re-polled curve changes which saved profile is applied.
+                    show_saved_profiles(&state, &inner.profiles.borrow());
                 }
             }
             // Both an empty queue and a closed channel mean nothing more will
@@ -2087,10 +2310,12 @@ fn show_sound_mode(state: &AppState<'_>, sound_mode: Option<SoundMode>, has_equa
 /// Fills the vendored Equalizer page from the parsed state.
 ///
 /// The page is editable exactly when this slice can write a custom equalizer
-/// body for the model (the A3062): the band controls, the range note and the
-/// reset button are enabled and the eight visible bands are editable. The saved
-/// profiles, the legacy banner and import/export stay empty — they are out of
-/// scope.
+/// body for the model (the A3062): the band controls, the range note, the reset
+/// button and the saved-profile panel with its Save button are enabled and the
+/// eight visible bands are editable. A model whose equalizer is deferred (the
+/// A3949) keeps all of them hidden, so it has no page and no profile writes.
+/// The import/export and legacy controls stay inert: their count and list are
+/// always empty and no file or clipboard action is wired.
 fn show_equalizer(state: &AppState<'_>, display: &EqualizerDisplay) {
     state.set_eq_available(display.available);
     state.set_eq_read_only(!display.editable);
@@ -2108,10 +2333,18 @@ fn show_equalizer(state: &AppState<'_>, display: &EqualizerDisplay) {
     state.set_eq_chart_line(display.chart_line.as_str().into());
     state.set_eq_chart_area(display.chart_area.as_str().into());
     state.set_eq_name(display.name.as_str().into());
-    state.set_has_saved_profiles(false);
+    state.set_has_saved_profiles(display.editable);
     state.set_eq_profiles(ModelRc::default());
     state.set_eq_export_count(0);
     state.set_eq_legacy(ModelRc::default());
+}
+
+/// Fills the saved-profile rows of the vendored Equalizer page from the saved
+/// set and the bands the page now shows, so the profile whose bands are exactly
+/// the shown bands carries the “Applied” tag.
+fn show_saved_profiles(state: &AppState<'_>, profiles: &ProfileSet) {
+    let bands = state.shown_band_values();
+    state.set_eq_profiles(ModelRc::new(VecModel::from(profile_rows(profiles, &bands))));
 }
 
 /// Applies a finished sound-mode change: the mode the device reports becomes the
@@ -2231,6 +2464,365 @@ fn select_equalizer_preset(window: &AppWindow, inner: &Rc<Inner>, value: &str) {
     }
 }
 
+/// The value of `AppState.eq-save-problem` the vendored save dialog compares
+/// against: `None` shows no message, `EmptyName` shows “Enter a profile name.”
+/// and `NeedsReplace` shows the replace question. The numbers are part of the
+/// vendored `.slint` dialog contract; the controller only names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveProblem {
+    None,
+    EmptyName,
+    NeedsReplace,
+}
+
+impl SaveProblem {
+    /// The `eq-save-problem` integer the vendored dialog compares to.
+    const fn value(self) -> i32 {
+        match self {
+            Self::None => 0,
+            Self::EmptyName => 1,
+            Self::NeedsReplace => 2,
+        }
+    }
+}
+
+/// The `AppState.error-label` of a failed saved-profile document write. The
+/// vendored banner wraps a label as “Could not change “{}”.”, so the visible
+/// text says the profiles could not be saved; the banner's second sentence
+/// (“The device kept its previous value.”) is the vendored device-change wording
+/// and does not describe a file failure, but there is no other visible error
+/// slot without editing the vendored UI.
+const PROFILE_WRITE_FAILURE_LABEL: &str = "Could not save equalizer profiles";
+
+/// The saved-profile dialog's answer to a save click: either the fields the
+/// dialog shows for a name it cannot store, or the name to store and whether its
+/// saved bands are being replaced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SaveRequest {
+    /// The trimmed name is empty, so the dialog shows `eq-save-problem = 1`.
+    EmptyName,
+    /// A profile of that name is saved and the click did not ask to replace it:
+    /// the dialog shows problem 2 and the existing name.
+    NeedsReplace { name: String },
+    /// The name can be stored: added, or its saved bands replaced when
+    /// `replace` is true and the name already exists.
+    Store { name: String, replace: bool },
+}
+
+/// Decides what an `Actions.eq-save(name, replace)` click asks for. Names are
+/// compared after trimming, exactly like the profile model does.
+fn save_request(set: &ProfileSet, name: &str, replace: bool) -> SaveRequest {
+    let name = name.trim();
+    if name.is_empty() {
+        return SaveRequest::EmptyName;
+    }
+    let exists = set.contains(name);
+    if exists && !replace {
+        return SaveRequest::NeedsReplace {
+            name: name.to_owned(),
+        };
+    }
+    SaveRequest::Store {
+        name: name.to_owned(),
+        replace: exists,
+    }
+}
+
+/// Whether a saved-profile change reached the profile document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Persistence {
+    /// The whole set was written to the document.
+    Written,
+    /// The document could not be written; the set was rolled back.
+    NotWritten,
+}
+
+/// Writes `set` to the saved-profile document, restoring `before` and returning
+/// [`Persistence::NotWritten`] when the document cannot be written, so the saved
+/// list and the document always agree.
+///
+/// A missing app-data directory is a persistence failure too: the profiles would
+/// not survive a restart, so the page must not report them as saved. The failure
+/// is also logged to stderr, which is the console trace the spec asks for next to
+/// the page banner.
+fn persist_saved_profiles(
+    set: &mut ProfileSet,
+    before: ProfileSet,
+    path: Option<&Path>,
+) -> Persistence {
+    let Some(path) = path else {
+        log_no_app_data_directory();
+        *set = before;
+        return Persistence::NotWritten;
+    };
+    match save_profiles(path, set) {
+        Ok(()) => Persistence::Written,
+        Err(error) => {
+            log_profiles(
+                &format!("could not save the equalizer profiles ({error})"),
+                path,
+            );
+            *set = before;
+            Persistence::NotWritten
+        }
+    }
+}
+
+/// What an `eq-save` click did, after the dialog decision and the file write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SaveOutcome {
+    /// The dialog stays open with problem 1: the typed name is empty.
+    EmptyName,
+    /// The dialog stays open with problem 2 and the existing name, asking before
+    /// its saved values are replaced.
+    NeedsReplace { name: String },
+    /// The bands or the name cannot become a profile. Defensive: the editable
+    /// page always shows eight in-range bands and the dialog rejects empty names.
+    Invalid,
+    /// The profile is saved and the document written; the dialog closes.
+    Saved,
+    /// The profile is not saved: the document cannot be written, so the set is
+    /// rolled back, the dialog closes and the page banner explains why.
+    NotWritten,
+}
+
+/// Saves the eight `bands` under `name` and writes the whole set to the
+/// document. A click that cannot store the profile changes nothing; a failed
+/// document write rolls the set back, so the saved list never shows a profile the
+/// document does not have.
+fn save_profile(
+    set: &mut ProfileSet,
+    path: Option<&Path>,
+    name: &str,
+    replace: bool,
+    bands: [i16; VISIBLE_EQ_BANDS],
+) -> SaveOutcome {
+    let (name, replace) = match save_request(set, name, replace) {
+        SaveRequest::EmptyName => return SaveOutcome::EmptyName,
+        SaveRequest::NeedsReplace { name } => return SaveOutcome::NeedsReplace { name },
+        SaveRequest::Store { name, replace } => (name, replace),
+    };
+    let profile = match EqualizerProfile::new(name, bands) {
+        Ok(profile) => profile,
+        Err(error) => {
+            eprintln!("OpenSCL4: cannot save the equalizer profile: {error}");
+            return SaveOutcome::Invalid;
+        }
+    };
+    let before = set.clone();
+    let stored = if replace {
+        set.replace(profile)
+    } else {
+        set.add(profile)
+    };
+    if let Err(error) = stored {
+        // The dialog checked the name, so this is only reached defensively.
+        eprintln!("OpenSCL4: cannot save the equalizer profile: {error}");
+        *set = before;
+        return SaveOutcome::Invalid;
+    }
+    if persist_saved_profiles(set, before, path) == Persistence::Written {
+        SaveOutcome::Saved
+    } else {
+        SaveOutcome::NotWritten
+    }
+}
+
+/// Clears the error banner when it shows a failed saved-profile write, leaving
+/// any device-change error banner in place.
+fn clear_profile_write_error(state: &AppState<'_>) {
+    if state.get_error_label() == PROFILE_WRITE_FAILURE_LABEL {
+        state.set_error_label("".into());
+    }
+}
+
+/// The Save profile dialog fields an `eq-save` click changes. The real
+/// implementation is the Slint `AppState`; tests record the calls so the dialog
+/// behaviour can be checked without a window.
+trait SaveDialogPage {
+    /// Shows the `eq-save-problem` value the vendored dialog compares to.
+    fn show_save_problem(&self, problem: SaveProblem);
+    /// Names the saved profile the replace question is about.
+    fn show_save_existing(&self, name: &str);
+    /// Closes the dialog (`eq-saving = false`).
+    fn close_save_dialog(&self);
+    /// Shows the readable banner label of a failed document write.
+    fn show_profile_error(&self, label: &str);
+    /// Clears the banner when it shows a saved-profile write failure.
+    fn clear_profile_error(&self);
+}
+
+impl SaveDialogPage for AppState<'_> {
+    fn show_save_problem(&self, problem: SaveProblem) {
+        self.set_eq_save_problem(problem.value());
+    }
+
+    fn show_save_existing(&self, name: &str) {
+        self.set_eq_save_existing(name.into());
+    }
+
+    fn close_save_dialog(&self) {
+        self.set_eq_saving(false);
+    }
+
+    fn show_profile_error(&self, label: &str) {
+        self.set_error_label(label.into());
+    }
+
+    fn clear_profile_error(&self) {
+        clear_profile_write_error(self);
+    }
+}
+
+/// Answers an `eq-save` click: stores the profile and shows the outcome on the
+/// dialog or the page banner. The dialog closes both on success and on a failed
+/// document write: the vendored dialog only has name-problem slots, so closing it
+/// is the only way the page's error banner can be seen.
+fn answer_save_click(
+    page: &impl SaveDialogPage,
+    set: &mut ProfileSet,
+    path: Option<&Path>,
+    name: &str,
+    replace: bool,
+    bands: [i16; VISIBLE_EQ_BANDS],
+) -> SaveOutcome {
+    let outcome = save_profile(set, path, name, replace, bands);
+    match &outcome {
+        SaveOutcome::EmptyName => page.show_save_problem(SaveProblem::EmptyName),
+        SaveOutcome::NeedsReplace { name } => {
+            page.show_save_problem(SaveProblem::NeedsReplace);
+            page.show_save_existing(name);
+        }
+        // The vendored dialog has one rejection slot for a name it cannot store,
+        // so an unusable profile is reported like an empty name.
+        SaveOutcome::Invalid => page.show_save_problem(SaveProblem::EmptyName),
+        SaveOutcome::Saved => {
+            page.show_save_problem(SaveProblem::None);
+            page.show_save_existing("");
+            page.close_save_dialog();
+            page.clear_profile_error();
+        }
+        SaveOutcome::NotWritten => {
+            page.show_save_problem(SaveProblem::None);
+            page.close_save_dialog();
+            page.show_profile_error(PROFILE_WRITE_FAILURE_LABEL);
+        }
+    }
+    outcome
+}
+
+/// Answers `Actions.eq-save(name, replace)`.
+///
+/// The page's eight current (clamped) bands are saved under the trimmed name and
+/// the whole set is written to the document; the dialog closes when the profile is
+/// saved. A profile that cannot be written is not kept: the set is rolled back, the
+/// saved list is unchanged and the page banner says the profiles could not be
+/// saved.
+fn save_equalizer_profile(window: &AppWindow, inner: &Rc<Inner>, name: &str, replace: bool) {
+    let state = window.global::<AppState>();
+    // Saving needs the editable A3062 page the Save button is shown on.
+    if !band_edit_allowed(&state) {
+        return;
+    }
+    let Ok(bands) = <[i16; VISIBLE_EQ_BANDS]>::try_from(state.shown_band_values()) else {
+        // The editable A3062 page always shows eight bands; anything else cannot
+        // become a profile and is reported like an unusable name.
+        SaveDialogPage::show_save_problem(&state, SaveProblem::EmptyName);
+        return;
+    };
+    let outcome = {
+        let mut profiles = inner.profiles.borrow_mut();
+        answer_save_click(
+            &state,
+            &mut profiles,
+            inner.profiles_path.as_deref(),
+            name,
+            replace,
+            bands,
+        )
+    };
+    if outcome == SaveOutcome::Saved {
+        show_saved_profiles(&state, &inner.profiles.borrow());
+    }
+}
+
+/// Answers `Actions.eq-apply(name)`: queues the saved profile's bands as exactly
+/// one custom `03 87` write; the device worker re-polls `01 01` afterwards, so
+/// the bands, the chart and the Applied tag follow the device. A missing profile
+/// queues nothing, and a stopped worker becomes the readable error banner
+/// instead of a silent no-op.
+fn apply_equalizer_profile(window: &AppWindow, inner: &Rc<Inner>, name: &str) {
+    let state = window.global::<AppState>();
+    // No page (the deferred A3949), no editable bands or no connection means
+    // there is no profile write to make.
+    if !band_edit_allowed(&state) {
+        return;
+    }
+    let outcome = apply_saved_profile(&inner.profiles.borrow(), name, &**inner);
+    match outcome {
+        ApplyOutcome::Queued => state.set_error_label("".into()),
+        ApplyOutcome::Disconnected => {
+            state.set_error_label(EqFailure::Disconnected.bands_label().into());
+        }
+        ApplyOutcome::Unknown => {
+            eprintln!("OpenSCL4: no saved equalizer profile named {name:?}");
+        }
+    }
+}
+
+/// What an `eq-delete` click did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeleteOutcome {
+    /// The profile was removed and the smaller set written.
+    Removed,
+    /// No saved profile has that name; the dialog just closes.
+    NotFound,
+    /// The document could not be written, so the profile is still saved: the set
+    /// was rolled back and the page banner explains why.
+    NotWritten,
+}
+
+/// Removes the profile named `name` and writes the smaller set to the document.
+/// A failed document write restores the profile, so the row list and the document
+/// always agree.
+fn delete_profile(set: &mut ProfileSet, path: Option<&Path>, name: &str) -> DeleteOutcome {
+    if !set.contains(name) {
+        return DeleteOutcome::NotFound;
+    }
+    let before = set.clone();
+    set.remove(name);
+    if persist_saved_profiles(set, before, path) == Persistence::Written {
+        DeleteOutcome::Removed
+    } else {
+        DeleteOutcome::NotWritten
+    }
+}
+
+/// Answers `Actions.eq-delete(name)`, after the `eq-deleting` dialog confirmed
+/// it: the profile is removed, persisted and the list is refreshed. A document
+/// write failure restores the profile and shows the page banner, so the row is
+/// not silently lost. The `eq-deleting` field is cleared last, so a name that is
+/// no longer saved only closes the dialog.
+fn delete_equalizer_profile(window: &AppWindow, inner: &Rc<Inner>, name: &str) {
+    let state = window.global::<AppState>();
+    let outcome = {
+        let mut profiles = inner.profiles.borrow_mut();
+        delete_profile(&mut profiles, inner.profiles_path.as_deref(), name)
+    };
+    match outcome {
+        DeleteOutcome::Removed => {
+            show_saved_profiles(&state, &inner.profiles.borrow());
+            clear_profile_write_error(&state);
+        }
+        DeleteOutcome::NotWritten => {
+            show_saved_profiles(&state, &inner.profiles.borrow());
+            state.set_error_label(PROFILE_WRITE_FAILURE_LABEL.into());
+        }
+        DeleteOutcome::NotFound => {}
+    }
+    state.set_eq_deleting("".into());
+}
+
 /// Replaces the dialog's model list with the models for a query and chip; an
 /// index that is not one of the vendored chips lists nothing.
 fn show_models(state: &AppState<'_>, query: &str, chip: Option<Chip>) {
@@ -2254,6 +2846,567 @@ mod tests {
     use soundcore_models::{
         BatteryScale, BatteryState, FirmwareVersions, HostDevice, Layout, SoundMode,
     };
+    use std::sync::atomic::AtomicU64;
+
+    /// A saved-profile document some tests write: a profile with the given name
+    /// and bands, validated exactly like the page saves it.
+    fn profile(name: &str, bands: [i16; VISIBLE_EQ_BANDS]) -> EqualizerProfile {
+        EqualizerProfile::new(name, bands).expect("the test profile is valid")
+    }
+
+    /// A unique file path under the system temp directory for a test document.
+    fn temp_profiles_path(label: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "openscl4-profiles-{}-{sequence}-{label}.json",
+            std::process::id()
+        ))
+    }
+
+    /// A unique temporary directory the file tests write into; it is removed
+    /// when the guard drops, so a test leaves nothing behind.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let path = temp_profiles_path(label).with_extension("dir");
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("the test's temporary directory is created");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        /// The saved-profile document inside this directory: the test directory
+        /// stands in for the app-data directory.
+        fn document(&self) -> PathBuf {
+            self.0.join(PROFILES_FILE_NAME)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Keeps the app's real saved-profile document as it was and puts it back
+    /// when the guard drops, so a manual hardware run never loses the profiles
+    /// a user already saved, even when an assertion fails midway.
+    struct RestoreDocument {
+        path: PathBuf,
+        previous: Option<Vec<u8>>,
+    }
+
+    impl RestoreDocument {
+        /// Reads the document at `path` and removes it, so the run starts from
+        /// no profiles; dropping the guard restores the exact previous bytes.
+        fn capture(path: &Path) -> Self {
+            let previous = fs::read(path).ok();
+            let _ = fs::remove_file(path);
+            Self {
+                path: path.to_path_buf(),
+                previous,
+            }
+        }
+    }
+
+    impl Drop for RestoreDocument {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(bytes) => {
+                    let _ = fs::write(&self.path, bytes);
+                }
+                None => {
+                    let _ = fs::remove_file(&self.path);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_profile_document_lives_in_the_app_data_directory() {
+        // `%APPDATA%\OpenSCL4\equalizer-profiles.json`, as the spec names it.
+        let app_data = Path::new(r"C:\Users\example\AppData\Roaming");
+        assert_eq!(APP_DATA_DIR_NAME, "OpenSCL4");
+        assert_eq!(PROFILES_FILE_NAME, "equalizer-profiles.json");
+        assert_eq!(
+            app_data_profiles_path(app_data),
+            app_data.join(APP_DATA_DIR_NAME).join(PROFILES_FILE_NAME)
+        );
+        assert_eq!(
+            temporary_profile_path(Path::new(r"C:\app\equalizer-profiles.json")),
+            PathBuf::from(r"C:\app\equalizer-profiles.json.tmp")
+        );
+    }
+
+    #[test]
+    fn a_saved_profile_set_round_trips_through_the_document() {
+        let directory = TempDir::new("roundtrip");
+        let path = directory.document();
+        let mut set = ProfileSet::new();
+        set.add(profile("Warm", [30, -30, 60, 0, -60, 20, 0, -20]))
+            .expect("the first profile is added");
+        set.add(profile("Flat", [0; VISIBLE_EQ_BANDS]))
+            .expect("the second profile is added");
+
+        save_profiles(&path, &set).expect("the document is written");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("the document is readable"),
+            set.to_json(),
+            "the file is exactly the schema v1 document"
+        );
+        assert_eq!(load_profiles(&path), set, "load reads back the same set");
+        assert!(
+            !temporary_profile_path(&path).exists(),
+            "the temporary sibling is renamed away"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_malformed_profile_document_loads_empty() {
+        let directory = TempDir::new("malformed");
+        let path = directory.document();
+        assert!(
+            load_profiles(&path).is_empty(),
+            "a missing document is an empty set, not a crash"
+        );
+
+        for text in [
+            "not json at all",
+            "{}",
+            "[{\"name\":\"Warm\"}]",
+            "[{\"name\":\"Warm\",\"bands\":[0,0,0,0,0,0,0]}]",
+            "[{\"name\":\"\",\"bands\":[0,0,0,0,0,0,0,0]}]",
+            "[{\"name\":\"Warm\",\"bands\":[999,0,0,0,0,0,0,0]}]",
+            "[{\"name\":\"Warm\",\"bands\":[0,0,0,0,0,0,0,0]},\
+             {\"name\":\"Warm\",\"bands\":[0,0,0,0,0,0,0,0]}]",
+        ] {
+            fs::write(&path, text).expect("the malformed document is written");
+            assert!(
+                load_profiles(&path).is_empty(),
+                "{text:?} is not a saved profile set and must load as none"
+            );
+            assert_eq!(
+                fs::read_to_string(&path).expect("the document is left in place"),
+                text,
+                "loading never rewrites the document"
+            );
+        }
+
+        // Empty and whitespace-only files are a document with no profiles.
+        for text in ["", "  \n\t"] {
+            fs::write(&path, text).expect("the empty document is written");
+            assert!(load_profiles(&path).is_empty());
+        }
+    }
+
+    #[test]
+    fn saving_replaces_the_previous_document_without_leaving_a_temporary() {
+        let directory = TempDir::new("replace");
+        // The app-data directory itself does not exist yet: saving creates it.
+        let path = directory.path().join("OpenSCL4").join(PROFILES_FILE_NAME);
+        assert!(!path.parent().expect("the document has a parent").exists());
+
+        let mut first = ProfileSet::new();
+        first
+            .add(profile("Warm", [30, -30, 60, 0, -60, 20, 0, -20]))
+            .expect("the profile is added");
+        save_profiles(&path, &first).expect("the document is written");
+        assert_eq!(load_profiles(&path), first);
+
+        let mut second = ProfileSet::new();
+        second
+            .add(profile("Flat", [0; VISIBLE_EQ_BANDS]))
+            .expect("the profile is added");
+        save_profiles(&path, &second).expect("the document is replaced as a whole");
+        assert_eq!(
+            load_profiles(&path),
+            second,
+            "no part of the old document remains"
+        );
+        assert!(!temporary_profile_path(&path).exists());
+    }
+
+    #[test]
+    fn a_save_that_cannot_write_the_document_reports_an_error() {
+        let directory = TempDir::new("unwritable");
+        // A file where the app-data directory should be makes the directory
+        // creation fail; the save reports it instead of panicking.
+        let blocker = directory.path().join("OpenSCL4");
+        fs::write(&blocker, b"not a directory").expect("the blocking file is written");
+        let path = blocker.join(PROFILES_FILE_NAME);
+
+        let error = save_profiles(&path, &ProfileSet::new())
+            .expect_err("a document under a file cannot be written");
+        assert!(
+            !error.to_string().is_empty(),
+            "the save failure has a readable message"
+        );
+        assert!(
+            !temporary_profile_path(&path).exists(),
+            "a failed save does not leave a temporary file"
+        );
+        assert_eq!(
+            fs::read(&blocker).expect("the blocking file is untouched"),
+            b"not a directory".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_profile_curve_is_drawn_in_the_thumbnail_box() {
+        // The vendored ProfileCurve's viewbox is 600x100; a flat 0 dB curve sits
+        // slightly above the middle because the range is -12.0…+13.4 dB.
+        let flat = profile_curve(&[0; VISIBLE_EQ_BANDS]);
+        assert!(flat.starts_with("M 37.5 52.4"), "{flat}");
+        assert!(flat.ends_with("562.5 52.4"), "{flat}");
+        // The range ends sit inside the 6% margins of the 100-unit box.
+        let ends = profile_curve(&[EQ_MAX, EQ_MIN, 0, 0, 0, 0, 0, 0]);
+        assert!(ends.starts_with("M 37.5 6.0"), "{ends}");
+        // A one-band curve still draws a point rather than nothing.
+        assert!(profile_curve(&[0; 1]).starts_with("M 300.0"));
+    }
+
+    #[test]
+    fn saved_profile_rows_carry_the_name_curve_band_count_and_applied_flag() {
+        let warm = [30, -30, 60, 0, -60, 20, 0, -20];
+        let flat = [0i16; VISIBLE_EQ_BANDS];
+        let mut set = ProfileSet::new();
+        set.add(profile("Warm", warm)).expect("Warm is added");
+        set.add(profile("Flat", flat)).expect("Flat is added");
+
+        // The device is on the Warm curve: only Warm carries the Applied tag.
+        let rows = profile_rows(&set, &warm);
+        assert_eq!(rows.len(), 2, "insertion order is kept");
+        assert_eq!(rows[0].name.as_str(), "Warm");
+        assert_eq!(rows[0].bands, VISIBLE_EQ_BANDS as i32);
+        assert!(rows[0].in_effect, "Warm's bands are the shown bands");
+        assert!(!rows[0].curve.is_empty(), "the row carries its curve");
+        assert!(rows[0].curve.starts_with("M "), "the curve is a path");
+        assert!(!rows[0].export, "export checkboxes stay inert");
+        assert_eq!(rows[1].name.as_str(), "Flat");
+        assert!(!rows[1].in_effect, "Flat is not the shown curve");
+        assert!(!rows[1].export);
+
+        // Any other curve applies no profile, and no shown bands apply none.
+        let rows = profile_rows(&set, &[1i16; VISIBLE_EQ_BANDS]);
+        assert!(rows.iter().all(|row| !row.in_effect));
+        let rows = profile_rows(&set, &[]);
+        assert!(rows.iter().all(|row| !row.in_effect));
+    }
+
+    #[test]
+    fn an_empty_profile_name_is_rejected_with_problem_one() {
+        let set = ProfileSet::new();
+        for name in ["", " ", "\t\r\n"] {
+            assert_eq!(
+                save_request(&set, name, false),
+                SaveRequest::EmptyName,
+                "{name:?} is not a profile name"
+            );
+            assert_eq!(save_request(&set, name, true), SaveRequest::EmptyName);
+        }
+    }
+
+    #[test]
+    fn a_duplicate_profile_name_asks_before_replacing() {
+        let warm = [30, -30, 60, 0, -60, 20, 0, -20];
+        let mut set = ProfileSet::new();
+        set.add(profile("Warm", warm)).expect("Warm is added");
+
+        // The dialog shows problem 2 and the existing name; names are trimmed.
+        assert_eq!(
+            save_request(&set, "Warm", false),
+            SaveRequest::NeedsReplace {
+                name: "Warm".into()
+            }
+        );
+        assert_eq!(
+            save_request(&set, "  Warm  ", false),
+            SaveRequest::NeedsReplace {
+                name: "Warm".into()
+            }
+        );
+        // Asking to replace stores the bands; a new name is stored either way.
+        assert_eq!(
+            save_request(&set, "Warm", true),
+            SaveRequest::Store {
+                name: "Warm".into(),
+                replace: true
+            }
+        );
+        assert_eq!(
+            save_request(&set, "Cool", false),
+            SaveRequest::Store {
+                name: "Cool".into(),
+                replace: false
+            }
+        );
+    }
+
+    #[test]
+    fn the_save_problem_values_match_the_vendored_dialog() {
+        // `SaveProfileDialog` shows “Enter a profile name.” for value 1 and the
+        // replace question for value 2; the controller names those values instead
+        // of writing bare integers at the dialog boundary.
+        assert_eq!(SaveProblem::None.value(), 0);
+        assert_eq!(SaveProblem::EmptyName.value(), 1);
+        assert_eq!(SaveProblem::NeedsReplace.value(), 2);
+    }
+
+    #[test]
+    fn the_dialog_shows_the_name_problems_on_the_page() {
+        let mut set = ProfileSet::new();
+        set.add(profile("Warm", [0; VISIBLE_EQ_BANDS]))
+            .expect("Warm is added");
+        let page = RecordedSaveDialog::default();
+        let bands = [30, -30, 60, 0, -60, 20, 0, -20];
+
+        assert_eq!(
+            answer_save_click(&page, &mut set, None, "  ", false, bands),
+            SaveOutcome::EmptyName
+        );
+        assert_eq!(
+            page.problem.get(),
+            SaveProblem::EmptyName.value(),
+            "the dialog shows its empty-name message"
+        );
+        assert!(!page.closed.get(), "a name problem keeps the dialog open");
+
+        assert_eq!(
+            answer_save_click(&page, &mut set, None, "Warm", false, bands),
+            SaveOutcome::NeedsReplace {
+                name: "Warm".into()
+            }
+        );
+        assert_eq!(
+            page.problem.get(),
+            SaveProblem::NeedsReplace.value(),
+            "the dialog asks before replacing saved values"
+        );
+        assert_eq!(page.existing.borrow().as_str(), "Warm");
+        assert!(
+            !page.closed.get(),
+            "the replace question keeps the dialog open"
+        );
+        assert_eq!(set.len(), 1, "nothing is replaced before the answer");
+    }
+
+    #[test]
+    fn a_written_profile_closes_the_dialog_and_clears_a_stale_banner() {
+        let directory = TempDir::new("save-written");
+        let path = directory.document();
+        let mut set = ProfileSet::new();
+        let page = RecordedSaveDialog::default();
+        page.show_profile_error(PROFILE_WRITE_FAILURE_LABEL);
+
+        let warm = [30, -30, 60, 0, -60, 20, 0, -20];
+        let outcome = answer_save_click(&page, &mut set, Some(&path), "  Warm ", false, warm);
+
+        assert_eq!(outcome, SaveOutcome::Saved);
+        assert!(set.contains("Warm"), "the trimmed name is saved");
+        assert_eq!(load_profiles(&path), set, "the document has the profile");
+        assert!(page.closed.get(), "a written save closes the dialog");
+        assert_eq!(page.problem.get(), SaveProblem::None.value());
+        assert_eq!(
+            page.error.borrow().as_str(),
+            "",
+            "a successful write clears the stale write-failure banner"
+        );
+    }
+
+    #[test]
+    fn a_save_that_cannot_write_the_document_rolls_back_and_reports() {
+        let directory = TempDir::new("save-failure");
+        // A file where the app-data directory belongs makes the write fail.
+        let blocker = directory.path().join(APP_DATA_DIR_NAME);
+        fs::write(&blocker, b"not a directory").expect("the blocking file is written");
+        let path = blocker.join(PROFILES_FILE_NAME);
+        let mut set = ProfileSet::new();
+        let page = RecordedSaveDialog::default();
+
+        let outcome = answer_save_click(
+            &page,
+            &mut set,
+            Some(&path),
+            "Warm",
+            false,
+            [30, -30, 60, 0, -60, 20, 0, -20],
+        );
+
+        assert_eq!(outcome, SaveOutcome::NotWritten, "the profile is not saved");
+        assert!(
+            set.is_empty(),
+            "the unsaved profile is rolled back out of the set"
+        );
+        assert_eq!(
+            page.problem.get(),
+            SaveProblem::None.value(),
+            "the dialog shows no name problem"
+        );
+        assert!(
+            page.closed.get(),
+            "the dialog closes so the page banner is visible"
+        );
+        assert_eq!(
+            page.error.borrow().as_str(),
+            PROFILE_WRITE_FAILURE_LABEL,
+            "the page banner says the profiles could not be saved"
+        );
+        assert!(!path.exists(), "the failed save wrote no document");
+        assert_eq!(
+            fs::read(&blocker).expect("the blocking file is untouched"),
+            b"not a directory".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_missing_app_data_directory_is_not_reported_as_saved() {
+        let mut set = ProfileSet::new();
+        let page = RecordedSaveDialog::default();
+
+        assert_eq!(
+            answer_save_click(&page, &mut set, None, "Warm", false, [0; VISIBLE_EQ_BANDS]),
+            SaveOutcome::NotWritten,
+            "a profile that would not survive a restart is not reported as saved"
+        );
+        assert!(set.is_empty(), "nothing is kept in memory either");
+        assert!(page.closed.get(), "the dialog closes on the failure");
+        assert_eq!(page.error.borrow().as_str(), PROFILE_WRITE_FAILURE_LABEL);
+    }
+
+    #[test]
+    fn a_delete_that_cannot_write_the_document_keeps_the_profile() {
+        let directory = TempDir::new("delete-failure");
+        let blocker = directory.path().join(APP_DATA_DIR_NAME);
+        fs::write(&blocker, b"not a directory").expect("the blocking file is written");
+        let path = blocker.join(PROFILES_FILE_NAME);
+        let mut set = ProfileSet::new();
+        set.add(profile("Warm", [30, -30, 60, 0, -60, 20, 0, -20]))
+            .expect("Warm is added");
+
+        assert_eq!(
+            delete_profile(&mut set, Some(&path), "Warm"),
+            DeleteOutcome::NotWritten,
+            "a delete that cannot be persisted is not reported as done"
+        );
+        assert!(set.contains("Warm"), "the profile stays in the list");
+    }
+
+    #[test]
+    fn applying_a_saved_profile_queues_its_curve_once() {
+        let warm = [30, -30, 60, 0, -60, 20, 0, -20];
+        let mut set = ProfileSet::new();
+        set.add(profile("Warm", warm)).expect("Warm is added");
+        let writer = RecordedWriter::default();
+
+        assert_eq!(
+            apply_saved_profile(&set, "Warm", &writer),
+            ApplyOutcome::Queued
+        );
+        assert_eq!(
+            writer.curves.borrow().len(),
+            1,
+            "a click queues exactly one custom-curve write, whose worker then \
+             re-polls the state"
+        );
+        assert_eq!(
+            writer.curves.borrow()[0],
+            warm,
+            "the profile's eight bands are written"
+        );
+
+        // The lookup trims the name like the profile model does.
+        assert_eq!(
+            apply_saved_profile(&set, "  Warm ", &writer),
+            ApplyOutcome::Queued
+        );
+        assert_eq!(writer.curves.borrow().len(), 2);
+    }
+
+    #[test]
+    fn an_unknown_profile_or_a_stopped_worker_queues_nothing() {
+        let mut set = ProfileSet::new();
+        set.add(profile("Warm", [30, -30, 60, 0, -60, 20, 0, -20]))
+            .expect("Warm is added");
+        let writer = RecordedWriter::default();
+
+        assert_eq!(
+            apply_saved_profile(&set, "Missing", &writer),
+            ApplyOutcome::Unknown,
+            "an unknown name is not a profile"
+        );
+        assert!(writer.curves.borrow().is_empty());
+
+        writer.connected.set(false);
+        assert_eq!(
+            apply_saved_profile(&set, "Warm", &writer),
+            ApplyOutcome::Disconnected,
+            "a stopped worker cannot write"
+        );
+        assert!(writer.curves.borrow().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_saved_profile_persists_the_smaller_set() {
+        let directory = TempDir::new("delete");
+        let path = directory.document();
+        let mut set = ProfileSet::new();
+        set.add(profile("Warm", [30, -30, 60, 0, -60, 20, 0, -20]))
+            .expect("Warm is added");
+        set.add(profile("Flat", [0; VISIBLE_EQ_BANDS]))
+            .expect("Flat is added");
+        save_profiles(&path, &set).expect("the document is written");
+
+        // The delete action removes the profile and persists the smaller set.
+        let mut loaded = load_profiles(&path);
+        assert_eq!(
+            delete_profile(&mut loaded, Some(&path), "Warm"),
+            DeleteOutcome::Removed,
+            "the saved profile is removed and the smaller document is written"
+        );
+        assert_eq!(
+            delete_profile(&mut loaded, Some(&path), "Missing"),
+            DeleteOutcome::NotFound,
+            "an unknown name only closes the dialog"
+        );
+
+        let reloaded = load_profiles(&path);
+        assert_eq!(reloaded.len(), 1);
+        assert!(reloaded.contains("Flat"), "the other profile stays");
+        assert!(!reloaded.contains("Warm"), "the deleted profile is gone");
+        assert_eq!(
+            fs::read_to_string(&path).expect("the document is readable"),
+            reloaded.to_json()
+        );
+    }
+
+    #[test]
+    fn only_the_editable_a3062_page_offers_saved_profiles() {
+        let a3062 = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        let a3062_state = soundcore_models::parse_state_frame(a3062, &captured_a3062_frame())
+            .expect("the A3062 capture parses");
+        let display = EqualizerDisplay::new(Some(a3062), a3062_state.equalizer.as_ref());
+        assert!(
+            display.editable,
+            "the editable A3062 page saves, lists and applies profiles"
+        );
+
+        // The deferred A3949 has no page and therefore no saved profiles: no
+        // save button, no list, no apply and no `03 87` write.
+        let a3949 = soundcore_models::model_by_code("A3949").expect("A3949 is a state model");
+        let a3949_state = soundcore_models::parse_state_frame(a3949, &captured_a3949_frame())
+            .expect("the A3949 capture parses");
+        let display = EqualizerDisplay::new(Some(a3949), a3949_state.equalizer.as_ref());
+        assert!(
+            !display.editable,
+            "the deferred A3949 page stays read-only and gets no profile panel"
+        );
+    }
 
     #[test]
     fn a_chosen_p20i_resolves_to_its_catalog_card_and_state_parser() {
@@ -3159,6 +4312,41 @@ mod tests {
             }
             self.curves.borrow_mut().push(bands);
             true
+        }
+    }
+
+    /// A Save profile dialog that records what an `eq-save` click shows, in place
+    /// of the Slint `AppState`.
+    #[derive(Default)]
+    struct RecordedSaveDialog {
+        problem: Cell<i32>,
+        existing: RefCell<String>,
+        closed: Cell<bool>,
+        error: RefCell<String>,
+    }
+
+    impl SaveDialogPage for RecordedSaveDialog {
+        fn show_save_problem(&self, problem: SaveProblem) {
+            self.problem.set(problem.value());
+        }
+
+        fn show_save_existing(&self, name: &str) {
+            *self.existing.borrow_mut() = name.to_owned();
+        }
+
+        fn close_save_dialog(&self) {
+            self.closed.set(true);
+        }
+
+        fn show_profile_error(&self, label: &str) {
+            *self.error.borrow_mut() = label.to_owned();
+        }
+
+        fn clear_profile_error(&self) {
+            let shows_write_failure = self.error.borrow().as_str() == PROFILE_WRITE_FAILURE_LABEL;
+            if shows_write_failure {
+                self.error.borrow_mut().clear();
+            }
         }
     }
 
@@ -4405,7 +5593,15 @@ mod tests {
 
     /// The controller state of a manual test: the same fields `Controller::new`
     /// fills, with the worker channel drained by hand instead of by the timer.
+    /// The profiles are loaded from a unique temporary document, so a hardware
+    /// test never touches the app-data directory of the running app.
     fn test_inner(ui: &AppWindow) -> Rc<Inner> {
+        test_inner_with_profiles(ui, temp_profiles_path("manual"))
+    }
+
+    /// [`test_inner`], using `path` as the saved-profile document instead of a
+    /// temporary one.
+    fn test_inner_with_profiles(ui: &AppWindow, path: PathBuf) -> Rc<Inner> {
         let (sender, receiver) = mpsc::channel();
         Rc::new(Inner {
             ui: ui.as_weak(),
@@ -4418,6 +5614,8 @@ mod tests {
             mode_change: Cell::new(0),
             preset_change: Cell::new(0),
             curve_change: Cell::new(0),
+            profiles: RefCell::new(load_profiles(&path)),
+            profiles_path: Some(path),
         })
     }
 
@@ -4677,6 +5875,37 @@ mod tests {
     /// callback.
     fn type_band(ui: &AppWindow, index: i32, text: &str) {
         ui.global::<Actions>().invoke_eq_type(index, text.into());
+    }
+
+    /// Presses the Save-profile dialog's button through the wired
+    /// `Actions.eq-save` callback.
+    fn click_save_profile(ui: &AppWindow, name: &str, replace: bool) {
+        ui.global::<Actions>().invoke_eq_save(name.into(), replace);
+    }
+
+    /// Clicks a saved-profile row through the wired `Actions.eq-apply` callback.
+    fn click_apply_profile(ui: &AppWindow, name: &str) {
+        ui.global::<Actions>().invoke_eq_apply(name.into());
+    }
+
+    /// Presses the confirmation dialog's Delete button through the wired
+    /// `Actions.eq-delete` callback.
+    fn click_delete_profile(ui: &AppWindow, name: &str) {
+        ui.global::<Actions>().invoke_eq_delete(name.into());
+    }
+
+    /// The saved-profile rows the page shows, as plain values for test output.
+    fn profile_rows_of(state: &AppState<'_>) -> Vec<EqProfile> {
+        state.get_eq_profiles().iter().collect()
+    }
+
+    /// The eight visible band values the page shows, in raw dB×10.
+    fn band_values(state: &AppState<'_>) -> Vec<i16> {
+        state
+            .get_eq_bands()
+            .iter()
+            .map(|band| clamp_band_value(band.value))
+            .collect()
     }
 
     /// Pumps the worker channel until the page shows `want` as the custom curve
@@ -5133,6 +6362,282 @@ mod tests {
             initial_preset,
             "the device kept the restored state"
         );
+        disconnect(&ui, &inner);
+    }
+
+    /// Manual hardware check of the saved equalizer profiles on the real Space
+    /// One Pro:
+    ///
+    /// ```text
+    /// cargo test -p soundcore-desktop manual_saved_profiles -- --ignored --nocapture
+    /// ```
+    ///
+    /// Connects the suggested A3062, asserts the page offers saved profiles and
+    /// that export/legacy stay inert, writes a custom curve, saves it as “Test
+    /// curve”, checks its row (curve path, eight bands, Applied tag) and the
+    /// real document in `%APPDATA%\OpenSCL4\equalizer-profiles.json`, loads that
+    /// document through a fresh `Controller::new` (the startup path a restarted
+    /// app runs), changes the curve so Applied clears, applies the profile so
+    /// one custom write is re-polled and Applied returns, checks the empty-name
+    /// and duplicate-name rejections, deletes it after the confirmation state,
+    /// checks that a save whose document cannot be written reports the page
+    /// banner without adding a profile, and leaves both the device and the user's
+    /// profile document as found. Addresses are masked.
+    #[test]
+    #[ignore = "manual hardware check: needs a paired A3062"]
+    fn manual_saved_profiles() {
+        let path = default_profiles_path().expect("Windows has %APPDATA%");
+        // A failed assertion must not leave the user's real profiles changed.
+        let _restore = RestoreDocument::capture(&path);
+        let ui = AppWindow::new().expect("the shell window builds");
+        let inner = test_inner_with_profiles(&ui, path.clone());
+        wire_actions(&ui, &inner);
+        if connect_real_device(&ui, &inner, "A3062").is_none() {
+            return;
+        }
+        let state = ui.global::<AppState>();
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 has a parser");
+
+        // Record the state found on connect so the device can be left as found.
+        let initial_preset = state.get_eq_preset().to_string();
+        let initial_name = state.get_eq_name().to_string();
+        let initial_bands: [i16; VISIBLE_EQ_BANDS] = band_values(&state)
+            .try_into()
+            .expect("the A3062 page shows eight bands");
+        println!(
+            "  found: preset {initial_preset:?} name {initial_name:?} bands {initial_bands:?}"
+        );
+        assert!(
+            state.get_has_saved_profiles(),
+            "the A3062 page offers saved profiles"
+        );
+        assert!(
+            profile_rows_of(&state).is_empty(),
+            "the run starts from an empty document"
+        );
+        assert_eq!(state.get_eq_export_count(), 0, "export stays inert");
+        assert_eq!(state.get_eq_legacy().row_count(), 0, "legacy stays empty");
+        assert_eq!(
+            state.get_eq_profiles().row_count(),
+            0,
+            "no saved-profile row is listed before the first save"
+        );
+
+        // Write a custom curve to save: +4.0 dB at 100 Hz and −4.0 dB at 800 Hz
+        // on top of the bands found on connect.
+        let mut curve = initial_bands;
+        curve[0] = 40;
+        type_band(&ui, 0, "4.0");
+        wait_for_custom_curve(&ui, &inner, curve).expect("the typed band is re-polled");
+        curve[3] = -40;
+        commit_band(&ui, 3, -40);
+        wait_for_custom_curve(&ui, &inner, curve).expect("the committed band is re-polled");
+        println!("  custom curve {curve:?}");
+
+        // Save it as "Test curve": the row shows the name, the curve path, the
+        // eight band count and the Applied tag, and the dialog closes.
+        click_save_profile(&ui, "Test curve", false);
+        assert_eq!(
+            state.get_eq_save_problem(),
+            SaveProblem::None.value(),
+            "a valid new name saves without a problem"
+        );
+        assert!(!state.get_eq_saving(), "the dialog closes after the save");
+        assert_eq!(state.get_eq_save_existing().as_str(), "");
+        let rows = profile_rows_of(&state);
+        assert_eq!(rows.len(), 1, "the saved profile is listed");
+        assert_eq!(rows[0].name.as_str(), "Test curve");
+        assert_eq!(rows[0].bands, VISIBLE_EQ_BANDS as i32, "bands=8");
+        assert!(rows[0].in_effect, "the saved curve is the current curve");
+        assert!(!rows[0].curve.is_empty(), "the row carries a curve path");
+        assert!(rows[0].curve.starts_with("M "), "the curve is a path");
+        let document = load_profiles(&path);
+        assert!(
+            document.contains("Test curve"),
+            "the profile is persisted to the app-data document"
+        );
+        assert_eq!(
+            document.get("Test curve").expect("the saved profile").bands,
+            curve
+        );
+        println!(
+            "  saved {:?}: rows {} bands {} applied {}; document has {} profile(s)",
+            rows[0].name,
+            rows.len(),
+            rows[0].bands,
+            rows[0].in_effect,
+            document.len()
+        );
+
+        // A restarted app runs `Controller::new`, which loads this document
+        // before the first device connects: the fresh shell already lists it.
+        let restarted = AppWindow::new().expect("a second shell window builds");
+        {
+            let _controller = Controller::new(&restarted);
+            let reloaded: Vec<EqProfile> = restarted
+                .global::<AppState>()
+                .get_eq_profiles()
+                .iter()
+                .collect();
+            assert_eq!(reloaded.len(), 1, "the restart loads the saved profile");
+            assert_eq!(reloaded[0].name.as_str(), "Test curve");
+            println!(
+                "  restart: Controller::new loaded {} profile(s), first {:?}",
+                reloaded.len(),
+                reloaded[0].name
+            );
+        }
+        drop(restarted);
+
+        // The empty-name and duplicate-name answers of the save dialog.
+        click_save_profile(&ui, "   ", false);
+        assert_eq!(
+            state.get_eq_save_problem(),
+            SaveProblem::EmptyName.value(),
+            "a whitespace name is rejected"
+        );
+        click_save_profile(&ui, "Test curve", false);
+        assert_eq!(
+            state.get_eq_save_problem(),
+            SaveProblem::NeedsReplace.value(),
+            "a duplicate name asks before replacing"
+        );
+        assert_eq!(state.get_eq_save_existing().as_str(), "Test curve");
+        assert_eq!(
+            profile_rows_of(&state).len(),
+            1,
+            "nothing is added before the replace answer"
+        );
+        println!("  empty name -> problem 1; duplicate name -> problem 2");
+
+        // Changing the curve clears Applied; replacing the profile's bands with
+        // the new curve brings it back.
+        let mut replaced = curve;
+        replaced[1] = 20;
+        type_band(&ui, 1, "2.0");
+        wait_for_custom_curve(&ui, &inner, replaced).expect("the typed band is re-polled");
+        assert!(
+            !profile_rows_of(&state)[0].in_effect,
+            "a changed curve clears the Applied tag"
+        );
+        click_save_profile(&ui, "Test curve", true);
+        assert_eq!(state.get_eq_save_problem(), SaveProblem::None.value());
+        assert!(!state.get_eq_saving(), "the replace closes the dialog");
+        let rows = profile_rows_of(&state);
+        assert_eq!(rows.len(), 1, "replacing keeps one profile of the name");
+        assert!(rows[0].in_effect, "the replaced bands are applied");
+        assert_eq!(
+            load_profiles(&path)
+                .get("Test curve")
+                .expect("the replaced profile")
+                .bands,
+            replaced
+        );
+        println!("  replaced bands {replaced:?}; Applied is back, one profile remains");
+
+        // Applying the profile writes its curve on the real device and the
+        // re-polled state marks it Applied again.
+        click_apply_profile(&ui, "Test curve");
+        wait_for_custom_curve(&ui, &inner, replaced).expect("the applied curve is re-polled");
+        let rows = profile_rows_of(&state);
+        assert!(
+            rows[0].in_effect,
+            "the applied profile is marked Applied after the re-poll"
+        );
+        println!(
+            "  applied: re-polled bands {:?} preset {:?} applied {}",
+            band_values(&state),
+            state.get_eq_preset(),
+            rows[0].in_effect
+        );
+
+        // A stopped worker turns an apply into the readable error banner; the
+        // banner's Retry reconnects and re-reads the device.
+        inner.stop_worker();
+        click_apply_profile(&ui, "Test curve");
+        let error = state.get_error_label().to_string();
+        println!("  after a stopped worker: error-label {error:?}");
+        assert!(
+            error.contains("Equalizer bands"),
+            "{error:?} names the bands"
+        );
+        std::thread::sleep(Duration::from_millis(1000));
+        ui.global::<Actions>().invoke_retry();
+        assert!(
+            wait_for_connection(&inner, &ui, Connection::Connected, Duration::from_secs(20)),
+            "the banner's Retry reconnects"
+        );
+        assert_eq!(state.get_error_label().as_str(), "", "the banner is gone");
+
+        // Delete after the confirmation state: the row and the document lose it.
+        state.set_eq_deleting("Test curve".into());
+        assert_eq!(state.get_eq_deleting().as_str(), "Test curve");
+        click_delete_profile(&ui, state.get_eq_deleting().as_str());
+        assert_eq!(state.get_eq_deleting().as_str(), "", "the dialog is closed");
+        assert!(
+            profile_rows_of(&state).is_empty(),
+            "the deleted profile is no longer listed"
+        );
+        let document = load_profiles(&path);
+        assert!(
+            document.is_empty(),
+            "the deleted profile is gone from the document"
+        );
+        println!(
+            "  deleted: rows 0; document has {} profile(s)",
+            document.len()
+        );
+
+        // A save whose document cannot be written is reported in the page banner
+        // and leaves the saved set alone. The blocked path is a temporary one, so
+        // the user's real document is never touched by this check.
+        let blocked_directory = TempDir::new("blocked-save");
+        let blocker = blocked_directory.path().join(APP_DATA_DIR_NAME);
+        fs::write(&blocker, b"not a directory").expect("the blocking file is written");
+        let blocked = test_inner_with_profiles(&ui, blocker.join(PROFILES_FILE_NAME));
+        save_equalizer_profile(&ui, &blocked, "Not saved", false);
+        let error = state.get_error_label().to_string();
+        println!("  save to a blocked document: error-label {error:?}");
+        assert_eq!(error, PROFILE_WRITE_FAILURE_LABEL, "the banner is readable");
+        assert!(!state.get_eq_saving(), "the save dialog closes");
+        assert!(
+            blocked.profiles.borrow().is_empty(),
+            "the unsaved profile is rolled back out of the set"
+        );
+        assert!(
+            profile_rows_of(&state).is_empty(),
+            "the page lists no profile that the document does not have"
+        );
+        assert!(
+            load_profiles(&path).is_empty(),
+            "the user's document is unchanged by the failed save"
+        );
+        state.set_error_label("".into());
+
+        // Put the state found on connect back, so the device is left as found.
+        let initial_is_built_in = initial_preset.parse::<u16>().ok().is_some_and(|id| {
+            model
+                .equalizer_presets()
+                .iter()
+                .any(|preset| preset.id == id)
+        });
+        if initial_is_built_in {
+            click_preset(&ui, &initial_preset);
+            wait_for_preset(&ui, &inner, &initial_preset)
+                .expect("the preset found on connect is restored");
+            println!(
+                "  restored preset {initial_preset:?} bands {:?}",
+                band_values(&state)
+            );
+        } else {
+            for (index, value) in initial_bands.iter().enumerate() {
+                preview_band(&ui, index as i32, i32::from(*value));
+            }
+            commit_band(&ui, 0, i32::from(initial_bands[0]));
+            let restored = wait_for_custom_curve(&ui, &inner, initial_bands)
+                .expect("the found curve is restored");
+            println!("  restored custom curve {restored:?}");
+        }
         disconnect(&ui, &inner);
     }
 

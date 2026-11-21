@@ -4150,6 +4150,7 @@ dependencies = [
  "slint",
  "slint-build",
  "soundcore-models",
+ "soundcore-profiles",
  "soundcore-protocol",
  "soundcore-session",
  "windows",
@@ -4161,6 +4162,15 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "soundcore-protocol",
+]
+
+[[package]]
+name = "soundcore-profiles"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "soundcore-models",
 ]
 
 [[package]]
