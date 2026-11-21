@@ -406,6 +406,78 @@ fn custom_preset_id_is_not_a_built_in_preset() {
     );
 }
 
+#[derive(serde::Deserialize)]
+struct CustomFixture {
+    preset_offset: usize,
+    bands_offset: usize,
+    custom_preset_id: u16,
+    visible_bands: Vec<i16>,
+    bands: Vec<i16>,
+    body_hex: String,
+    frame_hex: String,
+    before_frame_hex: String,
+    custom_frame_hex: String,
+    restored_frame_hex: String,
+}
+
+fn custom_fixture() -> CustomFixture {
+    serde_json::from_str(include_str!("../../../data/a3062-eq-custom.json"))
+        .expect("custom equalizer fixture")
+}
+
+fn fixture_state(frame_hex: &str) -> soundcore_models::DeviceState {
+    let model = model_by_code("A3062").expect("A3062");
+    parse_state_frame(model, &hex(frame_hex)).expect("parse the real state")
+}
+
+#[test]
+fn parses_the_real_a3062_custom_equalizer_fixture() {
+    let fixture = custom_fixture();
+    let model = model_by_code("A3062").expect("A3062");
+    let capability = model.equalizer.expect("A3062 has a measured equalizer");
+    assert_eq!(capability.state_offset, fixture.preset_offset);
+    assert_eq!(capability.state_offset + 2, fixture.bands_offset);
+
+    // The state found on connect was a built-in preset.
+    let before_state = fixture_state(&fixture.before_frame_hex);
+    let before = before_state.equalizer.expect("the found A3062 equalizer");
+    assert!(!before.is_custom());
+    assert_eq!(before.preset().map(|preset| preset.id), Some(0));
+    assert_eq!(before.visible_bands(), [0; VISIBLE_EQ_BANDS]);
+
+    // The body and frame built from that state are exactly the bytes the device
+    // accepted.
+    let visible: [i16; VISIBLE_EQ_BANDS] = fixture
+        .visible_bands
+        .clone()
+        .try_into()
+        .expect("the fixture records eight visible bands");
+    let body = model
+        .custom_equalizer_body(&before, visible)
+        .expect("the A3062 custom body");
+    assert_eq!(frame_hex(&body), fixture.body_hex);
+    let frame = encode(Direction::Outbound, Command::EQUALIZER, &body);
+    assert_eq!(frame_hex(&frame), fixture.frame_hex);
+
+    // The re-polled state reports the custom preset and exactly the written
+    // curve; the two invisible bands are the measured fixed ones.
+    let custom_state = fixture_state(&fixture.custom_frame_hex);
+    assert_eq!(custom_state.serial, None, "the fixture serial is masked");
+    assert_eq!(custom_state.sound_mode, Some(SoundMode::Normal));
+    let custom = custom_state.equalizer.expect("the custom A3062 equalizer");
+    assert_eq!(custom.preset_id, fixture.custom_preset_id);
+    assert_eq!(custom.preset_id, CUSTOM_EQUALIZER_PRESET_ID);
+    assert!(custom.is_custom());
+    assert!(custom.preset().is_none());
+    assert_eq!(custom.bands.to_vec(), fixture.bands);
+    assert_eq!(custom.visible_bands().to_vec(), fixture.visible_bands);
+
+    // The restored state is the state found on connect, so the device was left
+    // as found.
+    let restored_state = fixture_state(&fixture.restored_frame_hex);
+    assert_eq!(restored_state, before_state);
+}
+
 #[test]
 fn a3949_equalizer_is_explicitly_deferred() {
     // A3949 equalizer support is deliberately out of this slice: no capability,
