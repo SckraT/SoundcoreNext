@@ -29,13 +29,14 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 | A3062 real single-battery state | parsed, one battery tile, firmware 04.39, masked serial |
 | A3062 sound modes | parsed at state body offset 69 and writable through a measured `06 81` body (0 = noise canceling, 1 = transparency, 2 = normal); sanitized fixture per mode |
 | A3062 equalizer | parsed at state body offset 23 (preset id + ten bands); the page shows the eight visible bands (100 Hz…12.8 kHz, −12.0…+13.4 dB), the 22 built-in presets adapted from OpenSCL4 and editable custom bands (fields, sliders, Reset), writes one measured `03 87` preset or custom (`0xFEFE`) body and re-reads `01 01`; sanitized post-write fixtures |
+| A3062 saved equalizer profiles | named profiles of the eight visible bands, saved/applied/deleted on the Equalizer page; applied through one measured `03 87` custom body and a `01 01` re-poll; persisted in `%APPDATA%\OpenSCL4\equalizer-profiles.json` (schema v1, atomic write) and reloaded at startup; duplicate/empty names and out-of-range bands rejected; import/export, legacy migration and A3949 profiles deferred |
 | A3949 equalizer | deliberately deferred: the committed A3949 state carries an equalizer block at body 32..44, but its write body is unverified, so the page is hidden and no `03 87` is sent |
 | A3954 100-step state | synthetic test, battery 100/75 |
 | Other single-battery layouts | intentionally unimplemented (`UnsupportedLayout`) |
 | TLV D1203 | not started |
 | Diagnostics | read-only probes, session manifest, serial/MAC redaction, ZIP export |
 | Windows session/transport | session requests `01 01`, parses the answer and writes the measured A3062 `06 81` sound-mode and `03 87` equalizer frames; the Windows RFCOMM transport lists paired devices and connects by vendor UUID with an SPP fallback |
-| Desktop (OpenSCL4 2.0) | OpenSCL4 Slint shell vendored under GPL-3.0; Add Device populated from the 39-model catalog; real paired Soundcore devices connect over Windows RFCOMM and Overview shows their battery (P20i A3949 and Space One Pro A3062 verified on hardware); the Space One Pro also gets the Sound mode and Equalizer pages |
+| Desktop (OpenSCL4 2.0) | OpenSCL4 Slint shell vendored under GPL-3.0; Add Device populated from the 39-model catalog; real paired Soundcore devices connect over Windows RFCOMM and Overview shows their battery (P20i A3949 and Space One Pro A3062 verified on hardware); the Space One Pro also gets the Sound mode and Equalizer pages, editable custom bands and saved equalizer profiles that persist across restarts |
 | Android UI | not started |
 
 ## Build and test
@@ -73,12 +74,13 @@ core/
   crates/
     protocol/             # framing, checksum, request builders
     models/               # registry, catalog taxonomy and state parsers
+    profiles/             # saved equalizer profile model, validation and schema v1
     session/              # transport trait, frame assembly, state polling
     diagnostics/          # read-only probes and session manifest
 android/                  # Kotlin/Compose app (next)
 desktop/                  # Slint shell vendored from OpenSCL4 (GPL-3.0)
   src/main.rs             # shell wiring: window state and Add Device callbacks
-  src/controller.rs       # UI actions, Bluetooth workers and battery mapping
+  src/controller.rs       # UI actions, Bluetooth workers, battery mapping and saved profiles
   src/catalog_adapter.rs  # core catalog -> Add Device models, chips and art
   src/transport_windows.rs # paired devices, SDP services and RFCOMM transport
   ui/                     # vendored OpenSCL4 Slint tree, not edited
@@ -88,10 +90,12 @@ desktop/                  # Slint shell vendored from OpenSCL4 (GPL-3.0)
   windows-sound-modes/    # spec and tickets for the Windows sound-modes slice
   windows-eq-presets/     # spec and tickets for the Windows equalizer-presets slice
   windows-eq-custom/      # spec and tickets for the Windows custom-equalizer slice
+  windows-eq-profiles/    # spec and tickets for the Windows saved-equalizer-profiles slice
 ```
 
 The desktop crate depends on `core/crates/models` and `core/crates/session` by
-path (`soundcore-models`, `soundcore-session`); its tests also use
+path (`soundcore-models`, `soundcore-session`) and on `core/crates/profiles`
+(`soundcore-profiles`) for the saved-profile model; its tests also use
 `soundcore-protocol` for the frame checksum, and the diagnostics crate stays
 core-side.
 
