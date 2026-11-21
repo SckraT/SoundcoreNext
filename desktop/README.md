@@ -54,25 +54,46 @@ layout, components, pages, icons, fonts and art.
   last re-poll) and then re-reads the `01 01` state, so the chart, the name tag
   (“Your own settings”) and the fields follow the device. Reset writes a flat
   custom curve. Built-in preset chips still work and switch the device away
-  from a custom curve and back. Saved profiles, import/export and HearID stay
-  out of scope and their vendored controls stay hidden.
+  from a custom curve and back.
+- **Saved equalizer profiles** are implemented for the editable A3062 page: the
+  vendored **My profiles** panel and its **Save profile** dialog, row list and
+  delete confirmation are wired. Saving stores the eight current bands under a
+  name; a saved row shows the profile's curve thumbnail, “Bands: 8” and an
+  **Applied** tag while the device's bands are exactly the profile's. Clicking a
+  row applies it as one custom `03 87` frame (`0xFEFE` and the profile's eight
+  bands) followed by a `01 01` re-poll, so the chart, fields and Applied tag
+  follow the device. The row menu's **Delete** removes the profile after the
+  confirmation dialog. Profiles persist across restarts in
+  `%APPDATA%\OpenSCL4\equalizer-profiles.json` (schema v1, written atomically
+  through a temporary file and a rename); the file is loaded at startup, and a
+  missing, unreadable or invalid document starts empty and is logged to stderr
+  instead of crashing. A duplicate name asks before replacing, an empty or
+  whitespace-only name is rejected with a dialog message, and out-of-range bands
+  are rejected by the core model before they can be stored.
+- Import/export file or clipboard transfer, legacy migration and HearID stay out
+  of scope. The vendored **Import and export** panel is visible but inert: no
+  file or clipboard action is wired, its buttons do nothing, the export
+  selection count stays `0` and no transfer note ever appears; the legacy
+  migration banner stays hidden.
 - The P20i (A3949) equalizer is deliberately deferred in this slice: the
   committed A3949 state carries an equalizer block at body 32..44, but no A3949
   `03 87` write body is verified, so the page stays hidden and no equalizer
-  frame is sent for that model.
+  frame is sent for that model — the P20i therefore also has no saved-profile
+  panel and no profile writes.
 - Connecting shows “Connecting…”, and Bluetooth off, not found, timeout and
   unsupported-layout failures each show a readable message instead of a crash.
   Cancel and Retry are wired. The vendored UI has no disconnect control; the
   controller's `disconnect` action clears the current device and returns to My
   Devices.
-- Only the `01 01` state request, the `06 81` sound-mode frame and the `03 87`
-  equalizer frames (the built-in preset and the custom bands) are written to the
-  device; pairing stays in Windows settings and the app never changes it.
+- The only device writes are the `01 01` state request, the `06 81` sound-mode
+  frame and the `03 87` equalizer frames (a built-in preset, the custom bands,
+  and an applied saved profile's custom curve); the only app file the shell
+  writes is the saved-profile document above. Pairing stays in Windows settings
+  and the app never changes it.
 - ANC strength, wind noise, adaptive ANC and the 1-to-11 strength scale are not
   part of this slice, so the Sound mode page shows only the three mode tiles.
-  Saved equalizer profiles, import/export, the profile list and HearID are out
-  of scope as well: those vendored controls keep their empty state and no
-  profile is saved, listed or read.
+  Import/export, legacy migration and HearID are out of scope as well: their
+  vendored controls keep their empty or inert state, as described above.
 - Pages other than Overview, My Devices, Sound mode and (for an A3062) the
   Equalizer still open in their placeholder state, which is expected: this shell
   does not implement controls, comfort or connections.
@@ -103,9 +124,27 @@ catalog preset chips are shown. A typed custom curve (+4.0 dB at 100 Hz,
 −4.0 dB at 800 Hz) was committed and re-read from the device, so the name tag
 reads “Your own settings” and the fields hold the re-polled values. Typing a
 value or letting go of a drag writes one `03 87` custom frame (`0xFEFE`), then
-re-reads the `01 01` state; Reset writes a flat custom curve. Saved profiles,
-import/export and HearID are out of scope and hidden. No Bluetooth address or
-serial number appears on this page or in the capture.
+re-reads the `01 01` state; Reset writes a flat custom curve. That capture was
+taken before the saved-profile panel was wired; the current page also shows the
+My profiles panel and its Save profile button (see the next capture). Import,
+export and HearID stay out of scope. No Bluetooth address or serial number
+appears on this page or in the capture.
+
+![Saved equalizer profiles with a connected Space One Pro](equalizer-profiles.png)
+
+The Equalizer page after restarting the app on Windows: a paired **soundcore
+Space One Pro** (A3062) reconnected over RFCOMM, and the saved profile
+**Test curve** was loaded from `%APPDATA%\OpenSCL4\equalizer-profiles.json` and
+listed in the **My profiles** panel with its curve thumbnail, “Bands: 8” and the
+**Applied** tag (the device reported the same eight bands, so the profile is in
+effect). This window was driven through the Windows accessibility tree: the
++4.0 / +2.0 / −4.0 dB curve was saved as “Test curve”, the row was clicked to
+apply it as one `03 87` custom frame and a `01 01` re-poll, the app was closed
+and restarted, and the profile came back from the file. Deleting it afterwards
+through the row menu and the confirmation dialog removed the row and left `[]`
+in the document. The vendored **Import and export** panel at the bottom is
+visible but inert in this slice. No Bluetooth address or serial number appears
+on this page or in the capture.
 
 ![Add device](add-device.png)
 
