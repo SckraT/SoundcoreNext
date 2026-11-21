@@ -68,7 +68,8 @@ core/
     a3949-state.json      # real capture, serial masked, checksum recalculated
     a3062-state.json      # real capture, serial masked, checksum recalculated
     a3062-sound-modes.json # real captures, one per sound mode, serial masked
-    a3062-eq-presets.json # real captures, one per switched preset, serial masked
+    a3062-eq-presets.json  # real captures, one per switched preset, serial masked
+    a3062-eq-custom.json   # real custom-write captures (found/custom/restored), serial masked
   crates/
     protocol/             # framing, checksum, request builders
     models/               # registry, catalog taxonomy and state parsers
@@ -86,11 +87,13 @@ desktop/                  # Slint shell vendored from OpenSCL4 (GPL-3.0)
   windows-mvp/            # spec and tickets for the Windows MVP
   windows-sound-modes/    # spec and tickets for the Windows sound-modes slice
   windows-eq-presets/     # spec and tickets for the Windows equalizer-presets slice
+  windows-eq-custom/      # spec and tickets for the Windows custom-equalizer slice
 ```
 
 The desktop crate depends on `core/crates/models` and `core/crates/session` by
-path (`soundcore-models`, `soundcore-session`); the protocol and diagnostics
-crates stay core-side.
+path (`soundcore-models`, `soundcore-session`); its tests also use
+`soundcore-protocol` for the frame checksum, and the diagnostics crate stays
+core-side.
 
 ## Boundaries
 

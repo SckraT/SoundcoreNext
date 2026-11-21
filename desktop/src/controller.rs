@@ -18,7 +18,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
-use soundcore_models::{DeviceModel, DeviceState, EqualizerPreset, EqualizerState, SoundMode};
+use soundcore_models::{
+    DeviceModel, DeviceState, EqualizerPreset, EqualizerState, SoundMode, VISIBLE_EQ_BANDS,
+};
 use soundcore_session::{DeviceSession, SessionError, Transport};
 use windows::core::GUID;
 
@@ -181,21 +183,18 @@ pub fn sound_pages(sound_mode: Option<SoundMode>, has_equalizer: bool) -> Vec<Pa
     pages
 }
 
-/// The A3062 equalizer range in device units (dB×10): -12.0..+13.4 dB. It is
-/// the measured band-byte range 0..=254 minus the 120 offset the state uses.
-pub const EQ_MIN: i16 = -120;
+/// The A3062 equalizer range in device units (dB×10): -12.0..+13.4 dB. The
+/// measured band range is defined once in `soundcore-models`
+/// (`EQ_BAND_MIN`/`EQ_BAND_MAX`) and is the same clamp the core's `03 87` body
+/// builder applies to a band byte, so the page cannot show a range the device
+/// encodes differently.
+pub const EQ_MIN: i16 = soundcore_models::EQ_BAND_MIN;
 /// See [`EQ_MIN`].
-pub const EQ_MAX: i16 = 134;
-
-/// The number of A3062 bands the vendored page shows. The state carries ten
-/// band bytes, but the last two are fixed by every preset and not adjustable
-/// (0 dB and -12.0 dB): OpenSCL4's measured A3062 equalizer also exposes eight
-/// visible bands, and the Soundcore app's own X labels are these eight.
-pub const EQ_VISIBLE_BANDS: usize = 8;
+pub const EQ_MAX: i16 = soundcore_models::EQ_BAND_MAX;
 
 /// The measured frequency of each visible A3062 band in hertz, as OpenSCL4's
 /// A3062 equalizer settings and the Soundcore app's equalizer chart label them.
-pub const EQ_BAND_HZ: [u16; EQ_VISIBLE_BANDS] = [100, 200, 400, 800, 1600, 3200, 6400, 12800];
+pub const EQ_BAND_HZ: [u16; VISIBLE_EQ_BANDS] = [100, 200, 400, 800, 1600, 3200, 6400, 12800];
 
 /// The `AppState.eq-presets` chips of a model: one per built-in preset, in the
 /// catalog's display order. The chip value is the decimal preset id the state
@@ -482,7 +481,7 @@ impl EqualizerDisplay {
             return Self::default();
         };
         let editable = model
-            .and_then(|model| model.custom_equalizer_body(equalizer, [0; EQ_VISIBLE_BANDS]))
+            .and_then(|model| model.custom_equalizer_body(equalizer, [0; VISIBLE_EQ_BANDS]))
             .is_some();
         let presets = preset_options(model);
         let bands = equalizer_bands(equalizer);
@@ -516,7 +515,7 @@ fn equalizer_values(equalizer: &EqualizerState) -> Vec<i16> {
     equalizer
         .bands
         .iter()
-        .take(EQ_VISIBLE_BANDS)
+        .take(VISIBLE_EQ_BANDS)
         .copied()
         .collect()
 }
@@ -583,18 +582,14 @@ impl EqPage for AppState<'_> {
 trait BandWriter {
     /// Queues `bands`; false when the worker is gone (a failed or stopped
     /// connection), so the page can say why nothing was written.
-    fn write_curve(&self, bands: [i16; EQ_VISIBLE_BANDS]) -> bool;
+    fn write_curve(&self, bands: [i16; VISIBLE_EQ_BANDS]) -> bool;
 }
 
 impl BandWriter for Inner {
-    fn write_curve(&self, bands: [i16; EQ_VISIBLE_BANDS]) -> bool {
-        let request = self.curve_change.get() + 1;
-        self.curve_change.set(request);
-        let command = DeviceCommand::WriteCustomCurve { request, bands };
-        self.commands
-            .borrow()
-            .as_ref()
-            .is_some_and(|sender| sender.send(command).is_ok())
+    fn write_curve(&self, bands: [i16; VISIBLE_EQ_BANDS]) -> bool {
+        self.send_queued(&self.curve_change, |request| {
+            DeviceCommand::WriteCustomCurve { request, bands }
+        })
     }
 }
 
@@ -627,7 +622,7 @@ fn answer_band_action(page: &impl EqPage, writer: &impl BandWriter, action: Band
             write_curve(page, writer, &values)
         }
         BandAction::Reset => {
-            let values = vec![0i16; EQ_VISIBLE_BANDS];
+            let values = vec![0i16; VISIBLE_EQ_BANDS];
             page.show_curve(&values);
             write_curve(page, writer, &values)
         }
@@ -637,7 +632,7 @@ fn answer_band_action(page: &impl EqPage, writer: &impl BandWriter, action: Band
 /// Queues the whole visible curve; a stopped worker becomes the readable error
 /// instead of a silent no-op.
 fn write_curve(page: &impl EqPage, writer: &impl BandWriter, values: &[i16]) -> bool {
-    let Ok(bands) = <[i16; EQ_VISIBLE_BANDS]>::try_from(values) else {
+    let Ok(bands) = <[i16; VISIBLE_EQ_BANDS]>::try_from(values) else {
         return false;
     };
     if writer.write_curve(bands) {
@@ -770,24 +765,36 @@ impl EqFailure {
         }
     }
 
+    /// The banner labels of a failed equalizer change: the preset wording and
+    /// the custom-band wording. They share one table so the two settings cannot
+    /// drift apart; [`Self::label`] and [`Self::bands_label`] pick one each.
+    fn labels(self) -> (&'static str, &'static str) {
+        match self {
+            Self::TimedOut => (
+                "Equalizer profile (no answer)",
+                "Equalizer bands (no answer)",
+            ),
+            Self::Disconnected => (
+                "Equalizer profile (connection lost)",
+                "Equalizer bands (connection lost)",
+            ),
+            Self::Unreadable => (
+                "Equalizer profile (unreadable answer)",
+                "Equalizer bands (unreadable answer)",
+            ),
+        }
+    }
+
     /// The `AppState.error-label` of a failed preset change; the vendored banner
     /// wraps it as "Could not change “{}”.".
     pub fn label(self) -> &'static str {
-        match self {
-            Self::TimedOut => "Equalizer profile (no answer)",
-            Self::Disconnected => "Equalizer profile (connection lost)",
-            Self::Unreadable => "Equalizer profile (unreadable answer)",
-        }
+        self.labels().0
     }
 
     /// The `AppState.error-label` of a failed custom-curve change, worded like
     /// [`Self::label`] but naming the bands that were being written.
     pub fn bands_label(self) -> &'static str {
-        match self {
-            Self::TimedOut => "Equalizer bands (no answer)",
-            Self::Disconnected => "Equalizer bands (connection lost)",
-            Self::Unreadable => "Equalizer bands (unreadable answer)",
-        }
+        self.labels().1
     }
 }
 
@@ -817,7 +824,7 @@ pub fn change_equalizer_preset<T: Transport>(
 pub fn change_custom_equalizer<T: Transport>(
     session: &mut DeviceSession<T>,
     current: &EqualizerState,
-    visible_bands: [i16; EQ_VISIBLE_BANDS],
+    visible_bands: [i16; VISIBLE_EQ_BANDS],
 ) -> Result<EqualizerState, EqFailure> {
     session
         .set_custom_equalizer(current, visible_bands)
@@ -1077,7 +1084,7 @@ enum DeviceCommand {
     /// `ChangeSoundMode` does.
     WriteCustomCurve {
         request: u64,
-        bands: [i16; EQ_VISIBLE_BANDS],
+        bands: [i16; VISIBLE_EQ_BANDS],
     },
 }
 
@@ -1211,6 +1218,19 @@ impl Inner {
         self.mode_change.set(0);
         self.preset_change.set(0);
         self.curve_change.set(0);
+    }
+
+    /// Queues one write on the device worker, carrying the next value of
+    /// `request` so a superseded result can be dropped. False when the worker is
+    /// gone (a failed or stopped connection), so the caller can say why nothing
+    /// was written.
+    fn send_queued(&self, request: &Cell<u64>, command: impl FnOnce(u64) -> DeviceCommand) -> bool {
+        let next = request.get() + 1;
+        request.set(next);
+        self.commands
+            .borrow()
+            .as_ref()
+            .is_some_and(|sender| sender.send(command(next)).is_ok())
     }
 }
 
@@ -2116,10 +2136,9 @@ fn apply_mode_outcome(
     }
 }
 
-/// Applies a finished equalizer preset change: the preset and read-only curve
-/// the device reports become the page's, or the error banner names the setting
-/// that failed. The preset catalog is kept; only the state-dependent fields
-/// change.
+/// Applies a finished equalizer preset change: the preset and curve the device
+/// reports become the page's, or the error banner names the setting that
+/// failed. The preset catalog is kept; only the state-dependent fields change.
 fn apply_preset_outcome(
     window: &AppWindow,
     inner: &Rc<Inner>,
@@ -2140,9 +2159,10 @@ fn apply_preset_outcome(
     }
 }
 
-/// Replaces the state-dependent Equalizer page fields with a re-read state:
-/// the current preset, its read-only bands and the curve. The catalog, range
-/// and page availability are unchanged by a preset write.
+/// Replaces the state-dependent Equalizer page fields with a re-read state: the
+/// current preset (the custom id when the device reports custom bands), its
+/// bands and the curve. The catalog, range and page availability are unchanged
+/// by a write.
 fn show_equalizer_state(state: &AppState<'_>, equalizer: &EqualizerState) {
     let bands = equalizer_bands(equalizer);
     let (chart_line, chart_area) = equalizer_chart(&equalizer_values(equalizer), EQ_MIN, EQ_MAX);
@@ -2176,14 +2196,9 @@ fn set_option(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, index: i3
     let Some(mode) = mode_for_index(index) else {
         return;
     };
-    let request = inner.mode_change.get() + 1;
-    inner.mode_change.set(request);
-    let command = DeviceCommand::ChangeSoundMode { request, mode };
-    let sent = inner
-        .commands
-        .borrow()
-        .as_ref()
-        .is_some_and(|sender| sender.send(command).is_ok());
+    let sent = inner.send_queued(&inner.mode_change, |request| {
+        DeviceCommand::ChangeSoundMode { request, mode }
+    });
     if !sent {
         // The worker of a previous failed change has closed the connection; the
         // banner's Retry reconnects.
@@ -2206,14 +2221,9 @@ fn select_equalizer_preset(window: &AppWindow, inner: &Rc<Inner>, value: &str) {
     let Some(preset_id) = selectable_preset_id(&presets, value) else {
         return;
     };
-    let request = inner.preset_change.get() + 1;
-    inner.preset_change.set(request);
-    let command = DeviceCommand::ChangeEqualizerPreset { request, preset_id };
-    let sent = inner
-        .commands
-        .borrow()
-        .as_ref()
-        .is_some_and(|sender| sender.send(command).is_ok());
+    let sent = inner.send_queued(&inner.preset_change, |request| {
+        DeviceCommand::ChangeEqualizerPreset { request, preset_id }
+    });
     if !sent {
         // The worker of a previous failed change has closed the connection; the
         // banner's Retry reconnects.
@@ -2821,7 +2831,7 @@ mod tests {
     fn equalizer_frame(body: &[u8]) -> Vec<u8> {
         let mut frame = hex("08 EE 00 00 00 03 87 3F 00");
         frame.extend_from_slice(body);
-        let checksum = frame.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+        let checksum = soundcore_protocol::checksum(&frame);
         frame.push(checksum);
         frame
     }
@@ -2832,6 +2842,17 @@ mod tests {
         captured_equalizer(&captured_before_custom_eq_frame())
     }
 
+    /// The inbound `01 01` frame header: prefix (5), command (2) and total
+    /// length (2). The state body starts after it.
+    const STATE_FRAME_HEADER_LEN: usize = soundcore_protocol::INBOUND_PREFIX.len() + 4;
+    /// The measured `01 01` body offsets of the A3062 equalizer block (ticket
+    /// 01): the preset id and the first of the ten band bytes.
+    const EQ_PRESET_OFFSET: usize = 23;
+    const EQ_BANDS_OFFSET: usize = 25;
+    /// The measured band-byte conversion: a state byte is `value + 120`, the
+    /// inverse of the core's exported `EQ_BAND_MIN`..=`EQ_BAND_MAX` range.
+    const BAND_BYTE_OFFSET: i16 = -soundcore_models::EQ_BAND_MIN;
+
     /// The `01 01` answer of a custom curve with `visible_bands`, built from the
     /// real capture frame of `base` by replacing its preset id and band bytes
     /// and recomputing the checksum.
@@ -2839,10 +2860,9 @@ mod tests {
     /// The measured state body holds the preset id at body offset 23 and the ten
     /// band bytes at 25; the body starts after the 9-byte frame header and the
     /// last frame byte is the checksum.
-    fn custom_state_frame(base: &[u8], visible_bands: [i16; EQ_VISIBLE_BANDS]) -> Vec<u8> {
-        const HEADER_LEN: usize = 9;
-        const PRESET_AT: usize = HEADER_LEN + 23;
-        const BANDS_AT: usize = HEADER_LEN + 25;
+    fn custom_state_frame(base: &[u8], visible_bands: [i16; VISIBLE_EQ_BANDS]) -> Vec<u8> {
+        const PRESET_AT: usize = STATE_FRAME_HEADER_LEN + EQ_PRESET_OFFSET;
+        const BANDS_AT: usize = STATE_FRAME_HEADER_LEN + EQ_BANDS_OFFSET;
         let mut frame = base.to_vec();
         frame[PRESET_AT..PRESET_AT + 2]
             .copy_from_slice(&soundcore_models::CUSTOM_EQUALIZER_PRESET_ID.to_le_bytes());
@@ -2851,12 +2871,11 @@ mod tests {
             .chain(soundcore_models::FIXED_EQ_BANDS)
             .collect();
         for (index, band) in bands.iter().enumerate() {
-            frame[BANDS_AT + index] = u8::try_from(band + 120).expect("a band byte is value + 120");
+            frame[BANDS_AT + index] =
+                u8::try_from(band + BAND_BYTE_OFFSET).expect("a band byte is value + 120");
         }
         let checksum_at = frame.len() - 1;
-        frame[checksum_at] = frame[..checksum_at]
-            .iter()
-            .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+        frame[checksum_at] = soundcore_protocol::checksum(&frame[..checksum_at]);
         frame
     }
 
@@ -3120,7 +3139,7 @@ mod tests {
     /// A writer that records the curves a band edit queues, in place of the
     /// device worker's command channel.
     struct RecordedWriter {
-        curves: RefCell<Vec<[i16; EQ_VISIBLE_BANDS]>>,
+        curves: RefCell<Vec<[i16; VISIBLE_EQ_BANDS]>>,
         connected: Cell<bool>,
     }
 
@@ -3134,7 +3153,7 @@ mod tests {
     }
 
     impl BandWriter for RecordedWriter {
-        fn write_curve(&self, bands: [i16; EQ_VISIBLE_BANDS]) -> bool {
+        fn write_curve(&self, bands: [i16; VISIBLE_EQ_BANDS]) -> bool {
             if !self.connected.get() {
                 return false;
             }
@@ -3145,7 +3164,7 @@ mod tests {
 
     #[test]
     fn a_preview_moves_the_page_without_a_curve_write() {
-        let page = RecordedPage::showing([0; EQ_VISIBLE_BANDS]);
+        let page = RecordedPage::showing([0; VISIBLE_EQ_BANDS]);
         let writer = RecordedWriter::default();
 
         let wrote = answer_band_action(
@@ -3172,7 +3191,7 @@ mod tests {
 
     #[test]
     fn a_commit_clamps_the_band_and_writes_the_whole_curve_once() {
-        let page = RecordedPage::showing([0; EQ_VISIBLE_BANDS]);
+        let page = RecordedPage::showing([0; VISIBLE_EQ_BANDS]);
         let writer = RecordedWriter::default();
 
         let wrote = answer_band_action(
@@ -3230,18 +3249,18 @@ mod tests {
         assert_eq!(writer.curves.borrow().len(), 1, "one flat custom curve");
         assert_eq!(
             writer.curves.borrow()[0],
-            [0; EQ_VISIBLE_BANDS],
+            [0; VISIBLE_EQ_BANDS],
             "every visible band is 0 dB"
         );
-        assert_eq!(*page.shown.borrow(), [0; EQ_VISIBLE_BANDS]);
+        assert_eq!(*page.shown.borrow(), [0; VISIBLE_EQ_BANDS]);
     }
 
     #[test]
     fn a_band_index_the_page_does_not_show_is_ignored() {
-        let page = RecordedPage::showing([0; EQ_VISIBLE_BANDS]);
+        let page = RecordedPage::showing([0; VISIBLE_EQ_BANDS]);
         let writer = RecordedWriter::default();
 
-        for index in [-1, EQ_VISIBLE_BANDS as i32, 100] {
+        for index in [-1, VISIBLE_EQ_BANDS as i32, 100] {
             for action in [
                 BandAction::Preview { index, value: 40 },
                 BandAction::Commit { index, value: 40 },
@@ -3258,7 +3277,7 @@ mod tests {
 
     #[test]
     fn a_stopped_worker_shows_the_readable_curve_error() {
-        let page = RecordedPage::showing([0; EQ_VISIBLE_BANDS]);
+        let page = RecordedPage::showing([0; VISIBLE_EQ_BANDS]);
         let writer = RecordedWriter::default();
         writer.connected.set(false);
 
@@ -3312,7 +3331,7 @@ mod tests {
     #[test]
     fn a_finished_curve_change_shows_the_reported_state_or_the_error() {
         let custom = custom_equalizer_state();
-        let page = RecordedPage::showing([0; EQ_VISIBLE_BANDS]);
+        let page = RecordedPage::showing([0; VISIBLE_EQ_BANDS]);
         let stopped = Cell::new(0);
         let stop = || stopped.set(stopped.get() + 1);
 
@@ -3502,7 +3521,7 @@ mod tests {
     fn the_chart_follows_the_band_values_inside_its_margins() {
         // The flat signature curve is a straight line: 0 dB sits slightly above
         // the middle, because the range is -12.0…+13.4 dB.
-        let flat = [0i16; EQ_VISIBLE_BANDS];
+        let flat = [0i16; VISIBLE_EQ_BANDS];
         let (line, area) = equalizer_chart(&flat, EQ_MIN, EQ_MAX);
         assert!(line.starts_with("M 37.5 104.9"), "{line}");
         assert!(line.ends_with("562.5 104.9"), "{line}");
@@ -3809,8 +3828,8 @@ mod tests {
 
         assert_eq!(reported.preset_id, 3);
         assert_eq!(
-            &reported.bands[..EQ_VISIBLE_BANDS],
-            &preset.bands[..EQ_VISIBLE_BANDS]
+            &reported.bands[..VISIBLE_EQ_BANDS],
+            &preset.bands[..VISIBLE_EQ_BANDS]
         );
         assert_eq!(
             transport.writes(),
@@ -3917,7 +3936,7 @@ mod tests {
         let transport = FakeTransport::failing(std::io::ErrorKind::TimedOut);
         let mut session = session_with("A3062", &transport);
 
-        let failure = change_custom_equalizer(&mut session, &current, [0; EQ_VISIBLE_BANDS])
+        let failure = change_custom_equalizer(&mut session, &current, [0; VISIBLE_EQ_BANDS])
             .expect_err("the device stays silent");
 
         assert_eq!(failure, EqFailure::TimedOut);
@@ -3935,7 +3954,7 @@ mod tests {
         let current = bass_reducer_equalizer();
         let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
         let expected_body = model
-            .custom_equalizer_body(&current, [0; EQ_VISIBLE_BANDS])
+            .custom_equalizer_body(&current, [0; VISIBLE_EQ_BANDS])
             .expect("the A3062 custom body");
         // The measured flat custom body: custom preset id, the eight 0 dB bands
         // and the two fixed bands, written in both band regions.
@@ -3948,15 +3967,15 @@ mod tests {
         assert_eq!(&expected_body[42..52], &expected_body[4..14]);
 
         let reset_answer =
-            custom_state_frame(&captured_eq_frame("Bass Reducer"), [0; EQ_VISIBLE_BANDS]);
+            custom_state_frame(&captured_eq_frame("Bass Reducer"), [0; VISIBLE_EQ_BANDS]);
         let transport = FakeTransport::scripted([reset_answer]);
         let mut session = session_with("A3062", &transport);
 
-        let reported = change_custom_equalizer(&mut session, &current, [0; EQ_VISIBLE_BANDS])
+        let reported = change_custom_equalizer(&mut session, &current, [0; VISIBLE_EQ_BANDS])
             .expect("the reset is accepted");
 
         assert!(reported.is_custom());
-        assert_eq!(reported.visible_bands(), [0; EQ_VISIBLE_BANDS]);
+        assert_eq!(reported.visible_bands(), [0; VISIBLE_EQ_BANDS]);
         assert_eq!(
             transport.writes(),
             vec![equalizer_frame(&expected_body), state_request()],
@@ -4665,7 +4684,7 @@ mod tests {
     fn wait_for_custom_curve(
         ui: &AppWindow,
         inner: &Rc<Inner>,
-        want: [i16; EQ_VISIBLE_BANDS],
+        want: [i16; VISIBLE_EQ_BANDS],
     ) -> Option<Vec<i32>> {
         let state = ui.global::<AppState>();
         let expected: Vec<i32> = want.iter().map(|value| i32::from(*value)).collect();
@@ -4815,7 +4834,7 @@ mod tests {
             .find(|preset| preset.id == initial_id)
         else {
             // A custom curve has no catalog entry and cannot be restored through
-            // the read-only preset chips, so do not change it.
+            // the preset chips, so do not change it.
             println!("  current preset id {initial_id} is custom; leaving the device as is");
             disconnect(&ui, &inner);
             return;
@@ -4973,7 +4992,7 @@ mod tests {
         );
         assert_eq!(
             initial_bands.len(),
-            EQ_VISIBLE_BANDS,
+            VISIBLE_EQ_BANDS,
             "the page shows every visible band"
         );
 
@@ -4984,7 +5003,7 @@ mod tests {
         // A typed value commits through the same path as a dragged one: the
         // first band goes to +4.0 dB and the re-poll reports a custom curve.
         type_band(&ui, 0, "4.0");
-        let mut typed: [i16; EQ_VISIBLE_BANDS] =
+        let mut typed: [i16; VISIBLE_EQ_BANDS] =
             initial_bands.clone().try_into().expect("eight bands");
         typed[0] = 40;
         let reported =
@@ -5029,7 +5048,7 @@ mod tests {
 
         // Reset writes the flat custom curve.
         ui.global::<Actions>().invoke_eq_reset();
-        let reset = wait_for_custom_curve(&ui, &inner, [0; EQ_VISIBLE_BANDS])
+        let reset = wait_for_custom_curve(&ui, &inner, [0; VISIBLE_EQ_BANDS])
             .expect("the flat curve is re-polled");
         println!("  eq-reset -> re-polled flat custom curve {reset:?}");
 
@@ -5056,7 +5075,7 @@ mod tests {
             target
                 .bands
                 .iter()
-                .take(EQ_VISIBLE_BANDS)
+                .take(VISIBLE_EQ_BANDS)
                 .map(|value| i32::from(*value))
                 .collect::<Vec<_>>()
         );
@@ -5082,7 +5101,7 @@ mod tests {
                 preview_band(&ui, index as i32, i32::from(*value));
             }
             commit_band(&ui, 0, i32::from(initial_bands[0]));
-            let restored: [i16; EQ_VISIBLE_BANDS] =
+            let restored: [i16; VISIBLE_EQ_BANDS] =
                 initial_bands.clone().try_into().expect("eight bands");
             let reported = wait_for_custom_curve(&ui, &inner, restored)
                 .expect("the custom curve found on connect is restored");
