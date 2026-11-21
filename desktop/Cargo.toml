@@ -7,6 +7,9 @@ license = "GPL-3.0-or-later"
 [dependencies]
 slint = "1.18"
 soundcore-models = { path = "../core/crates/models" }
+# The pure saved-profile model (name + eight bands, validation, JSON schema v1);
+# the file IO lives in the controller.
+soundcore-profiles = { path = "../core/crates/profiles" }
 soundcore-session = { path = "../core/crates/session" }
 windows = { version = "0.62", features = [
     "Win32_Devices_Bluetooth",
