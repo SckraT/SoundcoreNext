@@ -10,7 +10,7 @@
 //! The TLV D1203 layout stays unimplemented: returning `UnsupportedLayout` is
 //! better than inventing offsets.
 
-use soundcore_protocol::{Command, Frame, parse};
+use soundcore_protocol::{Command, Direction, Frame, encode, parse};
 
 pub mod catalog;
 
@@ -338,6 +338,352 @@ pub struct EqualizerCapability {
 /// unknown bytes after the bands to the end of the favorite music genre.
 const HEAR_ID_BLOCK_LEN: usize = 28;
 
+/// A measured A3062 double-press action.
+///
+/// OpenSCL4 registers one action for this model: `7`, BassUp. The A3062 `01 01`
+/// state and the `04 81` command use [`NO_BUTTON_ACTION`] when the double press
+/// is disabled, which is not an action variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonAction {
+    BassUp,
+}
+
+/// The double-press body byte that means "no action" (`0x0F` in OpenSCL4's
+/// A3062 `set_button_double_press_action`).
+pub const NO_BUTTON_ACTION: u8 = 0x0F;
+
+impl ButtonAction {
+    /// The action's `04 81` body byte.
+    pub const fn value(self) -> u8 {
+        match self {
+            Self::BassUp => 7,
+        }
+    }
+
+    /// The action a byte names, or `None` for any other byte, including
+    /// [`NO_BUTTON_ACTION`].
+    pub const fn from_value(value: u8) -> Option<Self> {
+        match value {
+            7 => Some(Self::BassUp),
+            _ => None,
+        }
+    }
+}
+
+/// The ambient-sound modes the button cycles through: state body byte 68 and
+/// the one-byte `06 82` command body.
+///
+/// Bit 0 is noise canceling, bit 1 transparency and bit 2 normal, as in
+/// OpenSCL4's A3062 parser. Bits 3..7 are not part of the cycle: they are
+/// ignored on read and written as zero, exactly as OpenSCL4 parses and
+/// serializes the byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AmbientSoundModeCycle {
+    pub noise_canceling: bool,
+    pub transparency: bool,
+    pub normal: bool,
+}
+
+impl AmbientSoundModeCycle {
+    const NOISE_CANCELING_BIT: u8 = 1 << 0;
+    const TRANSPARENCY_BIT: u8 = 1 << 1;
+    const NORMAL_BIT: u8 = 1 << 2;
+
+    /// The three cycle bits of a state byte; bits 3..7 are ignored.
+    pub const fn from_byte(byte: u8) -> Self {
+        Self {
+            noise_canceling: byte & Self::NOISE_CANCELING_BIT != 0,
+            transparency: byte & Self::TRANSPARENCY_BIT != 0,
+            normal: byte & Self::NORMAL_BIT != 0,
+        }
+    }
+
+    /// The `06 82` body byte for this cycle.
+    pub const fn byte(self) -> u8 {
+        let mut byte = 0;
+        if self.noise_canceling {
+            byte |= Self::NOISE_CANCELING_BIT;
+        }
+        if self.transparency {
+            byte |= Self::TRANSPARENCY_BIT;
+        }
+        if self.normal {
+            byte |= Self::NORMAL_BIT;
+        }
+        byte
+    }
+}
+
+/// One of the four measured A3062 auto-power-off durations.
+///
+/// The state byte and the `01 86` body carry an index `0..=3`; OpenSCL4
+/// registers the A3062 durations in half-hour increments, so the index names
+/// 30, 60, 90 or 120 minutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoPowerOffDuration {
+    ThirtyMinutes,
+    SixtyMinutes,
+    NinetyMinutes,
+    OneHundredTwentyMinutes,
+}
+
+impl AutoPowerOffDuration {
+    /// Every duration, in index order.
+    pub const ALL: [Self; 4] = [
+        Self::ThirtyMinutes,
+        Self::SixtyMinutes,
+        Self::NinetyMinutes,
+        Self::OneHundredTwentyMinutes,
+    ];
+
+    /// The duration's state and `01 86` body index, `0..=3`.
+    pub const fn index(self) -> u8 {
+        match self {
+            Self::ThirtyMinutes => 0,
+            Self::SixtyMinutes => 1,
+            Self::NinetyMinutes => 2,
+            Self::OneHundredTwentyMinutes => 3,
+        }
+    }
+
+    /// The duration an index names, or `None` for an index outside `0..=3`.
+    pub const fn from_index(index: u8) -> Option<Self> {
+        match index {
+            0 => Some(Self::ThirtyMinutes),
+            1 => Some(Self::SixtyMinutes),
+            2 => Some(Self::NinetyMinutes),
+            3 => Some(Self::OneHundredTwentyMinutes),
+            _ => None,
+        }
+    }
+
+    /// The duration in minutes.
+    pub const fn minutes(self) -> u16 {
+        match self {
+            Self::ThirtyMinutes => 30,
+            Self::SixtyMinutes => 60,
+            Self::NinetyMinutes => 90,
+            Self::OneHundredTwentyMinutes => 120,
+        }
+    }
+}
+
+/// The A3062 auto-power-off state and `01 86` body: whether it is enabled and
+/// the duration to use when it is.
+///
+/// The duration is kept while the feature is disabled, so switching it back on
+/// restores the last duration; the measured capture reports enabled and
+/// 60 minutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoPowerOff {
+    pub enabled: bool,
+    pub duration: AutoPowerOffDuration,
+}
+
+/// A validated A3062 limit-high-volume dB limit: `75..=100` in `5` dB steps.
+///
+/// The state byte and the second `20 82` body byte are the dB value itself; a
+/// value outside the measured range or between steps cannot be represented,
+/// because this type is the only way to build the write body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DbLimit(u8);
+
+impl DbLimit {
+    /// The lowest measured limit, 75 dB.
+    pub const MIN: u8 = 75;
+    /// The highest measured limit, 100 dB.
+    pub const MAX: u8 = 100;
+    /// The measured step between limits, 5 dB.
+    pub const STEP: u8 = 5;
+
+    /// The limit a value names, or `None` when it is outside
+    /// [`Self::MIN`]..=[`Self::MAX`] or not a multiple of [`Self::STEP`].
+    pub const fn new(value: u8) -> Option<Self> {
+        if value < Self::MIN || value > Self::MAX {
+            return None;
+        }
+        if !value.is_multiple_of(Self::STEP) {
+            return None;
+        }
+        Some(Self(value))
+    }
+
+    /// The dB value, in the range [`Self::MIN`]..=[`Self::MAX`].
+    pub const fn value(self) -> u8 {
+        self.0
+    }
+}
+
+/// How often the A3062 re-reads the ambient volume while limiting high volume:
+/// state body byte 84 and the one-byte `20 81` body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecibelReadingRefreshRate {
+    RealTime,
+    TenSeconds,
+    OneMinute,
+}
+
+impl DecibelReadingRefreshRate {
+    /// Every rate, in value order.
+    pub const ALL: [Self; 3] = [Self::RealTime, Self::TenSeconds, Self::OneMinute];
+
+    /// The state and `20 81` body value, `0`, `1` or `2`.
+    pub const fn value(self) -> u8 {
+        match self {
+            Self::RealTime => 0,
+            Self::TenSeconds => 1,
+            Self::OneMinute => 2,
+        }
+    }
+
+    /// The rate a value names, or `None` for a value outside `0..=2`.
+    pub const fn from_value(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::RealTime),
+            1 => Some(Self::TenSeconds),
+            2 => Some(Self::OneMinute),
+            _ => None,
+        }
+    }
+}
+
+/// The A3062 limit-high-volume state: enabled, dB limit and refresh rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimitHighVolume {
+    pub enabled: bool,
+    pub db_limit: DbLimit,
+    pub refresh_rate: DecibelReadingRefreshRate,
+}
+
+/// The remaining settings of the A3062, parsed from `01 01` body 67..87.
+///
+/// | body offsets | field |
+/// |---:|---|
+/// | 67 | button double press: `7` BassUp, [`NO_BUTTON_ACTION`] none |
+/// | 68 | ambient sound mode cycle bits |
+/// | 76 | low battery prompt |
+/// | 77 | Dolby audio |
+/// | 78 | LDAC |
+/// | 79 | dual connections |
+/// | 80..82 | auto power off: enabled, duration index |
+/// | 82..85 | limit high volume: enabled, dB, refresh rate |
+/// | 85 | side tone |
+/// | 86 | voice prompt |
+///
+/// Every byte here is a flag, an enum value or a validated range; the parser
+/// rejects a closed enum's unknown value rather than inventing a default. The
+/// measured values are the same in every committed A3062 capture.
+///
+/// Writes are [`SettingCommand`]s, because most of these settings have their own
+/// command and only the enable flag and the value travel together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct A3062Settings {
+    /// The double-press action; `None` when the button does nothing.
+    pub button_double_press: Option<ButtonAction>,
+    /// The modes the button cycles through.
+    pub ambient_sound_mode_cycle: AmbientSoundModeCycle,
+    /// The low-battery voice prompt.
+    pub low_battery_prompt: bool,
+    /// Dolby audio processing.
+    pub dolby_audio: bool,
+    /// LDAC, available only in the `01 01` state; a write is confirmed by a
+    /// separate `01 7F` notification.
+    pub ldac: bool,
+    /// Whether a second device may be connected at the same time.
+    pub dual_connections: bool,
+    /// Auto power off, enabled and duration.
+    pub auto_power_off: AutoPowerOff,
+    /// Limit high volume, enabled, dB limit and refresh rate.
+    pub limit_high_volume: LimitHighVolume,
+    /// Side tone.
+    pub side_tone: bool,
+    /// The voice prompt (A3062 uses the `01 AE` command for it).
+    pub voice_prompt: bool,
+}
+
+/// The measured settings block of a model whose remaining settings this slice
+/// implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsCapability {
+    /// Body offset of the first settings byte in the `01 01` state response
+    /// (the button double press; body 67 on the A3062).
+    pub state_offset: usize,
+}
+
+/// One settings write: a validated value plus the exact command and body that
+/// carry it to an A3062.
+///
+/// Every variant is built from validated parts ([`DbLimit`],
+/// [`AutoPowerOffDuration`], [`DecibelReadingRefreshRate`], [`ButtonAction`]),
+/// so an out-of-range value cannot be represented. Turn one into a complete
+/// outbound frame with [`DeviceModel::setting_frame`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingCommand {
+    /// `04 81` body `00 00 action`; `None` writes [`NO_BUTTON_ACTION`].
+    ButtonDoublePress(Option<ButtonAction>),
+    /// `06 82` body `[bits]`.
+    AmbientSoundModeCycle(AmbientSoundModeCycle),
+    /// `10 82` body `[on]`.
+    LowBatteryPrompt(bool),
+    /// `02 86` body `[on]`.
+    DolbyAudio(bool),
+    /// `01 FF` body `[on]`; the device confirms with an `01 7F` notification.
+    Ldac(bool),
+    /// `0B 84` body `[on]`.
+    DualConnections(bool),
+    /// `01 86` body `[enabled, index]`.
+    AutoPowerOff(AutoPowerOff),
+    /// `20 82` body `[enabled, dB]`.
+    LimitHighVolume { enabled: bool, db_limit: DbLimit },
+    /// `20 81` body `[0/1/2]`.
+    LimitHighVolumeRefreshRate(DecibelReadingRefreshRate),
+    /// `01 84` body `[on]`.
+    SideTone(bool),
+    /// `01 AE` body `[on]`; the A3062-specific voice prompt command.
+    VoicePrompt(bool),
+}
+
+impl SettingCommand {
+    /// The measured command that carries this setting.
+    pub const fn command(self) -> Command {
+        match self {
+            Self::ButtonDoublePress(_) => Command::new(0x04, 0x81),
+            Self::AmbientSoundModeCycle(_) => Command::new(0x06, 0x82),
+            Self::LowBatteryPrompt(_) => Command::new(0x10, 0x82),
+            Self::DolbyAudio(_) => Command::new(0x02, 0x86),
+            Self::Ldac(_) => Command::new(0x01, 0xFF),
+            Self::DualConnections(_) => Command::new(0x0B, 0x84),
+            Self::AutoPowerOff(_) => Command::new(0x01, 0x86),
+            Self::LimitHighVolume { .. } => Command::new(0x20, 0x82),
+            Self::LimitHighVolumeRefreshRate(_) => Command::new(0x20, 0x81),
+            Self::SideTone(_) => Command::new(0x01, 0x84),
+            Self::VoicePrompt(_) => Command::new(0x01, 0xAE),
+        }
+    }
+
+    /// The exact outbound body for this setting.
+    pub fn body(self) -> Vec<u8> {
+        match self {
+            Self::ButtonDoublePress(action) => {
+                vec![0, 0, action.map_or(NO_BUTTON_ACTION, ButtonAction::value)]
+            }
+            Self::AmbientSoundModeCycle(cycle) => vec![cycle.byte()],
+            Self::LowBatteryPrompt(on)
+            | Self::DolbyAudio(on)
+            | Self::Ldac(on)
+            | Self::DualConnections(on)
+            | Self::SideTone(on)
+            | Self::VoicePrompt(on) => vec![on.into()],
+            Self::AutoPowerOff(auto_power_off) => vec![
+                auto_power_off.enabled.into(),
+                auto_power_off.duration.index(),
+            ],
+            Self::LimitHighVolume { enabled, db_limit } => vec![enabled.into(), db_limit.value()],
+            Self::LimitHighVolumeRefreshRate(refresh_rate) => vec![refresh_rate.value()],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostDevice {
     Left,
@@ -363,7 +709,7 @@ pub struct FirmwareVersions {
 ///
 /// A3062 answers `01 01` with one battery value instead of the left/right pair
 /// of the TWS layout. The measured body holds, in order: the raw battery step,
-/// one reserved byte, a single firmware string (`MM.mm` ASCII) and the serial.
+/// the charging flag, a single firmware string (`MM.mm` ASCII) and the serial.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SingleBatteryState {
     /// Raw battery step, at most [`BatteryScale::maximum`].
@@ -373,10 +719,11 @@ pub struct SingleBatteryState {
     pub scale: BatteryScale,
     /// The charging flag, when the state frame carries one.
     ///
-    /// The measured A3062 `01 01` body has no charging byte: charging is
-    /// reported by a separate `01 04` notification, which this state poll does
-    /// not request. The parser therefore leaves this `None` instead of
-    /// inventing `false`.
+    /// The measured A3062 `01 01` body has it at byte 1: `1` means charging and
+    /// any other value means not charging, which is how OpenSCL4's A3062
+    /// `SingleBattery` parser reads it. Every committed capture carries `0xFF`
+    /// there, so they report not charging. Charging changes also arrive as a
+    /// separate `01 04` notification, which this state poll does not read.
     pub charging: Option<bool>,
     /// The single firmware string, when the body holds a valid `MM.mm` pair.
     pub firmware: Option<String>,
@@ -402,6 +749,9 @@ pub struct DeviceState {
     /// equalizer this slice does not implement (for example the P20i A3949,
     /// whose equalizer block is known but deliberately deferred).
     pub equalizer: Option<EqualizerState>,
+    /// The measured remaining settings; `None` for models whose settings this
+    /// slice does not implement (the A3949 and every other model so far).
+    pub settings: Option<A3062Settings>,
     /// The two TWS firmware versions. Single-battery layouts report their one
     /// firmware string in [`SingleBatteryState::firmware`] instead.
     pub firmware: FirmwareVersions,
@@ -431,6 +781,9 @@ pub struct DeviceModel {
     /// its state block is known (body 32..44) but its write body is unverified,
     /// so it has no capability, page or `03 87` frame yet.
     pub equalizer: Option<EqualizerCapability>,
+    /// The measured remaining-settings block, or `None` when this slice does
+    /// not implement the model's settings (the whole catalog except A3062).
+    pub settings: Option<SettingsCapability>,
 }
 
 impl DeviceModel {
@@ -444,6 +797,21 @@ impl DeviceModel {
         let capability = self.sound_mode?;
         let [a, b, c, d, e] = capability.command_tail;
         Some([mode.value(), a, b, c, d, e])
+    }
+
+    /// The exact outbound frame for one settings write, or `None` when this
+    /// model has no measured settings block (for example the A3949).
+    ///
+    /// The frame is built in one step from [`SettingCommand::command`] and
+    /// [`SettingCommand::body`]; a caller writes it once and re-polls `01 01`,
+    /// because the app does not wait for the empty same-command acknowledgement.
+    pub fn setting_frame(self, setting: SettingCommand) -> Option<Vec<u8>> {
+        self.settings?;
+        Some(encode(
+            Direction::Outbound,
+            setting.command(),
+            &setting.body(),
+        ))
     }
 
     /// The built-in equalizer presets of this model, in display order; empty
@@ -562,6 +930,7 @@ pub const A3949: DeviceModel = DeviceModel {
     layout: Layout::TwsCmm2,
     sound_mode: None,
     equalizer: None,
+    settings: None,
 };
 
 pub const A3947: DeviceModel = DeviceModel {
@@ -571,6 +940,7 @@ pub const A3947: DeviceModel = DeviceModel {
     layout: Layout::TwsCmm2,
     sound_mode: None,
     equalizer: None,
+    settings: None,
 };
 
 pub const A3954: DeviceModel = DeviceModel {
@@ -580,6 +950,7 @@ pub const A3954: DeviceModel = DeviceModel {
     layout: Layout::TwsCmm2,
     sound_mode: None,
     equalizer: None,
+    settings: None,
 };
 
 pub const A3035: DeviceModel = DeviceModel {
@@ -589,6 +960,7 @@ pub const A3035: DeviceModel = DeviceModel {
     layout: Layout::SingleCmm2,
     sound_mode: None,
     equalizer: None,
+    settings: None,
 };
 
 pub const A3040: DeviceModel = DeviceModel {
@@ -598,6 +970,7 @@ pub const A3040: DeviceModel = DeviceModel {
     layout: Layout::SingleCmm2,
     sound_mode: None,
     equalizer: None,
+    settings: None,
 };
 
 pub const A3062: DeviceModel = DeviceModel {
@@ -617,6 +990,10 @@ pub const A3062: DeviceModel = DeviceModel {
         state_offset: 23,
         band_count: EQ_BANDS,
     }),
+    // Measured on the real device on 2026-11-21 and copied from OpenSCL4's
+    // A3062 state parser: the settings block starts at body byte 67 (the
+    // button double press) and runs through byte 86 (the voice prompt).
+    settings: Some(SettingsCapability { state_offset: 67 }),
 };
 
 pub const SUPPORTED_MODELS: &[DeviceModel] = &[A3035, A3040, A3062, A3947, A3949, A3954];
@@ -636,6 +1013,10 @@ pub enum StateError {
     InvalidHostDevice(u8),
     InvalidTwsFlag(u8),
     InvalidSoundMode(u8),
+    InvalidButtonAction(u8),
+    InvalidAutoPowerOffIndex(u8),
+    InvalidLimitHighVolumeDbLimit(u8),
+    InvalidDecibelReadingRefreshRate(u8),
     BatteryAboveScale { value: u8, maximum: u8 },
 }
 
@@ -650,6 +1031,18 @@ impl std::fmt::Display for StateError {
             Self::InvalidHostDevice(value) => write!(f, "invalid host device {value}"),
             Self::InvalidTwsFlag(value) => write!(f, "invalid TWS flag {value}"),
             Self::InvalidSoundMode(value) => write!(f, "invalid sound mode {value}"),
+            Self::InvalidButtonAction(value) => {
+                write!(f, "invalid button double-press action {value}")
+            }
+            Self::InvalidAutoPowerOffIndex(value) => {
+                write!(f, "invalid auto power off duration index {value}")
+            }
+            Self::InvalidLimitHighVolumeDbLimit(value) => {
+                write!(f, "invalid limit high volume dB limit {value}")
+            }
+            Self::InvalidDecibelReadingRefreshRate(value) => {
+                write!(f, "invalid decibel reading refresh rate {value}")
+            }
             Self::BatteryAboveScale { value, maximum } => {
                 write!(f, "battery {value} is above scale {maximum}")
             }
@@ -727,6 +1120,7 @@ fn parse_tws_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState, S
         // (no verified `03 87` write body), so the model has no capability and
         // this returns `None` rather than inventing offsets.
         equalizer: parse_equalizer(model, body)?,
+        settings: parse_settings(model, body)?,
         firmware: FirmwareVersions {
             left: parse_firmware(&body[6..11]),
             right: parse_firmware(&body[11..16]),
@@ -740,18 +1134,30 @@ fn parse_tws_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState, S
 /// | offset | field |
 /// |---:|---|
 /// | 0 | battery step, [`BatteryScale::Ten`] |
-/// | 1 | constant `0xFF`; not a host or charging field |
+/// | 1 | charging: `1` charging, every other value (the captures carry `0xFF`) not charging |
 /// | 2..7 | firmware, ASCII `MM.mm` |
 /// | 7..23 | serial, 16 ASCII characters |
 /// | 23..25 | equalizer preset id, little-endian, [`EqualizerState`] |
 /// | 25..35 | ten equalizer bands, byte `value + 120` |
 /// | 35..37 | two unknown bytes the equalizer write does not echo |
 /// | 37..65 | HearID block, kept verbatim for the equalizer write |
-/// | 69 | sound mode, [`SoundMode`] |
+/// | 67 | button double press, [`A3062Settings`] |
+/// | 68 | ambient sound mode cycle |
+/// | 69..75 | sound modes block; only the mode byte at 69 is interpreted |
+/// | 75 | one unknown sound-mode byte the app never sends |
+/// | 76 | low battery prompt |
+/// | 77 | Dolby audio |
+/// | 78 | LDAC |
+/// | 79 | dual connections |
+/// | 80..82 | auto power off: enabled, duration index |
+/// | 82..85 | limit high volume: enabled, dB, refresh rate |
+/// | 85 | side tone |
+/// | 86 | voice prompt |
 ///
-/// Everything after offset 23 except the measured equalizer block and mode byte
-/// is model-specific and is not interpreted here. The measured body is 95
-/// bytes.
+/// Everything after offset 23 except the measured equalizer, sound-mode and
+/// settings blocks is model-specific and is not interpreted here. The measured
+/// body is 95 bytes; the settings block ends at byte 86, so the eight trailing
+/// bytes are not parsed.
 fn parse_single_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState, StateError> {
     if body.len() < MIN_SINGLE_CMM2_BODY {
         return Err(StateError::ShortBody {
@@ -775,9 +1181,10 @@ fn parse_single_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState
         single_battery: Some(SingleBatteryState {
             value,
             scale,
-            // `body[1]` is a constant 0xFF in the measured frames, not a
-            // charging flag; charging arrives in a separate `01 04` frame.
-            charging: None,
+            // Body 1 is the charging flag: `1` is charging, anything else (the
+            // measured captures carry `0xFF`) is not. A `01 04` notification may
+            // carry a newer value, but this poll does not read it.
+            charging: Some(body[1] == 1),
             firmware: parse_firmware(&body[2..7]),
         }),
         // The equalizer block starts at body offset 23, before the mode byte;
@@ -785,6 +1192,7 @@ fn parse_single_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState
         // the block's own minimum length.
         equalizer: parse_equalizer(model, body)?,
         sound_mode: parse_sound_mode(model, body)?,
+        settings: parse_settings(model, body)?,
         firmware: FirmwareVersions {
             left: None,
             right: None,
@@ -846,6 +1254,89 @@ fn parse_sound_mode(model: DeviceModel, body: &[u8]) -> Result<Option<SoundMode>
     })?;
     let mode = SoundMode::from_value(value).ok_or(StateError::InvalidSoundMode(value))?;
     Ok(Some(mode))
+}
+
+/// How many bytes an A3062 settings block spans: the double-press byte at body
+/// 67 through the voice-prompt byte at body 86.
+const SETTINGS_BLOCK_LEN: usize = 20;
+
+// Offsets inside the A3062 settings block (body 67..87), measured from
+// OpenSCL4's A3062 `A3062StateUpdatePacket` parser.
+const BUTTON_DOUBLE_PRESS_OFFSET: usize = 0;
+const AMBIENT_SOUND_MODE_CYCLE_OFFSET: usize = 1;
+const LOW_BATTERY_PROMPT_OFFSET: usize = 9;
+const DOLBY_AUDIO_OFFSET: usize = 10;
+const LDAC_OFFSET: usize = 11;
+const DUAL_CONNECTIONS_OFFSET: usize = 12;
+const AUTO_POWER_OFF_ENABLED_OFFSET: usize = 13;
+const AUTO_POWER_OFF_DURATION_OFFSET: usize = 14;
+const LIMIT_HIGH_VOLUME_ENABLED_OFFSET: usize = 15;
+const LIMIT_HIGH_VOLUME_DB_OFFSET: usize = 16;
+const LIMIT_HIGH_VOLUME_REFRESH_OFFSET: usize = 17;
+const SIDE_TONE_OFFSET: usize = 18;
+const VOICE_PROMPT_OFFSET: usize = 19;
+
+/// Parses the remaining-settings block of a model whose settings this slice
+/// implements.
+///
+/// `None` when the model has no settings capability (the A3949 and every other
+/// model so far). A body too short to hold the whole measured block is an
+/// error, and so is an unknown value of a closed enum (button action, auto
+/// power off index, dB limit, refresh rate): the parser does not invent a
+/// default. Flags are on only when the byte is `1`, which is how OpenSCL4 reads
+/// them, so an unexpected non-zero byte reads as off instead of breaking the
+/// whole state poll.
+fn parse_settings(model: DeviceModel, body: &[u8]) -> Result<Option<A3062Settings>, StateError> {
+    let Some(capability) = model.settings else {
+        return Ok(None);
+    };
+    let start = capability.state_offset;
+    let Some(block) = body.get(start..start + SETTINGS_BLOCK_LEN) else {
+        return Err(StateError::ShortBody {
+            actual: body.len(),
+            minimum: start + SETTINGS_BLOCK_LEN,
+        });
+    };
+
+    let button_double_press = match block[BUTTON_DOUBLE_PRESS_OFFSET] {
+        NO_BUTTON_ACTION => None,
+        value => {
+            Some(ButtonAction::from_value(value).ok_or(StateError::InvalidButtonAction(value))?)
+        }
+    };
+    let auto_power_off_duration =
+        AutoPowerOffDuration::from_index(block[AUTO_POWER_OFF_DURATION_OFFSET]).ok_or(
+            StateError::InvalidAutoPowerOffIndex(block[AUTO_POWER_OFF_DURATION_OFFSET]),
+        )?;
+    let db_limit = DbLimit::new(block[LIMIT_HIGH_VOLUME_DB_OFFSET]).ok_or(
+        StateError::InvalidLimitHighVolumeDbLimit(block[LIMIT_HIGH_VOLUME_DB_OFFSET]),
+    )?;
+    let refresh_rate =
+        DecibelReadingRefreshRate::from_value(block[LIMIT_HIGH_VOLUME_REFRESH_OFFSET]).ok_or(
+            StateError::InvalidDecibelReadingRefreshRate(block[LIMIT_HIGH_VOLUME_REFRESH_OFFSET]),
+        )?;
+
+    Ok(Some(A3062Settings {
+        button_double_press,
+        ambient_sound_mode_cycle: AmbientSoundModeCycle::from_byte(
+            block[AMBIENT_SOUND_MODE_CYCLE_OFFSET],
+        ),
+        low_battery_prompt: block[LOW_BATTERY_PROMPT_OFFSET] == 1,
+        dolby_audio: block[DOLBY_AUDIO_OFFSET] == 1,
+        ldac: block[LDAC_OFFSET] == 1,
+        dual_connections: block[DUAL_CONNECTIONS_OFFSET] == 1,
+        auto_power_off: AutoPowerOff {
+            enabled: block[AUTO_POWER_OFF_ENABLED_OFFSET] == 1,
+            duration: auto_power_off_duration,
+        },
+        limit_high_volume: LimitHighVolume {
+            enabled: block[LIMIT_HIGH_VOLUME_ENABLED_OFFSET] == 1,
+            db_limit,
+            refresh_rate,
+        },
+        side_tone: block[SIDE_TONE_OFFSET] == 1,
+        voice_prompt: block[VOICE_PROMPT_OFFSET] == 1,
+    }))
 }
 
 fn parse_firmware(bytes: &[u8]) -> Option<String> {

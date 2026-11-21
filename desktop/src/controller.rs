@@ -878,7 +878,8 @@ impl ModeFailure {
             SessionError::Protocol(_)
             | SessionError::UnsupportedLayout
             | SessionError::UnsupportedSoundMode
-            | SessionError::UnsupportedEqualizer => Self::Unreadable,
+            | SessionError::UnsupportedEqualizer
+            | SessionError::UnsupportedSetting => Self::Unreadable,
         }
     }
 
@@ -930,7 +931,8 @@ impl EqFailure {
             SessionError::Protocol(_)
             | SessionError::UnsupportedLayout
             | SessionError::UnsupportedSoundMode
-            | SessionError::UnsupportedEqualizer => Self::Unreadable,
+            | SessionError::UnsupportedEqualizer
+            | SessionError::UnsupportedSetting => Self::Unreadable,
         }
     }
 
@@ -1048,11 +1050,13 @@ impl ConnectFailure {
             SessionError::Timeout => Self::TimedOut,
             SessionError::Io(error) => Self::Transport(error.to_string()),
             // A connection attempt only polls `01 01`; `UnsupportedSoundMode`
-            // only comes from a mode write and `UnsupportedEqualizer` only from
-            // an equalizer write, so they cannot reach this mapping.
+            // only comes from a mode write, `UnsupportedEqualizer` only from an
+            // equalizer write and `UnsupportedSetting` only from a setting
+            // write, so they cannot reach this mapping.
             SessionError::Protocol(_)
             | SessionError::UnsupportedSoundMode
-            | SessionError::UnsupportedEqualizer => Self::Protocol,
+            | SessionError::UnsupportedEqualizer
+            | SessionError::UnsupportedSetting => Self::Protocol,
             SessionError::UnsupportedLayout => Self::UnsupportedLayout,
         }
     }
@@ -3494,6 +3498,7 @@ mod tests {
             single_battery: None,
             sound_mode: None,
             equalizer: None,
+            settings: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,
@@ -3515,6 +3520,7 @@ mod tests {
             }),
             sound_mode: None,
             equalizer: None,
+            settings: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,
