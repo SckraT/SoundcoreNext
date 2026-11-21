@@ -26,7 +26,7 @@ use soundcore_models::{
     DbLimit, DecibelReadingRefreshRate, DeviceModel, DeviceState, EqualizerPreset, EqualizerState,
     SettingCommand, SoundMode, VISIBLE_EQ_BANDS,
 };
-use soundcore_profiles::{EqualizerProfile, ProfileSet};
+use soundcore_profiles::{EqualizerProfile, ImportPreview, ProfileSet, preview_import};
 use soundcore_session::{DeviceSession, SessionError, Transport};
 use windows::core::GUID;
 
@@ -37,8 +37,8 @@ use crate::transport_windows::{
 };
 use crate::{
     Actions, AppState, AppWindow, Battery, Connection, DeviceCard, EqBand, EqLine, EqProfile,
-    FailureKind, ModeOption, Page, PairedOption, PanelKind, RowKind, SettingRow, SettingsPanel,
-    SystemPage,
+    FailureKind, ImportItem, ModeOption, Page, PairedOption, PanelKind, RowKind, SettingRow,
+    SettingsPanel, SystemPage, ToastKind, TransferNote,
 };
 
 /// The model chosen in the Add Device dialog: what the catalog card shows plus
@@ -1412,6 +1412,11 @@ enum Event {
         setting: SettingCommand,
         outcome: Result<Box<DeviceState>, SettingFailure>,
     },
+    /// The import-file worker closed its file dialog: the file it read, or `None`
+    /// when the dialog was cancelled. A read failure carries the note to show.
+    ImportFilePicked {
+        result: Option<Result<String, ImportFileError>>,
+    },
 }
 
 /// State shared between the UI callbacks and the polling timer. Every field is
@@ -1449,6 +1454,16 @@ struct Inner {
     /// The document the profiles are persisted to; `None` when Windows gives no
     /// app-data directory, in which case the profiles stay in memory only.
     profiles_path: Option<PathBuf>,
+    /// The text of the import the dialog is previewing, kept so `eq-import` can
+    /// re-validate it before anything is written; `None` when no preview is
+    /// open. UI thread only.
+    import_text: RefCell<Option<String>>,
+    /// The clipboard and file-dialog seam the import actions use. The real
+    /// implementation is [`NativeImportIo`]; tests substitute a fake.
+    import_io: Arc<dyn ImportIo + Send + Sync>,
+    /// Whether the file-dialog worker is running, so a second click does not
+    /// open a second dialog. UI thread only.
+    picking_import_file: Cell<bool>,
 }
 
 impl Inner {
@@ -1581,6 +1596,9 @@ impl Controller {
             device: RefCell::new(None),
             profiles: RefCell::new(profiles),
             profiles_path,
+            import_text: RefCell::new(None),
+            import_io: Arc::new(NativeImportIo),
+            picking_import_file: Cell::new(false),
         });
         initial_state(ui);
         show_saved_profiles(&ui.global::<AppState>(), &inner.profiles.borrow());
@@ -1798,6 +1816,25 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         }
     });
 
+    actions.on_eq_import_file({
+        let inner = Rc::clone(inner);
+        move || begin_import_file(&inner)
+    });
+
+    actions.on_eq_import_paste({
+        let inner = Rc::clone(inner);
+        move || {
+            if let Some(window) = inner.ui.upgrade() {
+                eq_import_paste(&window, &inner);
+            }
+        }
+    });
+
+    actions.on_eq_import({
+        let inner = Rc::clone(inner);
+        move || answer_import(&inner)
+    });
+
     actions.on_navigate({
         let inner = Rc::clone(inner);
         move |page| {
@@ -1966,6 +2003,14 @@ fn drain_events(inner: &Rc<Inner>) {
                 );
                 if applies && let Some(window) = inner.ui.upgrade() {
                     apply_setting_outcome(&window, inner, setting, outcome);
+                }
+            }
+            Ok(Event::ImportFilePicked { result }) => {
+                inner.picking_import_file.set(false);
+                if let (Some(result), Some(window)) = (result, inner.ui.upgrade()) {
+                    let state = window.global::<AppState>();
+                    let mut import_text = inner.import_text.borrow_mut();
+                    preview_import_file(&state, &inner.profiles.borrow(), &mut import_text, result);
                 }
             }
             // Both an empty queue and a closed channel mean nothing more will
@@ -2928,8 +2973,10 @@ fn refresh_rate_from_index(index: i32) -> Option<DecibelReadingRefreshRate> {
 /// button and the saved-profile panel with its Save button are enabled and the
 /// eight visible bands are editable. A model whose equalizer is deferred (the
 /// A3949) keeps all of them hidden, so it has no page and no profile writes.
-/// The import/export and legacy controls stay inert: their count and list are
-/// always empty and no file or clipboard action is wired.
+/// The saved-profile panel offers import (paste and file), which the same
+/// editability gates: only the A3062's page shows the panel. Export and the
+/// legacy migration stay inert: the export count and the legacy list are always
+/// empty and no export or migrate action is wired.
 fn show_equalizer(state: &AppState<'_>, display: &EqualizerDisplay) {
     state.set_eq_available(display.available);
     state.set_eq_read_only(!display.editable);
@@ -3563,6 +3610,375 @@ fn delete_equalizer_profile(window: &AppWindow, inner: &Rc<Inner>, name: &str) {
     state.set_eq_deleting("".into());
 }
 
+/// The largest equalizer-profiles file the Import dialog accepts, in bytes: the
+/// same one-mebibyte limit OpenSCL4 uses. A larger file is refused before it is
+/// read, so it never reaches memory.
+const MAX_IMPORT_BYTES: u64 = 1024 * 1024;
+
+/// Why an import file cannot be read; the Import panel's note says which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportFileError {
+    /// The file is larger than [`MAX_IMPORT_BYTES`].
+    TooLarge,
+    /// The file cannot be read as text: it is missing, is a directory, or is not
+    /// UTF-8.
+    ReadFailed,
+}
+
+impl ImportFileError {
+    /// The `TransferNote` the Import panel shows for this error.
+    fn note(self) -> TransferNote {
+        match self {
+            Self::TooLarge => TransferNote::TooLarge,
+            Self::ReadFailed => TransferNote::ReadFailed,
+        }
+    }
+}
+
+/// Reads an import file, checking its size before reading it.
+fn read_import_file(path: &Path) -> Result<String, ImportFileError> {
+    let size = fs::metadata(path)
+        .map_err(|error| {
+            log_import_file(&format!("could not read its size ({error})"), path);
+            ImportFileError::ReadFailed
+        })?
+        .len();
+    if size > MAX_IMPORT_BYTES {
+        return Err(ImportFileError::TooLarge);
+    }
+    fs::read_to_string(path).map_err(|error| {
+        log_import_file(&format!("could not read it ({error})"), path);
+        ImportFileError::ReadFailed
+    })
+}
+
+/// Logs one import-file message to stderr. The Import panel's note is the visible
+/// report; the console keeps the operating system's error text.
+fn log_import_file(message: &str, path: &Path) {
+    eprintln!("OpenSCL4: {message}: {}", path.display());
+}
+
+/// What the Import dialog asks the machine for: the clipboard's text and a file
+/// picked in the native dialog. The real implementation is [`NativeImportIo`];
+/// tests substitute a fake so neither the clipboard nor a dialog is touched.
+trait ImportIo {
+    /// The clipboard's text, or `None` when it holds no text or cannot be read.
+    fn clipboard_text(&self) -> Option<String>;
+    /// The file the user picked, or `None` when the dialog was cancelled.
+    fn pick_file(&self) -> Option<PathBuf>;
+    /// The text of an import file, or why it cannot be imported.
+    fn read_import_file(&self, path: &Path) -> Result<String, ImportFileError>;
+}
+
+/// The real [`ImportIo`]: arboard for the clipboard and rfd for the Windows JSON
+/// file dialog.
+struct NativeImportIo;
+
+impl ImportIo for NativeImportIo {
+    fn clipboard_text(&self) -> Option<String> {
+        let mut clipboard = arboard::Clipboard::new().ok()?;
+        clipboard.get_text().ok()
+    }
+
+    /// The rfd Windows backend initializes COM as an apartment-threaded process;
+    /// [`begin_import_file`] calls this on a worker thread, so the dialog never
+    /// fights the Slint window thread's own COM mode.
+    fn pick_file(&self) -> Option<PathBuf> {
+        rfd::FileDialog::new()
+            .set_title("Import equalizer profiles")
+            .add_filter("JSON", &["json"])
+            .add_filter("All files", &["*"])
+            .pick_file()
+    }
+
+    fn read_import_file(&self, path: &Path) -> Result<String, ImportFileError> {
+        read_import_file(path)
+    }
+}
+
+/// The Import dialog fields an import action changes. The real implementation is
+/// the Slint `AppState`; the tests record the calls so the dialog behaviour can
+/// be checked without a window.
+trait ImportPage {
+    /// Opens the dialog on the parsed file: its rows and whether the Import
+    /// button is blocked.
+    fn show_preview(&self, rows: Vec<ImportItem>, blocked: bool);
+    /// Shows the Import panel's note and the number its text may use.
+    fn show_import_note(&self, note: TransferNote, count: i32);
+    /// Closes the dialog (`importing = false`).
+    fn close_import_dialog(&self);
+    /// Shows the short toast at the bottom of the window.
+    fn show_import_toast(&self, kind: ToastKind, count: i32);
+    /// Shows the page banner for a failed profile-document write.
+    fn show_import_error(&self, label: &str);
+}
+
+impl ImportPage for AppState<'_> {
+    fn show_preview(&self, rows: Vec<ImportItem>, blocked: bool) {
+        self.set_import_items(ModelRc::new(VecModel::from(rows)));
+        self.set_import_blocked(blocked);
+        self.set_importing(true);
+    }
+
+    fn show_import_note(&self, note: TransferNote, count: i32) {
+        self.set_transfer_note(note);
+        self.set_transfer_count(count);
+    }
+
+    fn close_import_dialog(&self) {
+        self.set_importing(false);
+    }
+
+    fn show_import_toast(&self, kind: ToastKind, count: i32) {
+        self.set_toast(kind);
+        self.set_toast_count(count);
+    }
+
+    fn show_import_error(&self, label: &str) {
+        self.set_error_label(label.into());
+    }
+}
+
+/// The vendored `ImportDialog` rows of a preview: the name, the curve through
+/// the bands (none for a blocked row), the numeric status its tag compares to,
+/// and the band count the file carries. The dialog adds the tag's text.
+fn import_rows(preview: &ImportPreview) -> Vec<ImportItem> {
+    preview
+        .items()
+        .iter()
+        .map(|item| ImportItem {
+            name: item.name.as_str().into(),
+            curve: item
+                .bands
+                .as_ref()
+                .map(|bands| profile_curve(bands))
+                .unwrap_or_default()
+                .into(),
+            status: item.status as i32,
+            bands: i32::try_from(item.band_count).unwrap_or(0),
+        })
+        .collect()
+}
+
+/// Parses `text` and opens the Import dialog for it, or shows the note that says
+/// why it is not an equalizer-profiles file. A file with no profiles counts as
+/// not a profiles file, as OpenSCL4 does: there would be nothing to import.
+fn preview_import_text(
+    page: &impl ImportPage,
+    saved: &ProfileSet,
+    import_text: &mut Option<String>,
+    text: &str,
+) {
+    match preview_import(text, saved) {
+        Ok(preview) if !preview.is_empty() => {
+            let blocked = preview.is_blocked();
+            page.show_preview(import_rows(&preview), blocked);
+            page.show_import_note(TransferNote::None, 0);
+            *import_text = Some(text.to_owned());
+        }
+        _ => {
+            *import_text = None;
+            page.show_import_note(TransferNote::NotProfiles, 0);
+        }
+    }
+}
+
+/// Shows what reading an import file became: its preview, or the note saying why
+/// it cannot be imported.
+fn preview_import_file(
+    page: &impl ImportPage,
+    saved: &ProfileSet,
+    import_text: &mut Option<String>,
+    result: Result<String, ImportFileError>,
+) {
+    match result {
+        Ok(text) => preview_import_text(page, saved, import_text, &text),
+        Err(error) => {
+            *import_text = None;
+            page.show_import_note(error.note(), 0);
+        }
+    }
+}
+
+/// Answers `Actions.eq-import-paste`: previews the clipboard's text, or notes
+/// that the clipboard is empty. A whitespace-only clipboard is empty, as it is
+/// in OpenSCL4.
+fn import_from_clipboard(
+    page: &impl ImportPage,
+    saved: &ProfileSet,
+    import_text: &mut Option<String>,
+    io: &dyn ImportIo,
+) {
+    match io.clipboard_text() {
+        Some(text) if !text.trim().is_empty() => {
+            preview_import_text(page, saved, import_text, &text);
+        }
+        _ => {
+            *import_text = None;
+            page.show_import_note(TransferNote::ClipboardEmpty, 0);
+        }
+    }
+}
+
+/// Answers `Actions.eq-import-file` through the [`ImportIo`] seam: previews the
+/// file the user picked. A cancelled dialog changes nothing.
+#[cfg(test)]
+fn import_from_file(
+    page: &impl ImportPage,
+    saved: &ProfileSet,
+    import_text: &mut Option<String>,
+    io: &dyn ImportIo,
+) {
+    let Some(path) = io.pick_file() else {
+        return;
+    };
+    let result = io.read_import_file(&path);
+    preview_import_file(page, saved, import_text, result);
+}
+
+/// What an `Actions.eq-import` click did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportOutcome {
+    /// No preview is open, so there was nothing to import.
+    Nothing,
+    /// The preview is blocked: the dialog stays open and nothing is written.
+    Blocked,
+    /// The text is not an importable profiles file; the dialog closed.
+    NotProfiles,
+    /// The profiles were merged and persisted; the number is how many.
+    Imported(usize),
+    /// The profile document could not be written; the set was rolled back and
+    /// the page banner says why.
+    NotWritten,
+}
+
+/// Answers `Actions.eq-import` for a previewed file: the text is re-parsed
+/// against the saved set, so a blocked file writes nothing. An importable
+/// preview is merged all-or-nothing (a same-named profile is replaced in place,
+/// a new one appended) and the whole set is persisted, so the list, the document
+/// and the Imported note always agree.
+fn answer_import_click(
+    page: &impl ImportPage,
+    saved: &mut ProfileSet,
+    path: Option<&Path>,
+    import_text: &mut Option<String>,
+) -> ImportOutcome {
+    let Some(text) = import_text.as_deref() else {
+        return ImportOutcome::Nothing;
+    };
+    let preview = match preview_import(text, saved) {
+        Ok(preview) if !preview.is_empty() => preview,
+        _ => {
+            *import_text = None;
+            page.close_import_dialog();
+            page.show_import_note(TransferNote::NotProfiles, 0);
+            return ImportOutcome::NotProfiles;
+        }
+    };
+    if preview.is_blocked() {
+        // The dialog keeps its rows and its red note; nothing is written.
+        return ImportOutcome::Blocked;
+    }
+    let count = preview.len();
+    let before = saved.clone();
+    if preview.merge_into(saved).is_err() {
+        // `merge_into` refuses only a blocked preview, which is handled above;
+        // this keeps the importable path harmless if that ever changes.
+        *saved = before;
+        *import_text = None;
+        page.close_import_dialog();
+        page.show_import_note(TransferNote::NotProfiles, 0);
+        return ImportOutcome::NotProfiles;
+    }
+    if persist_saved_profiles(saved, before, path) == Persistence::NotWritten {
+        *import_text = None;
+        page.close_import_dialog();
+        page.show_import_note(TransferNote::None, 0);
+        page.show_import_error(PROFILE_WRITE_FAILURE_LABEL);
+        return ImportOutcome::NotWritten;
+    }
+    *import_text = None;
+    page.close_import_dialog();
+    let shown = i32::try_from(count).unwrap_or(i32::MAX);
+    page.show_import_note(TransferNote::Imported, shown);
+    page.show_import_toast(ToastKind::Imported, shown);
+    ImportOutcome::Imported(count)
+}
+
+/// Answers `Actions.eq-import-paste` on the window through the real clipboard.
+fn eq_import_paste(window: &AppWindow, inner: &Rc<Inner>) {
+    let state = window.global::<AppState>();
+    let mut import_text = inner.import_text.borrow_mut();
+    import_from_clipboard(
+        &state,
+        &inner.profiles.borrow(),
+        &mut import_text,
+        &*inner.import_io,
+    );
+}
+
+/// Answers `Actions.eq-import-file`: the native dialog and the file read run on a
+/// worker thread, so the window keeps drawing while the dialog is open. The
+/// result arrives through the same event channel as the Bluetooth workers.
+fn begin_import_file(inner: &Rc<Inner>) {
+    if inner.picking_import_file.get() {
+        return;
+    }
+    inner.picking_import_file.set(true);
+    let io = Arc::clone(&inner.import_io);
+    let sender = inner.sender.clone();
+    std::thread::spawn(move || {
+        let result = io.pick_file().map(|path| io.read_import_file(&path));
+        // A closed channel means the window is gone; nothing is left to report.
+        let _ = sender.send(Event::ImportFilePicked { result });
+    });
+}
+
+/// Answers `Actions.eq-import` on the window: imports the preview open in the
+/// dialog, relists the saved profiles and clears a stale write banner.
+fn answer_import(inner: &Rc<Inner>) {
+    let Some(window) = inner.ui.upgrade() else {
+        return;
+    };
+    let state = window.global::<AppState>();
+    // The vendored Import button only exists while the dialog is open, so a
+    // stray click with no preview does nothing.
+    if !state.get_importing() {
+        return;
+    }
+    let outcome = {
+        let mut import_text = inner.import_text.borrow_mut();
+        let mut profiles = inner.profiles.borrow_mut();
+        answer_import_click(
+            &state,
+            &mut profiles,
+            inner.profiles_path.as_deref(),
+            &mut import_text,
+        )
+    };
+    if let ImportOutcome::Imported(_) = outcome {
+        show_saved_profiles(&state, &inner.profiles.borrow());
+        clear_profile_write_error(&state);
+        clear_import_toast_after_a_while(&window);
+    }
+}
+
+/// Hides the Imported toast after a few seconds, unless a newer toast replaced
+/// it. The vendored window has no toast timer of its own.
+fn clear_import_toast_after_a_while(window: &AppWindow) {
+    let weak = window.as_weak();
+    Timer::single_shot(Duration::from_secs(3), move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let state = window.global::<AppState>();
+        if state.get_toast() == ToastKind::Imported {
+            state.set_toast(ToastKind::None);
+            state.set_toast_count(0);
+        }
+    });
+}
+
 /// Replaces the dialog's model list with the models for a query and chip; an
 /// index that is not one of the vendored chips lists nothing.
 fn show_models(state: &AppState<'_>, query: &str, chip: Option<Chip>) {
@@ -4123,6 +4539,549 @@ mod tests {
             fs::read_to_string(&path).expect("the document is readable"),
             reloaded.to_json()
         );
+    }
+
+    /// A valid OpenSCL4 transfer file: one new `Warm` profile with eight values.
+    const WARM_IMPORT: &str =
+        r#"[{"name": "Warm", "volumeAdjustments": [3.0, -3.0, 6.0, 0.0, -6.0, 2.0, 0.0, -2.0]}]"#;
+    /// The dB×10 bands [`WARM_IMPORT`] parses to.
+    const WARM_IMPORT_BANDS: [i16; VISIBLE_EQ_BANDS] = [30, -30, 60, 0, -60, 20, 0, -20];
+    /// A valid file that replaces the saved `Warm` and adds `Fresh`.
+    const TWO_PROFILE_IMPORT: &str = r#"[
+        {"name": "Warm", "volumeAdjustments": [3.0, -3.0, 6.0, 0.0, -6.0, 2.0, 0.0, -2.0]},
+        {"name": "Fresh", "volumeAdjustments": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+    ]"#;
+
+    /// One ImportDialog row as a test checks it: the values the Slint model gets.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ShownImportRow {
+        name: String,
+        bands: i32,
+        status: i32,
+        has_curve: bool,
+    }
+
+    /// An Import dialog that records what the import actions show, in place of
+    /// the Slint `AppState`.
+    #[derive(Default)]
+    struct RecordedImportDialog {
+        rows: RefCell<Vec<ShownImportRow>>,
+        blocked: Cell<bool>,
+        importing: Cell<bool>,
+        notes: RefCell<Vec<(TransferNote, i32)>>,
+        toasts: RefCell<Vec<(ToastKind, i32)>>,
+        errors: RefCell<Vec<String>>,
+        closes: Cell<u32>,
+    }
+
+    impl RecordedImportDialog {
+        /// The note the Import panel last showed.
+        fn last_note(&self) -> Option<(TransferNote, i32)> {
+            self.notes.borrow().last().copied()
+        }
+
+        /// The toast the window last showed.
+        fn last_toast(&self) -> Option<(ToastKind, i32)> {
+            self.toasts.borrow().last().copied()
+        }
+
+        /// The dialog's rows as plain values.
+        fn rows(&self) -> Vec<ShownImportRow> {
+            self.rows.borrow().clone()
+        }
+    }
+
+    impl ImportPage for RecordedImportDialog {
+        fn show_preview(&self, rows: Vec<ImportItem>, blocked: bool) {
+            *self.rows.borrow_mut() = rows
+                .into_iter()
+                .map(|row| ShownImportRow {
+                    name: row.name.to_string(),
+                    bands: row.bands,
+                    status: row.status,
+                    has_curve: !row.curve.is_empty(),
+                })
+                .collect();
+            self.blocked.set(blocked);
+            self.importing.set(true);
+        }
+
+        fn show_import_note(&self, note: TransferNote, count: i32) {
+            self.notes.borrow_mut().push((note, count));
+        }
+
+        fn close_import_dialog(&self) {
+            self.importing.set(false);
+            self.closes.set(self.closes.get() + 1);
+        }
+
+        fn show_import_toast(&self, kind: ToastKind, count: i32) {
+            self.toasts.borrow_mut().push((kind, count));
+        }
+
+        fn show_import_error(&self, label: &str) {
+            self.errors.borrow_mut().push(label.to_owned());
+        }
+    }
+
+    /// The import actions' machine seam in tests: the clipboard and the file
+    /// picker serve fixed values, and `read` overrides the file read so a size or
+    /// IO failure can be simulated without touching the disk.
+    #[derive(Default)]
+    struct RecordedImportIo {
+        clipboard: RefCell<Option<String>>,
+        picked: RefCell<Option<PathBuf>>,
+        read: RefCell<Option<Result<String, ImportFileError>>>,
+    }
+
+    impl RecordedImportIo {
+        /// An IO whose clipboard holds `text`.
+        fn pasting(text: &str) -> Self {
+            Self {
+                clipboard: RefCell::new(Some(text.to_owned())),
+                ..Self::default()
+            }
+        }
+
+        /// An IO whose file dialog picks `path` and whose file read fails with
+        /// `error`, so the file does not have to exist.
+        fn failing_file(path: impl Into<PathBuf>, error: ImportFileError) -> Self {
+            Self {
+                picked: RefCell::new(Some(path.into())),
+                read: RefCell::new(Some(Err(error))),
+                ..Self::default()
+            }
+        }
+
+        /// An IO whose file dialog picks `path`; the file is read for real.
+        fn picking(path: impl Into<PathBuf>) -> Self {
+            Self {
+                picked: RefCell::new(Some(path.into())),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl ImportIo for RecordedImportIo {
+        fn clipboard_text(&self) -> Option<String> {
+            self.clipboard.borrow().clone()
+        }
+
+        fn pick_file(&self) -> Option<PathBuf> {
+            self.picked.borrow().clone()
+        }
+
+        fn read_import_file(&self, path: &Path) -> Result<String, ImportFileError> {
+            if let Some(result) = self.read.borrow().as_ref() {
+                return result.clone();
+            }
+            read_import_file(path)
+        }
+    }
+
+    #[test]
+    fn an_empty_clipboard_shows_the_clipboard_empty_note() {
+        for clipboard in [None, Some("  \n\t ".to_owned())] {
+            let page = RecordedImportDialog::default();
+            let mut import_text: Option<String> = None;
+            import_from_clipboard(
+                &page,
+                &ProfileSet::new(),
+                &mut import_text,
+                &RecordedImportIo {
+                    clipboard: RefCell::new(clipboard),
+                    ..RecordedImportIo::default()
+                },
+            );
+
+            assert!(!page.importing.get(), "no dialog opens");
+            assert!(page.rows().is_empty(), "no rows are shown");
+            assert_eq!(
+                page.last_note(),
+                Some((TransferNote::ClipboardEmpty, 0)),
+                "the Import panel says the clipboard is empty"
+            );
+            assert_eq!(import_text, None, "no preview text is kept");
+        }
+    }
+
+    #[test]
+    fn pasting_a_profiles_file_opens_the_import_preview() {
+        let page = RecordedImportDialog::default();
+        let mut import_text: Option<String> = None;
+        import_from_clipboard(
+            &page,
+            &ProfileSet::new(),
+            &mut import_text,
+            &RecordedImportIo::pasting(WARM_IMPORT),
+        );
+
+        assert!(page.importing.get(), "the dialog opens");
+        assert!(!page.blocked.get(), "a valid file is not blocked");
+        assert_eq!(
+            page.rows(),
+            vec![ShownImportRow {
+                name: "Warm".to_owned(),
+                bands: 8,
+                status: 0,
+                has_curve: true,
+            }]
+        );
+        assert_eq!(
+            page.last_note(),
+            Some((TransferNote::None, 0)),
+            "a preview open in the dialog has no panel note"
+        );
+        assert_eq!(
+            import_text.as_deref(),
+            Some(WARM_IMPORT),
+            "the text is kept for eq-import to re-validate"
+        );
+    }
+
+    #[test]
+    fn a_preview_tags_new_replacing_wrong_count_and_out_of_range_rows() {
+        let mut saved = ProfileSet::new();
+        saved
+            .add(profile("Warm", [0; VISIBLE_EQ_BANDS]))
+            .expect("Warm is saved");
+        let text = r#"[
+            {"name": "Warm", "volumeAdjustments": [3.0, -3.0, 6.0, 0.0, -6.0, 2.0, 0.0, -2.0]},
+            {"name": "Fresh", "volumeAdjustments": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
+            {"name": "Seven", "volumeAdjustments": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
+            {"name": "Loud", "volumeAdjustments": [13.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+        ]"#;
+        let page = RecordedImportDialog::default();
+        let mut import_text = None;
+        preview_import_text(&page, &saved, &mut import_text, text);
+
+        assert!(page.importing.get(), "the dialog opens");
+        assert!(
+            page.blocked.get(),
+            "a wrong-count or out-of-range row blocks"
+        );
+        assert_eq!(
+            page.rows(),
+            vec![
+                ShownImportRow {
+                    name: "Warm".to_owned(),
+                    bands: 8,
+                    status: 1,
+                    has_curve: true,
+                },
+                ShownImportRow {
+                    name: "Fresh".to_owned(),
+                    bands: 8,
+                    status: 0,
+                    has_curve: true,
+                },
+                ShownImportRow {
+                    name: "Seven".to_owned(),
+                    bands: 7,
+                    status: 2,
+                    has_curve: false,
+                },
+                ShownImportRow {
+                    name: "Loud".to_owned(),
+                    bands: 8,
+                    status: 3,
+                    has_curve: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn text_that_is_not_a_profiles_file_shows_the_not_profiles_note() {
+        for text in [
+            "not json",
+            "{}",
+            "null",
+            "[]",
+            r#"[{"name": "", "volumeAdjustments": []}]"#,
+            r#"[{"name": "Same", "volumeAdjustments": []}, {"name": "Same", "volumeAdjustments": []}]"#,
+        ] {
+            let page = RecordedImportDialog::default();
+            let mut import_text: Option<String> = None;
+            import_from_clipboard(
+                &page,
+                &ProfileSet::new(),
+                &mut import_text,
+                &RecordedImportIo::pasting(text),
+            );
+
+            assert!(!page.importing.get(), "{text:?} opens no dialog");
+            assert!(
+                page.rows().is_empty(),
+                "{text:?} shows no rows in the dialog"
+            );
+            assert_eq!(
+                page.last_note(),
+                Some((TransferNote::NotProfiles, 0)),
+                "{text:?} is not a profiles file"
+            );
+            assert_eq!(import_text, None, "{text:?} keeps no preview text");
+        }
+    }
+
+    #[test]
+    fn a_cancelled_file_dialog_does_nothing() {
+        let page = RecordedImportDialog::default();
+        let mut import_text: Option<String> = None;
+        import_from_file(
+            &page,
+            &ProfileSet::new(),
+            &mut import_text,
+            &RecordedImportIo::default(),
+        );
+
+        assert!(!page.importing.get());
+        assert!(page.notes.borrow().is_empty(), "no note is shown");
+        assert_eq!(import_text, None);
+    }
+
+    #[test]
+    fn a_large_import_file_shows_the_too_large_note() {
+        let page = RecordedImportDialog::default();
+        let mut import_text: Option<String> = None;
+        import_from_file(
+            &page,
+            &ProfileSet::new(),
+            &mut import_text,
+            &RecordedImportIo::failing_file("C:\\profiles.json", ImportFileError::TooLarge),
+        );
+
+        assert!(!page.importing.get());
+        assert!(page.rows().is_empty());
+        assert_eq!(page.last_note(), Some((TransferNote::TooLarge, 0)));
+        assert_eq!(import_text, None);
+    }
+
+    #[test]
+    fn an_unreadable_import_file_shows_the_read_failed_note() {
+        let page = RecordedImportDialog::default();
+        let mut import_text: Option<String> = None;
+        import_from_file(
+            &page,
+            &ProfileSet::new(),
+            &mut import_text,
+            &RecordedImportIo::failing_file("C:\\profiles.json", ImportFileError::ReadFailed),
+        );
+
+        assert!(!page.importing.get());
+        assert_eq!(page.last_note(), Some((TransferNote::ReadFailed, 0)));
+        assert_eq!(import_text, None);
+    }
+
+    #[test]
+    fn a_picked_import_file_is_read_and_previewed() {
+        let directory = TempDir::new("import-file");
+        let path = directory.path().join("profiles.json");
+        fs::write(&path, WARM_IMPORT).expect("the import file is written");
+
+        let page = RecordedImportDialog::default();
+        let mut import_text: Option<String> = None;
+        import_from_file(
+            &page,
+            &ProfileSet::new(),
+            &mut import_text,
+            &RecordedImportIo::picking(path.clone()),
+        );
+
+        assert!(page.importing.get(), "the picked file is previewed");
+        assert!(!page.blocked.get());
+        assert_eq!(page.rows().len(), 1);
+        assert_eq!(page.rows()[0].name, "Warm");
+        assert_eq!(
+            import_text.as_deref(),
+            Some(WARM_IMPORT),
+            "the file text is kept for eq-import"
+        );
+    }
+
+    #[test]
+    fn the_import_file_reader_checks_the_size_before_reading_it() {
+        let directory = TempDir::new("import-reader");
+        let small = directory.path().join("profiles.json");
+        fs::write(&small, WARM_IMPORT).expect("the small file is written");
+        assert_eq!(read_import_file(&small), Ok(WARM_IMPORT.to_owned()));
+
+        // Exactly the one-mebibyte limit is read; one byte more is refused.
+        let limit = directory.path().join("limit.json");
+        let mut text = String::from("[]");
+        text.push_str(&" ".repeat(MAX_IMPORT_BYTES as usize - text.len()));
+        fs::write(&limit, &text).expect("the file at the limit is written");
+        assert_eq!(read_import_file(&limit), Ok(text));
+        let too_large = directory.path().join("large.json");
+        let mut text = String::from("[]");
+        text.push_str(&" ".repeat(MAX_IMPORT_BYTES as usize + 1 - text.len()));
+        fs::write(&too_large, &text).expect("the oversized file is written");
+        assert_eq!(read_import_file(&too_large), Err(ImportFileError::TooLarge));
+    }
+
+    #[test]
+    fn the_import_file_reader_reports_an_unreadable_file() {
+        let directory = TempDir::new("import-unreadable");
+        // A missing file and a directory are both unreadable text.
+        assert_eq!(
+            read_import_file(&directory.path().join("missing.json")),
+            Err(ImportFileError::ReadFailed)
+        );
+        assert_eq!(
+            read_import_file(directory.path()),
+            Err(ImportFileError::ReadFailed)
+        );
+    }
+
+    #[test]
+    fn answering_import_merges_replaces_and_persists_all_or_nothing() {
+        let directory = TempDir::new("import-persist");
+        let path = directory.document();
+        let mut saved = ProfileSet::new();
+        saved
+            .add(profile("Warm", [0; VISIBLE_EQ_BANDS]))
+            .expect("Warm is saved");
+        save_profiles(&path, &saved).expect("the document is written");
+        let mut profiles = load_profiles(&path);
+
+        let page = RecordedImportDialog::default();
+        let mut import_text: Option<String> = None;
+        import_from_clipboard(
+            &page,
+            &profiles,
+            &mut import_text,
+            &RecordedImportIo::pasting(TWO_PROFILE_IMPORT),
+        );
+        let outcome = answer_import_click(&page, &mut profiles, Some(&path), &mut import_text);
+
+        assert_eq!(outcome, ImportOutcome::Imported(2));
+        assert!(!page.importing.get(), "the dialog closes after the import");
+        assert_eq!(page.closes.get(), 1);
+        assert_eq!(
+            page.last_note(),
+            Some((TransferNote::Imported, 2)),
+            "the Import panel says how many profiles were imported"
+        );
+        assert_eq!(
+            page.last_toast(),
+            Some((ToastKind::Imported, 2)),
+            "the toast says how many profiles were imported"
+        );
+        assert_eq!(import_text, None, "the preview text is consumed");
+        assert_eq!(profiles.len(), 2, "Warm is replaced and Fresh is added");
+        assert_eq!(
+            profiles.get("Warm").expect("Warm is saved").bands,
+            WARM_IMPORT_BANDS
+        );
+        assert_eq!(
+            profiles.profiles()[0].name,
+            "Warm",
+            "Warm keeps its position"
+        );
+        assert_eq!(profiles.profiles()[1].name, "Fresh", "new profiles append");
+        assert_eq!(
+            load_profiles(&path),
+            profiles,
+            "the document is written with the merged set"
+        );
+    }
+
+    #[test]
+    fn a_blocked_import_writes_nothing_and_keeps_the_dialog_open() {
+        let directory = TempDir::new("import-blocked");
+        let path = directory.document();
+        let mut saved = ProfileSet::new();
+        saved
+            .add(profile("Warm", [0; VISIBLE_EQ_BANDS]))
+            .expect("Warm is saved");
+        save_profiles(&path, &saved).expect("the document is written");
+        let document_before = fs::read_to_string(&path).expect("the document is readable");
+        let text = r#"[
+            {"name": "Warm", "volumeAdjustments": [3.0, -3.0, 6.0, 0.0, -6.0, 2.0, 0.0, -2.0]},
+            {"name": "Seven", "volumeAdjustments": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
+            {"name": "Loud", "volumeAdjustments": [13.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+        ]"#;
+        let mut profiles = load_profiles(&path);
+        let page = RecordedImportDialog::default();
+        let mut import_text: Option<String> = None;
+        import_from_clipboard(
+            &page,
+            &profiles,
+            &mut import_text,
+            &RecordedImportIo::pasting(text),
+        );
+        assert!(page.blocked.get(), "the wrong-count and range rows block");
+        assert!(page.importing.get());
+
+        let outcome = answer_import_click(&page, &mut profiles, Some(&path), &mut import_text);
+
+        assert_eq!(outcome, ImportOutcome::Blocked);
+        assert!(
+            page.importing.get(),
+            "the dialog stays open with its red note"
+        );
+        assert_eq!(page.closes.get(), 0, "the dialog is not closed");
+        assert_eq!(
+            page.notes.borrow().len(),
+            1,
+            "no note is added by the blocked click"
+        );
+        assert_eq!(profiles, saved, "no profile is merged");
+        assert_eq!(
+            fs::read_to_string(&path).expect("the document is readable"),
+            document_before,
+            "the document is untouched"
+        );
+        assert_eq!(
+            import_text.as_deref(),
+            Some(text),
+            "the preview is kept for a later retry"
+        );
+    }
+
+    #[test]
+    fn importing_without_a_preview_does_nothing() {
+        let page = RecordedImportDialog::default();
+        let mut profiles = ProfileSet::new();
+        let mut import_text: Option<String> = None;
+
+        let outcome = answer_import_click(&page, &mut profiles, None, &mut import_text);
+
+        assert_eq!(outcome, ImportOutcome::Nothing);
+        assert!(profiles.is_empty());
+        assert!(page.notes.borrow().is_empty());
+        assert_eq!(page.closes.get(), 0);
+    }
+
+    #[test]
+    fn an_import_that_cannot_write_the_document_is_rolled_back() {
+        let directory = TempDir::new("import-write-failure");
+        let blocker = directory.path().join(APP_DATA_DIR_NAME);
+        fs::write(&blocker, b"not a directory").expect("the blocking file is written");
+        let path = blocker.join(PROFILES_FILE_NAME);
+        let mut profiles = ProfileSet::new();
+        profiles
+            .add(profile("Warm", [0; VISIBLE_EQ_BANDS]))
+            .expect("Warm is saved");
+
+        let page = RecordedImportDialog::default();
+        let mut import_text: Option<String> = Some(WARM_IMPORT.to_owned());
+        let outcome = answer_import_click(&page, &mut profiles, Some(&path), &mut import_text);
+
+        assert_eq!(outcome, ImportOutcome::NotWritten);
+        assert_eq!(profiles.len(), 1, "the imported profile is rolled back");
+        assert!(!page.importing.get(), "the dialog closes");
+        assert_eq!(
+            page.errors.borrow().first().map(String::as_str),
+            Some(PROFILE_WRITE_FAILURE_LABEL),
+            "the page banner says the profiles could not be saved"
+        );
+        assert_eq!(
+            page.last_note(),
+            Some((TransferNote::None, 0)),
+            "a failed write has no Import panel note"
+        );
+        assert_eq!(import_text, None);
     }
 
     #[test]
@@ -7043,6 +8002,9 @@ mod tests {
             device: RefCell::new(None),
             profiles: RefCell::new(load_profiles(&path)),
             profiles_path: Some(path),
+            import_text: RefCell::new(None),
+            import_io: Arc::new(NativeImportIo),
+            picking_import_file: Cell::new(false),
         })
     }
 
@@ -8331,6 +9293,245 @@ mod tests {
             "the user's document is unchanged by the failed save"
         );
         state.set_error_label("".into());
+
+        // Put the state found on connect back, so the device is left as found.
+        let initial_is_built_in = initial_preset.parse::<u16>().ok().is_some_and(|id| {
+            model
+                .equalizer_presets()
+                .iter()
+                .any(|preset| preset.id == id)
+        });
+        if initial_is_built_in {
+            click_preset(&ui, &initial_preset);
+            wait_for_preset(&ui, &inner, &initial_preset)
+                .expect("the preset found on connect is restored");
+            println!(
+                "  restored preset {initial_preset:?} bands {:?}",
+                band_values(&state)
+            );
+        } else {
+            for (index, value) in initial_bands.iter().enumerate() {
+                preview_band(&ui, index as i32, i32::from(*value));
+            }
+            commit_band(&ui, 0, i32::from(initial_bands[0]));
+            let restored = wait_for_custom_curve(&ui, &inner, initial_bands)
+                .expect("the found curve is restored");
+            println!("  restored custom curve {restored:?}");
+        }
+        disconnect(&ui, &inner);
+    }
+
+    /// Manual hardware check of the Import dialog on the real Space One Pro:
+    ///
+    /// ```text
+    /// cargo test -p soundcore-desktop manual_import_profiles -- --ignored --nocapture
+    /// ```
+    ///
+    /// Connects the suggested A3062, imports a profile through the real Windows
+    /// clipboard and the wired `eq-import-paste`/`eq-import` actions, applies it
+    /// and checks the re-polled custom curve, imports a second profile from a
+    /// real file through the file-dialog seam, refuses a blocked paste without
+    /// changing the document or the list, deletes both imported profiles through
+    /// the confirmation path, and leaves the device and the user's profile
+    /// document as found. Addresses are masked.
+    #[test]
+    #[ignore = "manual hardware check: needs a paired A3062"]
+    fn manual_import_profiles() {
+        let path = default_profiles_path().expect("Windows has %APPDATA%");
+        // A failed assertion must not leave the user's real profiles changed.
+        let _restore = RestoreDocument::capture(&path);
+        let ui = AppWindow::new().expect("the shell window builds");
+        let inner = test_inner_with_profiles(&ui, path.clone());
+        wire_actions(&ui, &inner);
+        if connect_real_device(&ui, &inner, "A3062").is_none() {
+            return;
+        }
+        let state = ui.global::<AppState>();
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 has a parser");
+
+        // Record the state found on connect so the device can be left as found.
+        let initial_preset = state.get_eq_preset().to_string();
+        let initial_name = state.get_eq_name().to_string();
+        let initial_bands: [i16; VISIBLE_EQ_BANDS] = band_values(&state)
+            .try_into()
+            .expect("the A3062 page shows eight bands");
+        assert!(
+            state.get_has_saved_profiles(),
+            "the A3062 page shows the Import panel"
+        );
+        assert!(
+            profile_rows_of(&state).is_empty(),
+            "the run starts from an empty document"
+        );
+        assert_eq!(state.get_eq_export_count(), 0, "export stays inert");
+        assert_eq!(state.get_eq_legacy().row_count(), 0, "legacy stays empty");
+        println!(
+            "  found: preset {initial_preset:?} name {initial_name:?} bands {initial_bands:?}"
+        );
+
+        // Paste a real OpenSCL4 transfer profile through the Windows clipboard and
+        // the wired actions.
+        set_clipboard_text(WARM_IMPORT).expect("the clipboard takes the import text");
+        ui.global::<Actions>().invoke_eq_import_paste();
+        let items: Vec<ImportItem> = state.get_import_items().iter().collect();
+        let statuses: Vec<i32> = items.iter().map(|item| item.status).collect();
+        let names: Vec<String> = items.iter().map(|item| item.name.to_string()).collect();
+        println!(
+            "  paste: importing {} blocked {} items {names:?} statuses {statuses:?}",
+            state.get_importing(),
+            state.get_import_blocked()
+        );
+        assert!(state.get_importing(), "pasting a profile opens the dialog");
+        assert!(!state.get_import_blocked(), "a valid profile is importable");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name.as_str(), "Warm");
+        assert_eq!(items[0].status, 0, "the profile is new");
+        assert_eq!(items[0].bands, 8, "the row carries the eight-band count");
+        assert!(!items[0].curve.is_empty(), "the row carries the curve");
+        assert_eq!(state.get_transfer_note(), TransferNote::None);
+
+        ui.global::<Actions>().invoke_eq_import();
+        assert!(!state.get_importing(), "the dialog closes after the import");
+        assert_eq!(state.get_transfer_note(), TransferNote::Imported);
+        assert_eq!(state.get_transfer_count(), 1);
+        assert_eq!(state.get_toast(), ToastKind::Imported);
+        let rows = profile_rows_of(&state);
+        assert_eq!(rows.len(), 1, "the imported profile is listed");
+        assert_eq!(rows[0].name.as_str(), "Warm");
+        assert!(
+            !rows[0].in_effect,
+            "the imported curve is not on the device yet"
+        );
+        let document = load_profiles(&path);
+        assert_eq!(
+            document
+                .get("Warm")
+                .expect("the imported profile is saved")
+                .bands,
+            WARM_IMPORT_BANDS
+        );
+        println!(
+            "  imported {:?}: rows {} document {} profile(s), toast {:?}",
+            rows[0].name,
+            rows.len(),
+            document.len(),
+            state.get_toast()
+        );
+
+        // Applying the imported profile writes its curve on the real device.
+        click_apply_profile(&ui, "Warm");
+        let applied = wait_for_custom_curve(&ui, &inner, WARM_IMPORT_BANDS)
+            .expect("the imported curve is written and re-polled");
+        let rows = profile_rows_of(&state);
+        assert!(
+            rows[0].in_effect,
+            "the applied imported profile is marked Applied"
+        );
+        println!("  applied: re-polled bands {applied:?}");
+
+        // Import a second profile from a real file. The native file dialog cannot
+        // be driven from a test, so the seam supplies the picked path while the
+        // real reader loads the file.
+        let directory = TempDir::new("manual-import-file");
+        let file = directory.path().join("openscq30-equalizer-profiles.json");
+        let file_text = r#"[{"name": "File curve", "volumeAdjustments": [0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}]"#;
+        fs::write(&file, file_text).expect("the import file is written");
+        {
+            let mut import_text = inner.import_text.borrow_mut();
+            import_from_file(
+                &state,
+                &inner.profiles.borrow(),
+                &mut import_text,
+                &RecordedImportIo::picking(file.clone()),
+            );
+        }
+        let items: Vec<ImportItem> = state.get_import_items().iter().collect();
+        let names: Vec<String> = items.iter().map(|item| item.name.to_string()).collect();
+        println!(
+            "  file: importing {} items {names:?}",
+            state.get_importing()
+        );
+        assert!(state.get_importing(), "the picked file opens the dialog");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name.as_str(), "File curve");
+        ui.global::<Actions>().invoke_eq_import();
+        assert_eq!(state.get_transfer_note(), TransferNote::Imported);
+        assert_eq!(state.get_transfer_count(), 1);
+        let rows = profile_rows_of(&state);
+        assert_eq!(rows.len(), 2, "both imported profiles are listed");
+        let document = load_profiles(&path);
+        assert!(document.contains("File curve"));
+        assert_eq!(document.len(), 2);
+        println!(
+            "  imported from file: rows {} document {} profile(s)",
+            rows.len(),
+            document.len()
+        );
+
+        // A blocked import writes nothing: the dialog keeps its red note, the
+        // list and the document stay as they were.
+        let blocked_text = r#"[
+            {"name": "Seven bands", "volumeAdjustments": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
+            {"name": "Too loud", "volumeAdjustments": [13.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+        ]"#;
+        set_clipboard_text(blocked_text).expect("the clipboard takes the blocked text");
+        ui.global::<Actions>().invoke_eq_import_paste();
+        let items: Vec<ImportItem> = state.get_import_items().iter().collect();
+        let statuses: Vec<i32> = items.iter().map(|item| item.status).collect();
+        println!(
+            "  blocked paste: importing {} blocked {} statuses {statuses:?}",
+            state.get_importing(),
+            state.get_import_blocked()
+        );
+        assert!(state.get_importing());
+        assert!(
+            state.get_import_blocked(),
+            "the invalid rows block the file"
+        );
+        assert_eq!(statuses, [2, 3]);
+        let document_before = fs::read_to_string(&path).expect("the document is readable");
+        let rows_before = profile_rows_of(&state).len();
+        ui.global::<Actions>().invoke_eq_import();
+        assert!(
+            state.get_importing(),
+            "a blocked import leaves the dialog open"
+        );
+        assert_eq!(
+            profile_rows_of(&state).len(),
+            rows_before,
+            "a blocked import adds no profile"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("the document is readable"),
+            document_before,
+            "a blocked import writes nothing"
+        );
+        println!("  blocked import wrote nothing; the dialog stays open with its red note");
+        state.set_importing(false);
+        *inner.import_text.borrow_mut() = None;
+
+        // Delete both imported profiles after the confirmation state.
+        for name in ["File curve", "Warm"] {
+            state.set_eq_deleting(name.into());
+            click_delete_profile(&ui, name);
+            assert_eq!(
+                state.get_eq_deleting().as_str(),
+                "",
+                "the delete dialog closes"
+            );
+            assert!(
+                !profile_rows_of(&state)
+                    .iter()
+                    .any(|row| row.name.as_str() == name),
+                "{name:?} is no longer listed"
+            );
+        }
+        assert!(
+            profile_rows_of(&state).is_empty(),
+            "the imported profiles are all deleted"
+        );
+        assert!(load_profiles(&path).is_empty());
+        println!("  deleted both imported profiles; the document is empty again");
 
         // Put the state found on connect back, so the device is left as found.
         let initial_is_built_in = initial_preset.parse::<u16>().ok().is_some_and(|id| {
