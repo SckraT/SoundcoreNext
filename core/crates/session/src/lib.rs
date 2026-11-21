@@ -153,6 +153,11 @@ pub struct DeviceSession<T: Transport> {
 }
 
 impl<T: Transport> DeviceSession<T> {
+    /// Creates a session that parses `model`'s state from `transport`.
+    ///
+    /// Nothing is spawned here: the caller drives [`Self::poll_state`] on its
+    /// own worker thread, and dropping the session drops (and closes) the
+    /// transport.
     pub fn new(model: DeviceModel, transport: T) -> Self {
         Self {
             model,

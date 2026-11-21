@@ -50,7 +50,11 @@ pub struct SelectedModel {
 pub struct Candidate {
     /// The numeric Bluetooth address; the UI gets [`crate::transport_windows::format_mac`].
     pub address: u64,
+    /// The device name Windows shows in its own Bluetooth settings.
     pub name: String,
+    /// Whether the device probably is the chosen model: it advertises the
+    /// model's vendor service, or, when it has no Soundcore vendor service at
+    /// all, its name or code matches the catalog entry.
     pub suggested: bool,
 }
 
@@ -211,8 +215,11 @@ impl ConnectFailure {
 /// A paired device and the SDP services Windows cached for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairedServices {
+    /// The numeric Bluetooth address, as Windows reports it.
     pub address: u64,
+    /// The device name Windows shows.
     pub name: String,
+    /// The service class UUIDs from the device's cached SDP record.
     pub services: Vec<GUID>,
 }
 
@@ -310,9 +317,6 @@ pub fn selected_model(code: &str) -> Option<SelectedModel> {
 
 /// How often the UI thread drains the worker channel.
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(20);
-
-/// Demo rows use locally administered addresses and never reach Bluetooth.
-const DEMO_MAC_PREFIX: &str = "02:00:00:00:00:";
 
 /// Everything a worker needs to connect: the address, the catalog code the
 /// vendor service derives from, and the state parser. It holds no Slint
@@ -522,15 +526,6 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         }
     });
 
-    actions.on_set_demo({
-        let inner = Rc::clone(inner);
-        move |on| {
-            if let Some(window) = inner.ui.upgrade() {
-                set_demo(&window, &inner, on);
-            }
-        }
-    });
-
     actions.on_pair({
         let inner = Rc::clone(inner);
         move |mac, name| {
@@ -715,47 +710,17 @@ fn choose_model(window: &AppWindow, inner: &Rc<Inner>, code: &str) {
     state.set_add_failure_kind(FailureKind::None);
     state.set_add_error("".into());
     state.set_paired_options(ModelRc::default());
-    if state.get_add_demo() {
-        state.set_add_loading(false);
-        show_demo_options(&state);
-    } else {
-        state.set_add_loading(true);
-        inner.request_paired(Some((model.code.to_owned(), model.name.to_owned())));
-    }
+    state.set_add_loading(true);
+    inner.request_paired(Some((model.code.to_owned(), model.name.to_owned())));
 }
 
-/// Repeats the enumeration for the current selection, or refreshes the demo
-/// rows when demo mode is on.
+/// Repeats the enumeration for the current selection.
 fn refresh_paired(window: &AppWindow, inner: &Rc<Inner>) {
     let state = window.global::<AppState>();
     state.set_add_failure_kind(FailureKind::None);
     state.set_add_error("".into());
-    if state.get_add_demo() {
-        state.set_add_loading(false);
-        show_demo_options(&state);
-    } else {
-        state.set_add_bluetooth_off(false);
-        request_paired_for_selection(&state, inner);
-    }
-}
-
-/// Turns demo mode on or off; the on state lists simulated rows instead of
-/// paired devices, and pairing one never opens Bluetooth.
-fn set_demo(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
-    let state = window.global::<AppState>();
-    state.set_add_demo(on);
     state.set_add_bluetooth_off(false);
-    state.set_add_failure_kind(FailureKind::None);
-    state.set_add_error("".into());
-    if on {
-        // A paired result for the previous selection must not replace these.
-        inner.enumeration.set(inner.enumeration.get() + 1);
-        state.set_add_loading(false);
-        show_demo_options(&state);
-    } else {
-        state.set_paired_options(ModelRc::default());
-        request_paired_for_selection(&state, inner);
-    }
+    request_paired_for_selection(&state, inner);
 }
 
 /// Reads the chosen model from the dialog state and starts an enumeration for
@@ -770,26 +735,10 @@ fn chosen_model(state: &AppState<'_>) -> Option<SelectedModel> {
     selected_model(state.get_add_model_code().as_str())
 }
 
-/// The simulated rows demo mode lists.
-fn show_demo_options(state: &AppState<'_>) {
-    let options: Vec<PairedOption> = (1..=2)
-        .map(|index| PairedOption {
-            mac: format!("{DEMO_MAC_PREFIX}{index:02X}").into(),
-            name: format!("Demo device {index}").into(),
-            suggested: index == 1,
-        })
-        .collect();
-    state.set_paired_options(ModelRc::new(VecModel::from(options)));
-}
-
 /// Pairs the picked Windows device with the chosen catalog model and starts the
 /// connection attempt.
 fn pair(window: &AppWindow, inner: &Rc<Inner>, mac: &str, name: &str) {
     let state = window.global::<AppState>();
-    if state.get_add_demo() {
-        finish_demo_device(window, mac, name);
-        return;
-    }
     let Some(model) = chosen_model(&state) else {
         state.set_add_failure_kind(FailureKind::Other);
         state.set_add_error("Choose a model before picking a paired device.".into());
@@ -856,13 +805,8 @@ fn retry(window: &AppWindow, inner: &Rc<Inner>) {
     begin_card_connect(window, inner, card);
 }
 
-/// Starts the connection of a saved card: a demo card shows simulated state
-/// instead of opening Bluetooth.
+/// Starts the connection of a saved card.
 fn begin_card_connect(window: &AppWindow, inner: &Rc<Inner>, card: DeviceCard) {
-    if card.demo {
-        show_demo_card(window, &card);
-        return;
-    }
     let state = window.global::<AppState>();
     show_current_card(
         &state,
@@ -951,80 +895,12 @@ fn disconnect(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_page(Page::Devices);
 }
 
-/// Shows a connected demo device: no Bluetooth is involved.
-fn show_demo_card(window: &AppWindow, card: &DeviceCard) {
-    let state = window.global::<AppState>();
-    show_current_card(
-        &state,
-        DeviceCard {
-            current: true,
-            ..card.clone()
-        },
-    );
-    state.set_device_name(card.name.clone());
-    state.set_device_code(card.code.clone());
-    state.set_device_art(card.art.clone());
-    state.set_device_is_speaker(
-        selected_model(card.code.as_str()).is_some_and(|model| model.is_speaker),
-    );
-    state.set_one_earbud(false);
-    state.set_batteries(demo_batteries());
-    state.set_connection(Connection::Connected);
-    state.set_connection_reason("".into());
-    state.set_failure_kind(FailureKind::None);
-    state.set_failure_text("".into());
-}
-
-/// Pairs a simulated device from the dialog's demo rows.
-fn finish_demo_device(window: &AppWindow, mac: &str, name: &str) {
-    let state = window.global::<AppState>();
-    let chosen = chosen_model(&state);
-    let code = chosen.as_ref().map(|model| model.code).unwrap_or_default();
-    let art = chosen
-        .as_ref()
-        .map(|model| model.art.clone())
-        .unwrap_or_default();
-    let is_speaker = chosen.as_ref().is_some_and(|model| model.is_speaker);
-    show_current_card(
-        &state,
-        DeviceCard {
-            mac: mac.into(),
-            name: name.into(),
-            code: code.into(),
-            art: art.clone(),
-            current: true,
-            demo: true,
-        },
-    );
-    state.set_device_name(name.into());
-    state.set_device_code(code.into());
-    state.set_device_art(art);
-    state.set_device_is_speaker(is_speaker);
-    state.set_one_earbud(false);
-    state.set_batteries(demo_batteries());
-    state.set_connection(Connection::Connected);
-    state.set_connection_reason("".into());
-    state.set_failure_kind(FailureKind::None);
-    state.set_failure_text("".into());
-    state.set_adding(false);
-    state.set_add_step(0);
-    state.set_page(Page::Overview);
-}
-
 /// Sets the saved cards to `card` as their only current one.
 fn show_current_card(state: &AppState<'_>, card: DeviceCard) {
     let cards: Vec<DeviceCard> = state.get_devices().iter().collect();
     state.set_devices(ModelRc::new(VecModel::from(with_current_card(
         &cards, card,
     ))));
-}
-
-/// The simulated battery tiles of a demo device.
-fn demo_batteries() -> ModelRc<Battery> {
-    ModelRc::new(VecModel::from(vec![
-        battery_tile(0, 5, 5),
-        battery_tile(1, 4, 5),
-    ]))
 }
 
 /// Applies a finished enumeration to the dialog.
@@ -1148,21 +1024,21 @@ mod tests {
     #[test]
     fn a_paired_option_carries_the_address_in_the_ui_mac_form() {
         let candidate = Candidate {
-            address: 0x0000_F49D_8AA2_0001,
+            address: 0x0000_0200_0000_0001,
             name: "soundcore P20i".into(),
             suggested: true,
         };
         let option = paired_option(&candidate);
         assert_eq!(option.name.as_str(), "soundcore P20i");
         assert!(option.suggested);
-        assert_eq!(option.mac.as_str(), "F4:9D:8A:A2:00:01");
+        assert_eq!(option.mac.as_str(), "02:00:00:00:00:01");
     }
 
     #[test]
     fn a_paired_option_mac_parses_back_to_its_numeric_address() {
         for address in [
             0x0000_0000_0000_0000,
-            0x0000_F49D_8AA2_0001,
+            0x0000_0200_0000_0001,
             0x0000_FFFF_FFFF_FFFF,
         ] {
             let option = paired_option(&Candidate {
