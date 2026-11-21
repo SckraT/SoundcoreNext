@@ -31,7 +31,18 @@
 //! Invalid JSON, a wrong band count, an invalid name or band value, and
 //! duplicate names are typed errors ([`ProfileJsonError`]); the controller turns
 //! any of them into an empty set and a readable log line.
+//!
+//! # Importing OpenSCL4 transfer profiles
+//!
+//! [`preview_import`] reads the JSON array OpenSCL4 exports for custom
+//! equalizer profiles (`name` plus `volumeAdjustments` dB values), gives every
+//! profile a preview status, and [`ImportPreview::merge_into`] applies an
+//! importable preview to a [`ProfileSet`] all-or-nothing. That path is pure too:
+//! the controller owns the file dialog, the clipboard and persistence.
 
+mod import;
+
+pub use import::{ImportError, ImportItem, ImportPreview, ImportStatus, preview_import};
 use serde::{Deserialize, Serialize};
 use soundcore_models::{EQ_BAND_MAX, EQ_BAND_MIN, VISIBLE_EQ_BANDS};
 
@@ -68,17 +79,7 @@ impl EqualizerProfile {
         bands: [i16; VISIBLE_EQ_BANDS],
     ) -> Result<Self, ProfileError> {
         let name = name.into();
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(ProfileError::EmptyName);
-        }
-        let length = name.chars().count();
-        if length > MAX_PROFILE_NAME_LEN {
-            return Err(ProfileError::NameTooLong {
-                actual: length,
-                max: MAX_PROFILE_NAME_LEN,
-            });
-        }
+        let name = normalize_name(&name)?;
         validate_bands(&bands)?;
         Ok(Self {
             name: name.to_owned(),
@@ -90,6 +91,25 @@ impl EqualizerProfile {
     fn normalized(self) -> Result<Self, ProfileError> {
         Self::new(self.name, self.bands)
     }
+}
+
+/// Trims a profile name and validates its length, returning the trimmed name.
+///
+/// This is the one name rule: [`EqualizerProfile::new`] and the transfer-profile
+/// import both apply it, so an imported name is exactly as valid as a saved one.
+fn normalize_name(name: &str) -> Result<&str, ProfileError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ProfileError::EmptyName);
+    }
+    let length = name.chars().count();
+    if length > MAX_PROFILE_NAME_LEN {
+        return Err(ProfileError::NameTooLong {
+            actual: length,
+            max: MAX_PROFILE_NAME_LEN,
+        });
+    }
+    Ok(name)
 }
 
 /// Validates that every band is inside the measured A3062 dB×10 range.
