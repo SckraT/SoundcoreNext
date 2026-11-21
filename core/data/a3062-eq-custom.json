@@ -1,0 +1,14 @@
+{
+  "model": "A3062",
+  "source": "real capture of a Space One Pro (firmware 04.39) over the Windows RFCOMM transport on 2026-11-21: the 01 01 answer found on connect (Soundcore Signature, preset id 0), the 01 01 answer after writing the custom 03 87 body with the visible curve [30, -30, 60, 0, -60, 20, 0, -20] in dB×10 units (+3.0, -3.0, +6.0, 0, -6.0, +2.0, 0, -2.0 dB), and the 01 01 answer after restoring the preset found on connect; the serial bytes are sixteen ASCII zeroes, no address is present, and the checksums were recalculated after masking",
+  "preset_offset": 23,
+  "bands_offset": 25,
+  "custom_preset_id": 65278,
+  "visible_bands": [30, -30, 60, 0, -60, 20, 0, -20],
+  "bands": [30, -30, 60, 0, -60, 20, 0, -20, 0, -120],
+  "body_hex": "FE FE 00 00 96 5A B4 78 3C 8C 78 64 78 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 96 5A B4 78 3C 8C 78 64 78 00 00",
+  "frame_hex": "08 EE 00 00 00 03 87 3F 00 FE FE 00 00 96 5A B4 78 3C 8C 78 64 78 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 96 5A B4 78 3C 8C 78 64 78 00 00 17",
+  "before_frame_hex": "09 FF 00 00 01 01 01 69 00 05 FF 30 34 2E 33 39 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 00 00 78 78 78 78 78 78 78 78 78 00 1E 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 04 04 0F 03 02 51 01 01 00 05 32 01 00 00 01 01 01 00 5A 00 01 01 00 02 00 00 00 00 00 00 C0",
+  "custom_frame_hex": "09 FF 00 00 01 01 01 69 00 05 FF 30 34 2E 33 39 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 FE FE 96 5A B4 78 3C 8C 78 64 78 00 1E 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 04 04 0F 03 02 51 01 01 00 05 32 01 00 00 01 01 01 00 5A 00 01 01 00 02 00 00 00 00 00 00 BC",
+  "restored_frame_hex": "09 FF 00 00 01 01 01 69 00 05 FF 30 34 2E 33 39 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 00 00 78 78 78 78 78 78 78 78 78 00 1E 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 FF FF FF FF FF FF FF FF FF FF 00 00 04 04 0F 03 02 51 01 01 00 05 32 01 00 00 01 01 01 00 5A 00 01 01 00 02 00 00 00 00 00 00 C0"
+}

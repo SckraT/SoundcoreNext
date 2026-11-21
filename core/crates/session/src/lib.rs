@@ -9,8 +9,8 @@
 //!   available, tolerating leading garbage and several frames per read;
 //! - hand that frame to [`soundcore_models::parse_state_frame`];
 //! - write the measured `06 81` sound-mode frame for models that have one;
-//! - write the measured `03 87` equalizer preset frame for models that have
-//!   one.
+//! - write the measured `03 87` equalizer preset and custom frames for models
+//!   that have one.
 //!
 //! Nothing here knows about Windows, sockets, threads or timers.
 //!
@@ -31,7 +31,7 @@ use std::io;
 
 use soundcore_models::{
     DeviceModel, DeviceState, EqualizerPreset, EqualizerState, SoundMode, StateError,
-    parse_state_frame,
+    VISIBLE_EQ_BANDS, parse_state_frame,
 };
 use soundcore_protocol::{
     Command, Direction, INBOUND_PREFIX, MIN_FRAME_LEN, ParseError, encode, parse, request,
@@ -133,7 +133,7 @@ impl std::fmt::Display for SessionError {
             Self::UnsupportedEqualizer => {
                 write!(
                     formatter,
-                    "equalizer presets are not supported for this model"
+                    "equalizer writes are not supported for this model"
                 )
             }
         }
@@ -264,6 +264,39 @@ impl<T: Transport> DeviceSession<T> {
         let body = self
             .model
             .equalizer_preset_body(current, preset)
+            .ok_or(SessionError::UnsupportedEqualizer)?;
+        self.transport
+            .write_all(&encode(Direction::Outbound, Command::EQUALIZER, &body))?;
+        Ok(())
+    }
+
+    /// Write this model's `03 87` custom equalizer frame exactly once and
+    /// return once every byte of it is written.
+    ///
+    /// `visible_bands` are the eight bands the Equalizer page shows in raw
+    /// dB×10 units (`0` is `0 dB`, `-120` is `-12.0 dB`, `134` is `+13.4 dB`),
+    /// clamped to the measured `-120..=134` range. The 53-byte body keeps the
+    /// HearID fields of `current`, sets the preset id to
+    /// [`CUSTOM_EQUALIZER_PRESET_ID`](soundcore_models::CUSTOM_EQUALIZER_PRESET_ID)
+    /// and fixes the two invisible bands; see
+    /// [`DeviceModel::custom_equalizer_body`](soundcore_models::DeviceModel::custom_equalizer_body).
+    ///
+    /// This method never reads. The device acknowledges with an empty inbound
+    /// `03 87` frame and may push notifications; call [`Self::poll_state`]
+    /// afterwards to read the preset id and bands the device now reports, and it
+    /// will skip those frames.
+    ///
+    /// Fails with [`SessionError::UnsupportedEqualizer`] when this slice does
+    /// not support the model's equalizer (for example the deliberately deferred
+    /// A3949), and writes nothing in that case.
+    pub fn set_custom_equalizer(
+        &mut self,
+        current: &EqualizerState,
+        visible_bands: [i16; VISIBLE_EQ_BANDS],
+    ) -> Result<(), SessionError> {
+        let body = self
+            .model
+            .custom_equalizer_body(current, visible_bands)
             .ok_or(SessionError::UnsupportedEqualizer)?;
         self.transport
             .write_all(&encode(Direction::Outbound, Command::EQUALIZER, &body))?;
