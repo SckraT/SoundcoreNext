@@ -5,8 +5,10 @@ use std::collections::VecDeque;
 use std::io;
 use std::rc::Rc;
 
-use soundcore_models::BatteryScale;
-use soundcore_models::{SoundMode, model_by_code};
+use soundcore_models::{
+    AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, BatteryScale, ButtonAction, DbLimit,
+    DecibelReadingRefreshRate, SettingCommand, SoundMode, model_by_code,
+};
 use soundcore_protocol::{Command, Direction, ParseError, encode, request};
 use soundcore_session::{DeviceSession, ProtocolError, SessionError, Transport};
 
@@ -596,6 +598,153 @@ fn reports_a_failed_equalizer_write_as_an_io_error() {
         .expect_err("write failure");
     assert!(
         matches!(error, SessionError::Io(ref io_error) if io_error.kind() == io::ErrorKind::BrokenPipe),
+        "unexpected error: {error}"
+    );
+}
+
+/// The real sanitized A3062 `01 01` frame captured on connect.
+fn a3062_state_frame() -> Vec<u8> {
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        frame_hex: String,
+    }
+    let fixture: Fixture =
+        serde_json::from_str(include_str!("../../../data/a3062-state.json")).expect("fixture");
+    hex(&fixture.frame_hex)
+}
+
+#[test]
+fn writes_the_exact_a3062_setting_frame_once() {
+    let model = model_by_code("A3062").expect("A3062");
+    let cases: &[(SettingCommand, &str)] = &[
+        (
+            SettingCommand::ButtonDoublePress(Some(ButtonAction::BassUp)),
+            "08 EE 00 00 00 04 81 0D 00 00 00 07 8F",
+        ),
+        (
+            SettingCommand::AmbientSoundModeCycle(AmbientSoundModeCycle {
+                noise_canceling: true,
+                transparency: true,
+                normal: false,
+            }),
+            "08 EE 00 00 00 06 82 0B 00 03 8C",
+        ),
+        (
+            SettingCommand::LowBatteryPrompt(true),
+            "08 EE 00 00 00 10 82 0B 00 01 94",
+        ),
+        (
+            SettingCommand::DolbyAudio(true),
+            "08 EE 00 00 00 02 86 0B 00 01 8A",
+        ),
+        (
+            SettingCommand::Ldac(true),
+            "08 EE 00 00 00 01 FF 0B 00 01 02",
+        ),
+        (
+            SettingCommand::DualConnections(true),
+            "08 EE 00 00 00 0B 84 0B 00 01 91",
+        ),
+        (
+            SettingCommand::AutoPowerOff(AutoPowerOff {
+                enabled: true,
+                duration: AutoPowerOffDuration::SixtyMinutes,
+            }),
+            "08 EE 00 00 00 01 86 0C 00 01 01 8B",
+        ),
+        (
+            SettingCommand::LimitHighVolume {
+                enabled: false,
+                db_limit: DbLimit::new(90).expect("90 dB is a measured step"),
+            },
+            "08 EE 00 00 00 20 82 0C 00 00 5A FE",
+        ),
+        (
+            SettingCommand::LimitHighVolumeRefreshRate(DecibelReadingRefreshRate::RealTime),
+            "08 EE 00 00 00 20 81 0B 00 00 A2",
+        ),
+        (
+            SettingCommand::SideTone(true),
+            "08 EE 00 00 00 01 84 0B 00 01 87",
+        ),
+        (
+            SettingCommand::VoicePrompt(true),
+            "08 EE 00 00 00 01 AE 0B 00 01 B1",
+        ),
+    ];
+
+    for (setting, expected) in cases {
+        // No reads are scripted: the write must not try to read the ack.
+        let transport = FakeTransport::default();
+        let mut session = DeviceSession::new(model, transport.clone());
+
+        session.set_setting(*setting).expect("write the setting");
+        assert_eq!(transport.writes(), vec![hex(expected)], "{setting:?}");
+    }
+}
+
+#[test]
+fn a_model_without_a_measured_settings_block_writes_nothing() {
+    let model = model_by_code("A3949").expect("A3949");
+    let transport = FakeTransport::default();
+    let mut session = DeviceSession::new(model, transport.clone());
+
+    let error = session
+        .set_setting(SettingCommand::Ldac(true))
+        .expect_err("the P20i has no measured settings");
+    assert!(
+        matches!(error, SessionError::UnsupportedSetting),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "settings are not supported for this model"
+    );
+    assert!(transport.writes().is_empty(), "nothing may be written");
+}
+
+#[test]
+fn skips_the_setting_ack_and_a_notification_before_the_next_state() {
+    let model = model_by_code("A3062").expect("A3062");
+    // The device answers a setting write with an empty inbound frame of the
+    // same command and may push a battery notification before the `01 01`
+    // answer.
+    let ack = encode(Direction::Inbound, Command::new(0x10, 0x82), &[]);
+    let notification = encode(Direction::Inbound, Command::BATTERY, &[2]);
+    let mut scripted = ack;
+    scripted.extend_from_slice(&notification);
+    scripted.extend_from_slice(&a3062_state_frame());
+    let transport = FakeTransport::chunks([scripted]);
+    let mut session = DeviceSession::new(model, transport.clone());
+
+    session
+        .set_setting(SettingCommand::LowBatteryPrompt(true))
+        .expect("write the setting");
+    let state = session.poll_state().expect("state after the ack");
+    let settings = state.settings.expect("the A3062 settings");
+    assert!(settings.low_battery_prompt);
+    assert!(!settings.dolby_audio);
+    assert_eq!(
+        transport.writes(),
+        vec![
+            encode(Direction::Outbound, Command::new(0x10, 0x82), &[1],),
+            request(Command::STATE),
+        ],
+        "one setting frame, then one state request"
+    );
+}
+
+#[test]
+fn reports_a_failed_setting_write_as_an_io_error() {
+    let model = model_by_code("A3062").expect("A3062");
+    let transport = FakeTransport::failing_writes(io::ErrorKind::ConnectionReset);
+    let mut session = DeviceSession::new(model, transport);
+
+    let error = session
+        .set_setting(SettingCommand::VoicePrompt(true))
+        .expect_err("write failure");
+    assert!(
+        matches!(error, SessionError::Io(ref io_error) if io_error.kind() == io::ErrorKind::ConnectionReset),
         "unexpected error: {error}"
     );
 }
