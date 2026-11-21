@@ -39,9 +39,19 @@
 //! profile a preview status, and [`ImportPreview::merge_into`] applies an
 //! importable preview to a [`ProfileSet`] all-or-nothing. That path is pure too:
 //! the controller owns the file dialog, the clipboard and persistence.
+//!
+//! # Exporting OpenSCL4 transfer profiles
+//!
+//! [`export_json`] is the inverse: it writes the profiles selected for export as
+//! the same `name` plus `volumeAdjustments` array, converting the raw dB×10
+//! bands back to dB with exactly one decimal, so the text re-imports through
+//! [`preview_import`]. That path is pure too: the controller owns the save
+//! dialog and the clipboard.
 
+mod export;
 mod import;
 
+pub use export::export_json;
 pub use import::{ImportError, ImportItem, ImportPreview, ImportStatus, preview_import};
 use serde::{Deserialize, Serialize};
 use soundcore_models::{EQ_BAND_MAX, EQ_BAND_MIN, VISIBLE_EQ_BANDS};
