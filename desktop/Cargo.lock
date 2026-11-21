@@ -4147,6 +4147,7 @@ dependencies = [
 name = "soundcore-desktop"
 version = "2.0.0"
 dependencies = [
+ "arboard",
  "slint",
  "slint-build",
  "soundcore-models",

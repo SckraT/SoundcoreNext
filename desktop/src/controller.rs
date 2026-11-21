@@ -20,9 +20,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
-use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use soundcore_models::{
-    DeviceModel, DeviceState, EqualizerPreset, EqualizerState, SoundMode, VISIBLE_EQ_BANDS,
+    A3062Settings, AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, ButtonAction,
+    DbLimit, DecibelReadingRefreshRate, DeviceModel, DeviceState, EqualizerPreset, EqualizerState,
+    SettingCommand, SoundMode, VISIBLE_EQ_BANDS,
 };
 use soundcore_profiles::{EqualizerProfile, ProfileSet};
 use soundcore_session::{DeviceSession, SessionError, Transport};
@@ -35,7 +37,8 @@ use crate::transport_windows::{
 };
 use crate::{
     Actions, AppState, AppWindow, Battery, Connection, DeviceCard, EqBand, EqLine, EqProfile,
-    FailureKind, ModeOption, Page, PairedOption,
+    FailureKind, ModeOption, Page, PairedOption, PanelKind, RowKind, SettingRow, SettingsPanel,
+    SystemPage,
 };
 
 /// The model chosen in the Add Device dialog: what the catalog card shows plus
@@ -172,11 +175,16 @@ pub fn mode_for_index(index: i32) -> Option<SoundMode> {
         .and_then(|index| SoundMode::ALL.get(index).copied())
 }
 
-/// The sidebar pages of a parsed state: Sound mode and Equalizer only when the
-/// device reports a measured mode and a supported equalizer. A P20i has no
-/// measured sound mode, and its equalizer is deliberately deferred in this
-/// slice, so it shows neither page.
-pub fn sound_pages(sound_mode: Option<SoundMode>, has_equalizer: bool) -> Vec<Page> {
+/// The sidebar sound pages of a parsed state: Sound mode and Equalizer only when
+/// the device reports a measured mode and a supported equalizer, and Effects
+/// only when it reports the remaining-settings block (the A3062's LDAC and
+/// Dolby toggles). A P20i has no measured sound mode, a deferred equalizer and
+/// no settings block, so it shows none of them.
+pub fn sound_pages(
+    sound_mode: Option<SoundMode>,
+    has_equalizer: bool,
+    has_settings: bool,
+) -> Vec<Page> {
     let mut pages = Vec::new();
     if sound_mode.is_some() {
         pages.push(Page::SoundModes);
@@ -184,7 +192,26 @@ pub fn sound_pages(sound_mode: Option<SoundMode>, has_equalizer: bool) -> Vec<Pa
     if has_equalizer {
         pages.push(Page::Equalizer);
     }
+    if has_settings {
+        pages.push(Page::Effects);
+    }
     pages
+}
+
+/// The sidebar device pages of a state with the remaining-settings block: the
+/// A3062's Controls, Comfort, Power, Connections and About. A model without the
+/// block (the A3949 and the rest of the catalog) has no pages and no write path.
+pub fn device_pages(has_settings: bool) -> Vec<Page> {
+    if !has_settings {
+        return Vec::new();
+    }
+    vec![
+        Page::Controls,
+        Page::Comfort,
+        Page::Power,
+        Page::Connections,
+        Page::About,
+    ]
 }
 
 /// The A3062 equalizer range in device units (dB×10): -12.0..+13.4 dB. The
@@ -1004,6 +1031,83 @@ pub fn change_custom_equalizer<T: Transport>(
     state.equalizer.ok_or(EqFailure::Unreadable)
 }
 
+/// Why a remaining-settings write did not take, in the words the vendored error
+/// banner shows above the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingFailure {
+    /// The device did not answer the write or the state re-read in time.
+    TimedOut,
+    /// The Bluetooth link dropped before the new value was confirmed.
+    Disconnected,
+    /// The device answered with something this app cannot read.
+    Unreadable,
+}
+
+impl SettingFailure {
+    /// Reduces a session failure to the case the page has words for.
+    pub fn from_session(error: SessionError) -> Self {
+        match error {
+            SessionError::Timeout => Self::TimedOut,
+            SessionError::Io(_) => Self::Disconnected,
+            // A setting is only written for a model whose state reported the
+            // settings block, so the session always has a frame to write; the
+            // write-only variants keep the mapping total.
+            SessionError::Protocol(_)
+            | SessionError::UnsupportedLayout
+            | SessionError::UnsupportedSoundMode
+            | SessionError::UnsupportedEqualizer
+            | SessionError::UnsupportedSetting => Self::Unreadable,
+        }
+    }
+
+    /// The parenthesised reason the banner appends to the setting's name.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::TimedOut => "no answer",
+            Self::Disconnected => "connection lost",
+            Self::Unreadable => "unreadable answer",
+        }
+    }
+
+    /// The `AppState.error-label` of a failed write, naming the setting the row
+    /// names; the vendored banner wraps it as "Could not change “{}”.".
+    pub fn label(self, setting: SettingCommand) -> String {
+        format!("{} ({})", setting_label(setting), self.reason())
+    }
+}
+
+/// The row name a failed write's banner shows, matching the setting it wrote.
+pub fn setting_label(setting: SettingCommand) -> &'static str {
+    match setting {
+        SettingCommand::ButtonDoublePress(_) => "Double press",
+        SettingCommand::AmbientSoundModeCycle(_) => "Mode cycle",
+        SettingCommand::LowBatteryPrompt(_) => "Low battery prompt",
+        SettingCommand::DolbyAudio(_) => "Dolby audio",
+        SettingCommand::Ldac(_) => "LDAC",
+        SettingCommand::DualConnections(_) => "Dual connections",
+        SettingCommand::AutoPowerOff(_) => "Auto power off",
+        SettingCommand::LimitHighVolume { .. } => "Limit high volume",
+        SettingCommand::LimitHighVolumeRefreshRate(_) => "Refresh rate",
+        SettingCommand::SideTone(_) => "Side tone",
+        SettingCommand::VoicePrompt(_) => "Voice prompt",
+    }
+}
+
+/// Writes one settings frame and re-reads the state, returning the whole
+/// re-polled state so the caller can update the panels and About.
+///
+/// Blocking: only the device worker calls this, never the UI thread.
+pub fn change_setting<T: Transport>(
+    session: &mut DeviceSession<T>,
+    setting: SettingCommand,
+) -> Result<Box<DeviceState>, SettingFailure> {
+    session
+        .set_setting(setting)
+        .map_err(SettingFailure::from_session)?;
+    let state = session.poll_state().map_err(SettingFailure::from_session)?;
+    Ok(Box::new(state))
+}
+
 /// A failed connection, reduced to the cases the window has words for. It
 /// deliberately holds no Bluetooth address, so nothing built from it can leak a
 /// MAC into the UI.
@@ -1259,6 +1363,13 @@ enum DeviceCommand {
         request: u64,
         bands: [i16; VISIBLE_EQ_BANDS],
     },
+    /// Write one A3062 remaining setting and re-read the state; `request`
+    /// identifies the toggle, choice or slider release the same way
+    /// `ChangeSoundMode` does.
+    SetSetting {
+        request: u64,
+        setting: SettingCommand,
+    },
 }
 
 /// A worker-to-UI message; the sequence number tells the UI whether the result
@@ -1292,6 +1403,15 @@ enum Event {
         request: u64,
         outcome: Result<EqualizerState, EqFailure>,
     },
+    /// A device worker finished a remaining-settings write and re-read the
+    /// state; the whole state comes along so the panels and About can be
+    /// refilled from the device's answer.
+    SettingChanged {
+        attempt: u64,
+        request: u64,
+        setting: SettingCommand,
+        outcome: Result<Box<DeviceState>, SettingFailure>,
+    },
 }
 
 /// State shared between the UI callbacks and the polling timer. Every field is
@@ -1316,6 +1436,13 @@ struct Inner {
     /// The newest custom equalizer curve change; results of older changes are
     /// stale.
     curve_change: Cell<u64>,
+    /// The newest remaining-settings change; results of older changes are
+    /// stale.
+    setting_change: Cell<u64>,
+    /// The last state of the connected device. It is kept on the UI thread so
+    /// a section-page change refills the panels, and a settings write's
+    /// re-poll replaces it, without another poll.
+    device: RefCell<Option<Box<DeviceState>>>,
     /// The saved equalizer profiles, loaded from the document at startup and
     /// edited by the Equalizer page's save/apply/delete actions. UI thread only.
     profiles: RefCell<ProfileSet>,
@@ -1359,6 +1486,7 @@ impl Inner {
         self.mode_change.set(0);
         self.preset_change.set(0);
         self.curve_change.set(0);
+        self.setting_change.set(0);
         let cancel = Arc::new(AtomicBool::new(false));
         *self.cancel.borrow_mut() = Some(Arc::clone(&cancel));
         let (commands, command_receiver) = mpsc::channel();
@@ -1397,6 +1525,7 @@ impl Inner {
         self.mode_change.set(0);
         self.preset_change.set(0);
         self.curve_change.set(0);
+        self.setting_change.set(0);
     }
 
     /// Queues one write on the device worker, carrying the next value of
@@ -1448,6 +1577,8 @@ impl Controller {
             mode_change: Cell::new(0),
             preset_change: Cell::new(0),
             curve_change: Cell::new(0),
+            setting_change: Cell::new(0),
+            device: RefCell::new(None),
             profiles: RefCell::new(profiles),
             profiles_path,
         });
@@ -1468,18 +1599,16 @@ impl Controller {
 fn initial_state(ui: &AppWindow) {
     let state = ui.global::<AppState>();
     state.set_app_version(crate::app_version().into());
-    // The vendored shell keeps its Windows wording, and the MVP has no system
-    // settings deep links to offer.
+    // The vendored shell keeps its Windows wording; the deep links become
+    // available when a device with the settings block connects.
     state.set_linux(false);
-    state.set_system_settings_available(false);
     // Only Add Device, the device cards, the Overview battery, the Sound mode
-    // and the Equalizer page are wired in this shell; every other page's content
-    // stays empty.
-    show_sound_mode(&state, None, false);
+    // and the Equalizer page are wired before a device connects; every section
+    // page's content stays empty until an A3062 reports its settings.
+    show_sound_mode(&state, None, false, false);
     show_equalizer(&state, &EqualizerDisplay::default());
-    state.set_device_pages(ModelRc::default());
+    clear_section_pages(&state);
     state.set_overview_rows(ModelRc::default());
-    state.set_panels(ModelRc::default());
     state.set_quick_toggles(ModelRc::default());
     state.set_all_toggles(ModelRc::default());
     state.set_page(Page::Devices);
@@ -1586,6 +1715,28 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         }
     });
 
+    actions.on_set_toggle({
+        let inner = Rc::clone(inner);
+        move |setting_id, on| {
+            if let Some(window) = inner.ui.upgrade() {
+                set_toggle(&window, &inner, setting_id.as_str(), on);
+            }
+        }
+    });
+
+    actions.on_set_number({
+        let inner = Rc::clone(inner);
+        move |setting_id, value| {
+            if let Some(window) = inner.ui.upgrade() {
+                set_number(&window, &inner, setting_id.as_str(), value);
+            }
+        }
+    });
+
+    actions.on_copy(move |text| copy_text(text.as_str()));
+
+    actions.on_open_system_settings(open_system_settings);
+
     actions.on_eq_preset({
         let inner = Rc::clone(inner);
         move |value| {
@@ -1651,7 +1802,11 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         let inner = Rc::clone(inner);
         move |page| {
             if let Some(window) = inner.ui.upgrade() {
-                window.global::<AppState>().set_page(page);
+                let state = window.global::<AppState>();
+                state.set_page(page);
+                // The panels belong to the page, so a sidebar click refits them
+                // from the last connected state.
+                show_section_pages(&state, &inner);
             }
         }
     });
@@ -1695,6 +1850,18 @@ fn equalizer_change_applies<T>(
     attempt == current_attempt && (outcome.is_err() || request == newest_request)
 }
 
+/// Whether a finished remaining-settings change still updates the page, for the
+/// same reasons as [`mode_result_applies`].
+fn setting_result_applies(
+    outcome: &Result<Box<DeviceState>, SettingFailure>,
+    attempt: u64,
+    request: u64,
+    current_attempt: u64,
+    newest_request: u64,
+) -> bool {
+    attempt == current_attempt && (outcome.is_err() || request == newest_request)
+}
+
 /// Drains everything the workers sent since the last tick and applies it on the
 /// Slint thread. Stale results (from a superseded enumeration or a cancelled
 /// connect attempt) are dropped.
@@ -1713,18 +1880,20 @@ fn drain_events(inner: &Rc<Inner>) {
                 if attempt == inner.connect.get()
                     && let Some(window) = inner.ui.upgrade()
                 {
-                    // Only a connected model with a measured mode or a
-                    // supported equalizer keeps its worker (and socket) for
-                    // writes; everything else ends as in the MVP.
+                    // Only a connected model with a measured mode, a supported
+                    // equalizer or the settings block keeps its worker (and
+                    // socket) for writes; everything else ends as in the MVP.
                     let keeps_worker = matches!(
                         &outcome,
                         ConnectOutcome::Connected(_, state)
-                            if state.sound_mode.is_some() || state.equalizer.is_some()
+                            if state.sound_mode.is_some()
+                                || state.equalizer.is_some()
+                                || state.settings.is_some()
                     );
                     if !keeps_worker {
                         inner.stop_worker();
                     }
-                    apply_outcome(&window, outcome);
+                    apply_outcome(&window, inner, outcome);
                     // A connected A3062 shows the Saved profiles panel, so the
                     // loaded rows and their Applied tags are filled here.
                     show_saved_profiles(&window.global::<AppState>(), &inner.profiles.borrow());
@@ -1780,6 +1949,23 @@ fn drain_events(inner: &Rc<Inner>) {
                     apply_curve_outcome(&state, &|| inner.stop_worker(), outcome);
                     // A re-polled curve changes which saved profile is applied.
                     show_saved_profiles(&state, &inner.profiles.borrow());
+                }
+            }
+            Ok(Event::SettingChanged {
+                attempt,
+                request,
+                setting,
+                outcome,
+            }) => {
+                let applies = setting_result_applies(
+                    &outcome,
+                    attempt,
+                    request,
+                    inner.connect.get(),
+                    inner.setting_change.get(),
+                );
+                if applies && let Some(window) = inner.ui.upgrade() {
+                    apply_setting_outcome(&window, inner, setting, outcome);
                 }
             }
             // Both an empty queue and a closed channel mean nothing more will
@@ -1901,15 +2087,16 @@ fn serve_device<T: Transport>(
     let has_sound_mode = state.sound_mode.is_some();
     let mut equalizer = state.equalizer;
     let has_equalizer = equalizer.is_some();
+    let has_settings = state.settings.is_some();
     let _ = events.send(Event::Connected {
         attempt,
         outcome: ConnectOutcome::Connected(model, Box::new(state)),
     });
-    // A model with neither a measured mode nor a supported equalizer has
-    // nothing this worker can write; ending it closes the socket as the MVP
-    // did. Any other model keeps its session open for the `06 81` and `03 87`
-    // writes.
-    if !has_sound_mode && !has_equalizer {
+    // A model with neither a measured mode, a supported equalizer nor the
+    // settings block has nothing this worker can write; ending it closes the
+    // socket as the MVP did. Any other model keeps its session open for the
+    // `06 81`, `03 87` and settings writes.
+    if !has_sound_mode && !has_equalizer && !has_settings {
         return;
     }
     while let Ok(command) = commands.recv() {
@@ -1983,6 +2170,26 @@ fn serve_device<T: Transport>(
                 });
                 if failed {
                     // Same rule as a failed preset change: stop writing on a
+                    // session that is out of step and let Retry reconnect.
+                    return;
+                }
+            }
+            DeviceCommand::SetSetting { request, setting } => {
+                let outcome = change_setting(&mut session, setting);
+                // The re-polled state is the base of the next equalizer write,
+                // exactly as after a mode change.
+                if let Ok(reported) = &outcome {
+                    equalizer = reported.equalizer;
+                }
+                let failed = outcome.is_err();
+                let _ = events.send(Event::SettingChanged {
+                    attempt,
+                    request,
+                    setting,
+                    outcome,
+                });
+                if failed {
+                    // Same rule as a failed mode change: stop writing on a
                     // session that is out of step and let Retry reconnect.
                     return;
                 }
@@ -2135,6 +2342,7 @@ fn begin_card_connect(window: &AppWindow, inner: &Rc<Inner>, card: DeviceCard) {
     state.set_one_earbud(false);
     let Some(address) = parse_mac(card.mac.as_str()) else {
         apply_failure(
+            inner,
             &state,
             ConnectFailure::Transport(
                 "The saved device's Bluetooth address cannot be read. Add the device again.".into(),
@@ -2162,8 +2370,10 @@ fn begin_connecting(state: &AppState<'_>, inner: &Rc<Inner>, request: ConnectReq
     state.set_failure_text("".into());
     state.set_error_label("".into());
     state.set_batteries(ModelRc::default());
-    show_sound_mode(state, None, false);
+    inner.device.borrow_mut().take();
+    show_sound_mode(state, None, false, false);
     show_equalizer(state, &EqualizerDisplay::default());
+    clear_section_pages(state);
     inner.request_connect(request);
 }
 
@@ -2182,8 +2392,10 @@ fn cancel_connect(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_failure_kind(FailureKind::None);
     state.set_failure_text("".into());
     state.set_error_label("".into());
-    show_sound_mode(&state, None, false);
+    inner.device.borrow_mut().take();
+    show_sound_mode(&state, None, false, false);
     show_equalizer(&state, &EqualizerDisplay::default());
+    clear_section_pages(&state);
 }
 
 /// Drops the current device and returns to My Devices.
@@ -2210,8 +2422,10 @@ fn disconnect(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_failure_kind(FailureKind::None);
     state.set_failure_text("".into());
     state.set_error_label("".into());
-    show_sound_mode(&state, None, false);
+    inner.device.borrow_mut().take();
+    show_sound_mode(&state, None, false, false);
     show_equalizer(&state, &EqualizerDisplay::default());
+    clear_section_pages(&state);
     state.set_page(Page::Devices);
 }
 
@@ -2251,32 +2465,44 @@ fn apply_paired(window: &AppWindow, result: Result<Vec<Candidate>, BluetoothErro
 }
 
 /// Applies a finished connection attempt to the shell.
-fn apply_outcome(window: &AppWindow, outcome: ConnectOutcome) {
+///
+/// A connected state is also kept on the controller, because its settings
+/// decide the section pages and their panels; a failure clears it.
+fn apply_outcome(window: &AppWindow, inner: &Rc<Inner>, outcome: ConnectOutcome) {
     let state = window.global::<AppState>();
     match outcome {
         ConnectOutcome::Connected(model, device_state) => {
             let equalizer = EqualizerDisplay::new(Some(model), device_state.equalizer.as_ref());
+            let has_settings = device_state.settings.is_some();
             state.set_batteries(ModelRc::new(VecModel::from(batteries(&device_state))));
-            show_sound_mode(&state, device_state.sound_mode, equalizer.available);
+            show_sound_mode(
+                &state,
+                device_state.sound_mode,
+                equalizer.available,
+                has_settings,
+            );
+            show_device_pages(&state, has_settings);
             show_equalizer(&state, &equalizer);
             state.set_connection(Connection::Connected);
             state.set_connection_reason("".into());
             state.set_failure_kind(FailureKind::None);
             state.set_failure_text("".into());
             state.set_error_label("".into());
+            *inner.device.borrow_mut() = Some(device_state);
+            show_section_pages(&state, inner);
         }
-        // An unsupported battery layout reads as a failure with no tiles; the
-        // ConnectionState then shows the readable message.
-        ConnectOutcome::Failed(failure) => apply_failure(&state, failure),
+        ConnectOutcome::Failed(failure) => apply_failure(inner, &state, failure),
     }
 }
 
 /// Shows a failed connection: no battery tiles, the mapped state, and the
-/// readable explanation.
-fn apply_failure(state: &AppState<'_>, failure: ConnectFailure) {
+/// readable explanation. The section pages of a previous connection are gone.
+fn apply_failure(inner: &Rc<Inner>, state: &AppState<'_>, failure: ConnectFailure) {
     state.set_batteries(ModelRc::default());
-    show_sound_mode(state, None, false);
+    inner.device.borrow_mut().take();
+    show_sound_mode(state, None, false, false);
     show_equalizer(state, &EqualizerDisplay::default());
+    clear_section_pages(state);
     state.set_connection(failure.connection());
     state.set_connection_reason("".into());
     state.set_failure_kind(failure.kind());
@@ -2290,7 +2516,12 @@ fn apply_failure(state: &AppState<'_>, failure: ConnectFailure) {
 /// Sound mode page; a P20i gets none of them, so it never offers a mode change.
 /// The 1-to-11 scale and the per-mode strength/wind rows stay out of scope, so
 /// `mode-scale` is false and `mode-rows` stays empty.
-fn show_sound_mode(state: &AppState<'_>, sound_mode: Option<SoundMode>, has_equalizer: bool) {
+fn show_sound_mode(
+    state: &AppState<'_>,
+    sound_mode: Option<SoundMode>,
+    has_equalizer: bool,
+    has_settings: bool,
+) {
     state.set_modes(ModelRc::new(VecModel::from(mode_options(sound_mode))));
     state.set_mode_index(mode_index(sound_mode));
     state.set_mode_scale(false);
@@ -2298,6 +2529,7 @@ fn show_sound_mode(state: &AppState<'_>, sound_mode: Option<SoundMode>, has_equa
     state.set_sound_pages(ModelRc::new(VecModel::from(sound_pages(
         sound_mode,
         has_equalizer,
+        has_settings,
     ))));
     let label = |mode: SoundMode| {
         if sound_mode.is_some() {
@@ -2309,6 +2541,384 @@ fn show_sound_mode(state: &AppState<'_>, sound_mode: Option<SoundMode>, has_equa
     state.set_noise_canceling_label(label(SoundMode::NoiseCanceling).into());
     state.set_transparency_label(label(SoundMode::Transparency).into());
     state.set_normal_label(label(SoundMode::Normal).into());
+}
+
+/// Fills the sidebar device pages and the aside capability flags of a connected
+/// state. Only the A3062's settings block adds the pages; the A3949 and every
+/// other model keeps the MVP's surface, so it has no page and no write path.
+fn show_device_pages(state: &AppState<'_>, has_settings: bool) {
+    state.set_device_pages(ModelRc::new(VecModel::from(device_pages(has_settings))));
+    // The A3062 has one control surface, an LDAC toggle and no spatial audio;
+    // its case has no registers this slice reads.
+    state.set_has_sides(false);
+    state.set_has_ldac(has_settings);
+    state.set_has_spatial(false);
+    state.set_case_battery("".into());
+    // The Connections page's "open Windows settings" links need a device page
+    // that has them.
+    state.set_system_settings_available(has_settings);
+}
+
+/// Empties the section pages of a device that is connecting, disconnected or
+/// failed: no sidebar pages and no panels.
+fn clear_section_pages(state: &AppState<'_>) {
+    show_device_pages(state, false);
+    state.set_panels(ModelRc::default());
+}
+
+/// Fills `AppState.panels` with the current page's settings from the last
+/// connected state: on connect, after a sidebar page change, and after a
+/// settings write's re-poll. A page without panels (Overview, the Sound mode
+/// and Equalizer pages, or a model without the settings block such as the
+/// A3949) gets none.
+fn show_section_pages(state: &AppState<'_>, inner: &Rc<Inner>) {
+    let device = inner.device.borrow();
+    let panels = device
+        .as_deref()
+        .map(|device_state| panels_for_page(state.get_page(), device_state))
+        .unwrap_or_default();
+    state.set_panels(ModelRc::new(VecModel::from(panels)));
+}
+
+/// The double-press choices, in the page's order: the button does nothing, or
+/// Bass Up.
+pub const BUTTON_ACTION_OPTIONS: [&str; 2] = ["None", "Bass Up"];
+
+/// The auto-power-off choices: off, then the four measured durations in minutes.
+pub const AUTO_POWER_OFF_OPTIONS: [&str; 5] = [
+    "Disabled",
+    "30 minutes",
+    "60 minutes",
+    "90 minutes",
+    "120 minutes",
+];
+
+/// The limit-high-volume dB reading refresh choices.
+pub const REFRESH_RATE_OPTIONS: [&str; 3] = ["Real time", "10 seconds", "1 minute"];
+
+/// The settings panels of one sidebar page, in the vendored section page's panel
+/// layout.
+///
+/// The A3062 is the only model with a settings block; a state without one (the
+/// A3949 and the rest of the catalog so far) has no panels, so it can neither
+/// show a settings page nor name a setting for a write.
+pub fn panels_for_page(page: Page, device_state: &DeviceState) -> Vec<SettingsPanel> {
+    let Some(settings) = device_state.settings else {
+        return Vec::new();
+    };
+    let panels: Vec<Option<SettingsPanel>> = match page {
+        Page::Controls => vec![
+            settings_panel(
+                PanelKind::Presses,
+                vec![
+                    info_row("singlePress", "Single press", "Ambient sound mode"),
+                    select_row(
+                        "doublePress",
+                        "Double press",
+                        &BUTTON_ACTION_OPTIONS,
+                        button_action_index(settings.button_double_press),
+                    ),
+                ],
+            ),
+            settings_panel(
+                PanelKind::Cycle,
+                cycle_rows(settings.ambient_sound_mode_cycle),
+            ),
+        ],
+        Page::Comfort => vec![
+            settings_panel(
+                PanelKind::Plain,
+                vec![toggle_row("sideTone", "Side tone", settings.side_tone)],
+            ),
+            settings_panel(
+                PanelKind::Volume,
+                vec![
+                    toggle_row(
+                        "limitHighVolume",
+                        "Limit high volume",
+                        settings.limit_high_volume.enabled,
+                    ),
+                    range_row(
+                        "limitHighVolumeDbLimit",
+                        "dB limit",
+                        i32::from(DbLimit::MIN),
+                        i32::from(DbLimit::MAX),
+                        i32::from(DbLimit::STEP),
+                        i32::from(settings.limit_high_volume.db_limit.value()),
+                    ),
+                    select_row(
+                        "limitHighVolumeRefreshRate",
+                        "Refresh rate",
+                        &REFRESH_RATE_OPTIONS,
+                        refresh_rate_index(settings.limit_high_volume.refresh_rate),
+                    ),
+                ],
+            ),
+        ],
+        Page::Power => vec![settings_panel(
+            PanelKind::Plain,
+            vec![
+                select_row(
+                    "autoPowerOff",
+                    "Auto power off",
+                    &AUTO_POWER_OFF_OPTIONS,
+                    auto_power_off_index(settings.auto_power_off),
+                ),
+                toggle_row(
+                    "lowBatteryPrompt",
+                    "Low battery prompt",
+                    settings.low_battery_prompt,
+                ),
+                toggle_row("voicePrompt", "Voice prompt", settings.voice_prompt),
+            ],
+        )],
+        // The A3062's dual-connections device list is a separate follow-up
+        // slice, so the page has the toggle only.
+        Page::Connections => vec![settings_panel(
+            PanelKind::Plain,
+            vec![toggle_row(
+                "dualConnections",
+                "Dual connections",
+                settings.dual_connections,
+            )],
+        )],
+        Page::Effects => vec![settings_panel(
+            PanelKind::Plain,
+            vec![
+                toggle_row("ldac", "LDAC", settings.ldac),
+                toggle_row("dolbyAudio", "Dolby audio", settings.dolby_audio),
+            ],
+        )],
+        Page::About => vec![settings_panel(PanelKind::Info, about_rows(device_state))],
+        _ => Vec::new(),
+    };
+    panels.into_iter().flatten().collect()
+}
+
+/// One settings panel, or `None` when it would have no rows; an empty panel
+/// would still draw its frame.
+fn settings_panel(kind: PanelKind, rows: Vec<SettingRow>) -> Option<SettingsPanel> {
+    (!rows.is_empty()).then(|| SettingsPanel {
+        kind,
+        rows: ModelRc::new(VecModel::from(rows)),
+    })
+}
+
+/// A base row with no control-specific fields; the helpers below fill in theirs.
+fn setting_row(id: &str, kind: RowKind, label: &str) -> SettingRow {
+    SettingRow {
+        id: id.into(),
+        kind,
+        label: label.into(),
+        enabled: true,
+        reason: "".into(),
+        checked: false,
+        options: ModelRc::default(),
+        index: -1,
+        minimum: 0,
+        maximum: 0,
+        step: 0,
+        value: 0,
+        text: "".into(),
+    }
+}
+
+fn toggle_row(id: &str, label: &str, checked: bool) -> SettingRow {
+    SettingRow {
+        checked,
+        ..setting_row(id, RowKind::Toggle, label)
+    }
+}
+
+fn select_row(id: &str, label: &str, options: &[&str], index: i32) -> SettingRow {
+    let options: Vec<SharedString> = options.iter().map(|option| (*option).into()).collect();
+    SettingRow {
+        options: ModelRc::new(VecModel::from(options)),
+        index,
+        ..setting_row(id, RowKind::Select, label)
+    }
+}
+
+fn range_row(
+    id: &str,
+    label: &str,
+    minimum: i32,
+    maximum: i32,
+    step: i32,
+    value: i32,
+) -> SettingRow {
+    SettingRow {
+        minimum,
+        maximum,
+        step,
+        value,
+        ..setting_row(id, RowKind::Range, label)
+    }
+}
+
+fn info_row(id: &str, label: &str, text: &str) -> SettingRow {
+    SettingRow {
+        text: text.into(),
+        ..setting_row(id, RowKind::Info, label)
+    }
+}
+
+/// The three cycle toggles of the Controls page, in the page's order.
+fn cycle_rows(cycle: AmbientSoundModeCycle) -> Vec<SettingRow> {
+    vec![
+        toggle_row(
+            "noiseCancelingModeInCycle",
+            "Noise canceling",
+            cycle.noise_canceling,
+        ),
+        toggle_row(
+            "transparencyModeInCycle",
+            "Transparency",
+            cycle.transparency,
+        ),
+        toggle_row("normalModeInCycle", "Normal", cycle.normal),
+    ]
+}
+
+/// The About rows: charging, battery and firmware. The serial is deliberately
+/// omitted: the vendored Info row copies its whole text, and the spec keeps
+/// serials out of screenshots and reports.
+fn about_rows(device_state: &DeviceState) -> Vec<SettingRow> {
+    let Some(single) = &device_state.single_battery else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    if let Some(charging) = single.charging {
+        let text = if charging { "Charging" } else { "Not charging" };
+        rows.push(info_row("isCharging", "Is charging", text));
+    }
+    let battery = battery_tile(
+        WHOLE_DEVICE_BATTERY_LABEL,
+        single.value,
+        single.scale.maximum(),
+    );
+    rows.push(info_row(
+        "batteryLevel",
+        "Battery level",
+        battery.value.as_str(),
+    ));
+    if let Some(firmware) = single.firmware.as_deref() {
+        rows.push(info_row("firmwareVersion", "Firmware version", firmware));
+    }
+    rows
+}
+
+/// The index of a double-press action in [`BUTTON_ACTION_OPTIONS`].
+pub fn button_action_index(action: Option<ButtonAction>) -> i32 {
+    match action {
+        None => 0,
+        Some(ButtonAction::BassUp) => 1,
+    }
+}
+
+/// The index of an auto-power-off state in [`AUTO_POWER_OFF_OPTIONS`]: zero is
+/// off, then the four durations.
+pub fn auto_power_off_index(auto_power_off: AutoPowerOff) -> i32 {
+    if auto_power_off.enabled {
+        i32::from(auto_power_off.duration.index()) + 1
+    } else {
+        0
+    }
+}
+
+/// The index of a dB reading refresh rate in [`REFRESH_RATE_OPTIONS`].
+pub fn refresh_rate_index(refresh_rate: DecibelReadingRefreshRate) -> i32 {
+    i32::from(refresh_rate.value())
+}
+
+/// The write a section-page toggle names, or `None` for any other id: every
+/// setting that is not a toggle (or that has its own page, such as the Sound
+/// mode tiles) has its own path, so an unknown id never writes.
+pub fn toggle_command(id: &str, on: bool, current: &A3062Settings) -> Option<SettingCommand> {
+    Some(match id {
+        "sideTone" => SettingCommand::SideTone(on),
+        "lowBatteryPrompt" => SettingCommand::LowBatteryPrompt(on),
+        "voicePrompt" => SettingCommand::VoicePrompt(on),
+        "ldac" => SettingCommand::Ldac(on),
+        "dolbyAudio" => SettingCommand::DolbyAudio(on),
+        "dualConnections" => SettingCommand::DualConnections(on),
+        // The enable flag and the dB limit travel in one measured body, so the
+        // toggle keeps the limit the device reports.
+        "limitHighVolume" => SettingCommand::LimitHighVolume {
+            enabled: on,
+            db_limit: current.limit_high_volume.db_limit,
+        },
+        // A cycle toggle changes one bit and keeps the other two.
+        "noiseCancelingModeInCycle" => {
+            SettingCommand::AmbientSoundModeCycle(AmbientSoundModeCycle {
+                noise_canceling: on,
+                ..current.ambient_sound_mode_cycle
+            })
+        }
+        "transparencyModeInCycle" => SettingCommand::AmbientSoundModeCycle(AmbientSoundModeCycle {
+            transparency: on,
+            ..current.ambient_sound_mode_cycle
+        }),
+        "normalModeInCycle" => SettingCommand::AmbientSoundModeCycle(AmbientSoundModeCycle {
+            normal: on,
+            ..current.ambient_sound_mode_cycle
+        }),
+        _ => return None,
+    })
+}
+
+/// The write a section-page select names, or `None` for an unknown id or an
+/// index outside the row's choices.
+pub fn option_command(id: &str, index: i32, current: &A3062Settings) -> Option<SettingCommand> {
+    match id {
+        // Choosing a duration also enables auto power off; choosing "Disabled"
+        // keeps the duration the device reports, exactly as OpenSCL4's handler
+        // does, so switching back on restores it.
+        "autoPowerOff" => {
+            let auto_power_off = match index {
+                0 => AutoPowerOff {
+                    enabled: false,
+                    duration: current.auto_power_off.duration,
+                },
+                1..=4 => AutoPowerOff {
+                    enabled: true,
+                    duration: AutoPowerOffDuration::from_index(u8::try_from(index - 1).ok()?)?,
+                },
+                _ => return None,
+            };
+            Some(SettingCommand::AutoPowerOff(auto_power_off))
+        }
+        "limitHighVolumeRefreshRate" => {
+            refresh_rate_from_index(index).map(SettingCommand::LimitHighVolumeRefreshRate)
+        }
+        "doublePress" => match index {
+            0 => Some(SettingCommand::ButtonDoublePress(None)),
+            1 => Some(SettingCommand::ButtonDoublePress(Some(
+                ButtonAction::BassUp,
+            ))),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The write a section-page range release names, or `None` for an unknown id or
+/// a value outside the measured dB steps.
+pub fn number_command(id: &str, value: i32, current: &A3062Settings) -> Option<SettingCommand> {
+    if id != "limitHighVolumeDbLimit" {
+        return None;
+    }
+    let db_limit = DbLimit::new(u8::try_from(value).ok()?)?;
+    Some(SettingCommand::LimitHighVolume {
+        enabled: current.limit_high_volume.enabled,
+        db_limit,
+    })
+}
+
+fn refresh_rate_from_index(index: i32) -> Option<DecibelReadingRefreshRate> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| DecibelReadingRefreshRate::ALL.get(index).copied())
 }
 
 /// Fills the vendored Equalizer page from the parsed state.
@@ -2373,6 +2983,31 @@ fn apply_mode_outcome(
     }
 }
 
+/// Applies a finished settings change: the re-polled state replaces the
+/// controller's copy and refills the panels and About, or the error banner names
+/// the setting that failed.
+fn apply_setting_outcome(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    setting: SettingCommand,
+    outcome: Result<Box<DeviceState>, SettingFailure>,
+) {
+    let state = window.global::<AppState>();
+    match outcome {
+        Ok(reported) => {
+            *inner.device.borrow_mut() = Some(reported);
+            show_section_pages(&state, inner);
+            state.set_error_label("".into());
+        }
+        Err(failure) => {
+            // The worker closes the session after a failed write; Retry in the
+            // banner opens a fresh connection.
+            inner.stop_worker();
+            state.set_error_label(failure.label(setting).into());
+        }
+    }
+}
+
 /// Applies a finished equalizer preset change: the preset and curve the device
 /// reports become the page's, or the error banner names the setting that
 /// failed. The preset catalog is kept; only the state-dependent fields change.
@@ -2417,13 +3052,22 @@ fn show_equalizer_state(state: &AppState<'_>, equalizer: &EqualizerState) {
     );
 }
 
-/// Answers a choice control on the UI thread. Only the Sound mode tiles are
-/// wired in this slice; every other setting id and any index outside them is
-/// ignored, so no other frame can be written.
+/// Answers a choice control on the UI thread. The Sound mode tiles keep their
+/// own `ambientSoundMode` id and `06 81` write; every other id is a section row,
+/// and an id or index this slice does not write is ignored, so no other frame
+/// can be written.
 fn set_option(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, index: i32) {
-    if setting_id != "ambientSoundMode" {
+    if setting_id == "ambientSoundMode" {
+        set_ambient_sound_mode(window, inner, index);
         return;
     }
+    answer_setting(window, inner, |settings| {
+        option_command(setting_id, index, settings)
+    });
+}
+
+/// Answers a Sound mode tile: queues one `06 81` write on the device worker.
+fn set_ambient_sound_mode(window: &AppWindow, inner: &Rc<Inner>, index: i32) {
     let state = window.global::<AppState>();
     // No connection, or a model without a measured sound mode, means no tiles
     // and no `06 81` frame. The session refuses the write as well.
@@ -2440,6 +3084,98 @@ fn set_option(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, index: i3
         // The worker of a previous failed change has closed the connection; the
         // banner's Retry reconnects.
         state.set_error_label(ModeFailure::Disconnected.label().into());
+    }
+}
+
+/// Answers a toggle on a section page.
+fn set_toggle(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, on: bool) {
+    answer_setting(window, inner, |settings| {
+        toggle_command(setting_id, on, settings)
+    });
+}
+
+/// Answers a range release on a section page.
+fn set_number(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, value: i32) {
+    answer_setting(window, inner, |settings| {
+        number_command(setting_id, value, settings)
+    });
+}
+
+/// Queues one settings write on the device worker, named from the last connected
+/// state. Nothing is sent when the connection cannot write (not connected, or a
+/// state without the settings block such as the A3949) or the click names no
+/// write.
+fn answer_setting(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    command: impl FnOnce(&A3062Settings) -> Option<SettingCommand>,
+) {
+    let state = window.global::<AppState>();
+    // No connection, or a model without the settings block, means no settings
+    // page and no settings frame; the session refuses the write as well.
+    if state.get_connection() != Connection::Connected {
+        return;
+    }
+    let settings = inner
+        .device
+        .borrow()
+        .as_ref()
+        .and_then(|device_state| device_state.settings);
+    let Some(settings) = settings else {
+        return;
+    };
+    let Some(setting) = command(&settings) else {
+        return;
+    };
+    let sent = inner.send_queued(&inner.setting_change, |request| DeviceCommand::SetSetting {
+        request,
+        setting,
+    });
+    if !sent {
+        // The worker of a previous failed write has closed the connection; the
+        // banner's Retry reconnects.
+        state.set_error_label(SettingFailure::Disconnected.label(setting).into());
+    }
+}
+
+/// Copies a section row's text to the Windows clipboard, as the vendored Info
+/// row's copy button asks.
+fn copy_text(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Err(error) = set_clipboard_text(text) {
+        // Copying is not a device write; a clipboard problem is only logged.
+        eprintln!("OpenSCL4: could not copy to the clipboard: {error}");
+    }
+}
+
+/// Puts `text` on the clipboard; split from [`copy_text`] so the action stays
+/// one line.
+fn set_clipboard_text(text: &str) -> Result<(), arboard::Error> {
+    arboard::Clipboard::new()?.set_text(text.to_owned())
+}
+
+/// The Windows Settings URI of a vendored system page.
+pub fn system_settings_uri(page: SystemPage) -> &'static str {
+    match page {
+        SystemPage::Bluetooth => "ms-settings:bluetooth",
+        SystemPage::Sound => "ms-settings:sound",
+    }
+}
+
+/// Opens one of the Windows settings pages, as the Connections page's links ask.
+fn open_system_settings(page: SystemPage) {
+    let uri = windows::core::HSTRING::from(system_settings_uri(page));
+    unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            &uri,
+            None,
+            None,
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        );
     }
 }
 
@@ -3915,6 +4651,674 @@ mod tests {
         captured_frame(include_str!("../../core/data/a3062-state.json"))
     }
 
+    /// The parsed state of the committed real A3062 capture.
+    fn a3062_state() -> DeviceState {
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        soundcore_models::parse_state_frame(model, &captured_a3062_frame())
+            .expect("the real capture parses")
+    }
+
+    /// The parsed state of the committed real A3949 capture.
+    fn a3949_state() -> DeviceState {
+        let model = soundcore_models::model_by_code("A3949").expect("A3949 is a state model");
+        soundcore_models::parse_state_frame(model, &captured_a3949_frame())
+            .expect("the real capture parses")
+    }
+
+    /// The measured A3062 settings block of the committed capture.
+    fn measured_settings() -> A3062Settings {
+        a3062_state().settings.expect("the A3062 reports settings")
+    }
+
+    /// The measured A3062 `01 01` frame with body bytes replaced and the
+    /// checksum recomputed, for a device answer after a setting changed. The
+    /// offsets are `01 01` body offsets, as the core parses them.
+    fn a3062_frame_with(changes: &[(usize, u8)]) -> Vec<u8> {
+        let mut frame = captured_a3062_frame();
+        for (offset, value) in changes {
+            frame[STATE_FRAME_HEADER_LEN + offset] = *value;
+        }
+        let checksum_at = frame.len() - 1;
+        frame[checksum_at] = soundcore_protocol::checksum(&frame[..checksum_at]);
+        frame
+    }
+
+    /// The committed capture with a valid firmware string (body 2..7, `04.39`),
+    /// which the sanitized capture zeroes.
+    fn a3062_state_with_firmware() -> DeviceState {
+        let frame = a3062_frame_with(&[(2, b'0'), (3, b'4'), (4, b'.'), (5, b'3'), (6, b'9')]);
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        soundcore_models::parse_state_frame(model, &frame).expect("the patched capture parses")
+    }
+
+    fn panel_kinds(panels: &[SettingsPanel]) -> Vec<PanelKind> {
+        panels.iter().map(|panel| panel.kind).collect()
+    }
+
+    fn row_ids(panel: &SettingsPanel) -> Vec<String> {
+        panel.rows.iter().map(|row| row.id.to_string()).collect()
+    }
+
+    fn row_kinds(panel: &SettingsPanel) -> Vec<RowKind> {
+        panel.rows.iter().map(|row| row.kind).collect()
+    }
+
+    fn select_options(panel: &SettingsPanel, index: usize) -> Vec<String> {
+        let row: SettingRow = panel.rows.iter().nth(index).expect("the row exists");
+        row.options
+            .iter()
+            .map(|option| option.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_a3062_settings_block_adds_the_measured_pages() {
+        let state = a3062_state();
+        assert_eq!(state.settings, Some(measured_settings()));
+        assert_eq!(
+            device_pages(state.settings.is_some()),
+            vec![
+                Page::Controls,
+                Page::Comfort,
+                Page::Power,
+                Page::Connections,
+                Page::About
+            ]
+        );
+        assert_eq!(
+            sound_pages(
+                state.sound_mode,
+                state.equalizer.is_some(),
+                state.settings.is_some()
+            ),
+            vec![Page::SoundModes, Page::Equalizer, Page::Effects]
+        );
+    }
+
+    #[test]
+    fn a_state_without_the_settings_block_has_no_pages_or_panels() {
+        // The A3949 is the deferred model: its capture parses, but it has no
+        // settings block, so no page, no panel and no writable row exists.
+        let state = a3949_state();
+        assert_eq!(state.settings, None);
+        assert!(device_pages(state.settings.is_some()).is_empty());
+        assert!(
+            sound_pages(
+                state.sound_mode,
+                state.equalizer.is_some(),
+                state.settings.is_some()
+            )
+            .is_empty()
+        );
+        for page in [
+            Page::Controls,
+            Page::Comfort,
+            Page::Power,
+            Page::Connections,
+            Page::About,
+            Page::Effects,
+        ] {
+            assert!(
+                panels_for_page(page, &state).is_empty(),
+                "{page:?} must have no panels"
+            );
+        }
+    }
+
+    #[test]
+    fn the_controls_page_has_the_presses_and_cycle_panels() {
+        let state = a3062_state();
+        let panels = panels_for_page(Page::Controls, &state);
+        assert_eq!(
+            panel_kinds(&panels),
+            vec![PanelKind::Presses, PanelKind::Cycle]
+        );
+
+        let presses = &panels[0];
+        assert_eq!(row_ids(presses), ["singlePress", "doublePress"]);
+        assert_eq!(row_kinds(presses), vec![RowKind::Info, RowKind::Select]);
+        let single: SettingRow = presses.rows.iter().next().expect("the single press row");
+        assert_eq!(single.text.as_str(), "Ambient sound mode");
+        assert!(single.enabled);
+        assert_eq!(select_options(presses, 1), ["None", "Bass Up"]);
+        let double: SettingRow = presses.rows.iter().nth(1).expect("the double press row");
+        assert_eq!(double.index, 0, "the measured double press does nothing");
+
+        let cycle = &panels[1];
+        assert_eq!(
+            row_ids(cycle),
+            [
+                "noiseCancelingModeInCycle",
+                "transparencyModeInCycle",
+                "normalModeInCycle"
+            ]
+        );
+        assert_eq!(
+            row_kinds(cycle),
+            vec![RowKind::Toggle, RowKind::Toggle, RowKind::Toggle]
+        );
+        let checked: Vec<bool> = cycle.rows.iter().map(|row| row.checked).collect();
+        assert_eq!(checked, [true, true, false], "the measured cycle bits");
+    }
+
+    #[test]
+    fn the_comfort_page_has_the_side_tone_and_volume_panels() {
+        let state = a3062_state();
+        let panels = panels_for_page(Page::Comfort, &state);
+        assert_eq!(
+            panel_kinds(&panels),
+            vec![PanelKind::Plain, PanelKind::Volume]
+        );
+        assert_eq!(row_ids(&panels[0]), ["sideTone"]);
+        assert_eq!(row_kinds(&panels[0]), vec![RowKind::Toggle]);
+        let side: SettingRow = panels[0].rows.iter().next().expect("the side tone row");
+        assert!(side.checked, "the measured side tone is on");
+
+        let volume = &panels[1];
+        assert_eq!(
+            row_ids(volume),
+            [
+                "limitHighVolume",
+                "limitHighVolumeDbLimit",
+                "limitHighVolumeRefreshRate"
+            ]
+        );
+        assert_eq!(
+            row_kinds(volume),
+            vec![RowKind::Toggle, RowKind::Range, RowKind::Select]
+        );
+        let rows: Vec<SettingRow> = volume.rows.iter().collect();
+        assert!(!rows[0].checked, "the measured limit high volume is off");
+        assert_eq!(
+            (
+                rows[1].minimum,
+                rows[1].maximum,
+                rows[1].step,
+                rows[1].value
+            ),
+            (75, 100, 5, 90),
+            "the measured dB range and the reported limit"
+        );
+        assert_eq!(
+            select_options(volume, 2),
+            ["Real time", "10 seconds", "1 minute"]
+        );
+        assert_eq!(rows[2].index, 0, "the measured refresh rate is real time");
+    }
+
+    #[test]
+    fn the_power_page_has_the_auto_power_off_and_prompts() {
+        let state = a3062_state();
+        let panels = panels_for_page(Page::Power, &state);
+        assert_eq!(panel_kinds(&panels), vec![PanelKind::Plain]);
+        assert_eq!(
+            row_ids(&panels[0]),
+            ["autoPowerOff", "lowBatteryPrompt", "voicePrompt"]
+        );
+        assert_eq!(
+            row_kinds(&panels[0]),
+            vec![RowKind::Select, RowKind::Toggle, RowKind::Toggle]
+        );
+        assert_eq!(
+            select_options(&panels[0], 0),
+            [
+                "Disabled",
+                "30 minutes",
+                "60 minutes",
+                "90 minutes",
+                "120 minutes"
+            ]
+        );
+        let rows: Vec<SettingRow> = panels[0].rows.iter().collect();
+        assert_eq!(
+            rows[0].index, 2,
+            "the measured auto power off is on at 60 minutes"
+        );
+        assert!(rows[1].checked, "the measured low battery prompt is on");
+        assert!(rows[2].checked, "the measured voice prompt is on");
+    }
+
+    #[test]
+    fn the_connections_page_has_the_dual_connections_toggle_only() {
+        // The remembered-device list and its forget action belong to the
+        // follow-up dual-connections slice, so this page has one panel and one
+        // row.
+        let state = a3062_state();
+        let panels = panels_for_page(Page::Connections, &state);
+        assert_eq!(panel_kinds(&panels), vec![PanelKind::Plain]);
+        assert_eq!(panels.len(), 1);
+        assert_eq!(row_ids(&panels[0]), ["dualConnections"]);
+        let row: SettingRow = panels[0].rows.iter().next().expect("the toggle row");
+        assert!(row.checked, "the measured dual connections are on");
+    }
+
+    #[test]
+    fn the_effects_page_has_the_ldac_and_dolby_toggles() {
+        let state = a3062_state();
+        let panels = panels_for_page(Page::Effects, &state);
+        assert_eq!(panel_kinds(&panels), vec![PanelKind::Plain]);
+        assert_eq!(row_ids(&panels[0]), ["ldac", "dolbyAudio"]);
+        assert_eq!(
+            row_kinds(&panels[0]),
+            vec![RowKind::Toggle, RowKind::Toggle]
+        );
+        let checked: Vec<bool> = panels[0].rows.iter().map(|row| row.checked).collect();
+        assert_eq!(
+            checked,
+            [false, false],
+            "the measured LDAC and Dolby are off"
+        );
+    }
+
+    #[test]
+    fn the_about_page_has_the_charging_battery_and_firmware_information() {
+        let state = a3062_state_with_firmware();
+        let panels = panels_for_page(Page::About, &state);
+        assert_eq!(panel_kinds(&panels), vec![PanelKind::Info]);
+        assert_eq!(
+            row_ids(&panels[0]),
+            ["isCharging", "batteryLevel", "firmwareVersion"]
+        );
+        let rows: Vec<SettingRow> = panels[0].rows.iter().collect();
+        assert!(rows.iter().all(|row| row.kind == RowKind::Info));
+        assert_eq!(
+            rows[0].text.as_str(),
+            "Not charging",
+            "the measured capture is not charging"
+        );
+        assert_eq!(
+            rows[1].text.as_str(),
+            "20%",
+            "the measured ten-step battery reads two"
+        );
+        assert_eq!(rows[2].text.as_str(), "04.39", "the firmware of body 2..7");
+        assert!(
+            !row_ids(&panels[0]).iter().any(|id| id == "serialNumber"),
+            "the serial is never shown"
+        );
+    }
+
+    #[test]
+    fn a_toggle_click_names_exactly_the_measured_command() {
+        let settings = measured_settings();
+        let command = |id, on| toggle_command(id, on, &settings);
+        assert_eq!(
+            command("sideTone", false),
+            Some(SettingCommand::SideTone(false))
+        );
+        assert_eq!(
+            command("lowBatteryPrompt", false),
+            Some(SettingCommand::LowBatteryPrompt(false))
+        );
+        assert_eq!(
+            command("voicePrompt", false),
+            Some(SettingCommand::VoicePrompt(false))
+        );
+        assert_eq!(command("ldac", true), Some(SettingCommand::Ldac(true)));
+        assert_eq!(
+            command("dolbyAudio", true),
+            Some(SettingCommand::DolbyAudio(true))
+        );
+        assert_eq!(
+            command("dualConnections", false),
+            Some(SettingCommand::DualConnections(false))
+        );
+        assert_eq!(
+            command("limitHighVolume", true),
+            Some(SettingCommand::LimitHighVolume {
+                enabled: true,
+                db_limit: settings.limit_high_volume.db_limit,
+            })
+        );
+        // A cycle toggle changes its own bit and keeps the other two.
+        assert_eq!(
+            command("normalModeInCycle", true),
+            Some(SettingCommand::AmbientSoundModeCycle(
+                AmbientSoundModeCycle {
+                    noise_canceling: true,
+                    transparency: true,
+                    normal: true,
+                }
+            ))
+        );
+        assert_eq!(
+            command("noiseCancelingModeInCycle", false),
+            Some(SettingCommand::AmbientSoundModeCycle(
+                AmbientSoundModeCycle {
+                    noise_canceling: false,
+                    transparency: true,
+                    normal: false,
+                }
+            ))
+        );
+        assert_eq!(
+            command("transparencyModeInCycle", false),
+            Some(SettingCommand::AmbientSoundModeCycle(
+                AmbientSoundModeCycle {
+                    noise_canceling: true,
+                    transparency: false,
+                    normal: false,
+                }
+            ))
+        );
+        // The dispatched command builds the recorded measured frame.
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        assert_eq!(
+            model.setting_frame(command("sideTone", false).expect("a side tone command")),
+            Some(hex("08 EE 00 00 00 01 84 0B 00 00 86"))
+        );
+        assert_eq!(
+            model.setting_frame(command("ldac", true).expect("an LDAC command")),
+            Some(hex("08 EE 00 00 00 01 FF 0B 00 01 02"))
+        );
+        // Read-only, other-page and unknown ids never write.
+        for id in [
+            "singlePress",
+            "ambientSoundMode",
+            "limitHighVolumeDbLimit",
+            "autoPowerOff",
+            "doublePress",
+            "spatialAudio",
+            "",
+        ] {
+            assert_eq!(command(id, true), None, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn an_option_click_maps_to_the_measured_choice_commands() {
+        let settings = measured_settings();
+        let command = |id, index| option_command(id, index, &settings);
+        // Zero disables auto power off and keeps the reported duration;
+        // 1..=4 enable the duration at that page index.
+        assert_eq!(
+            command("autoPowerOff", 0),
+            Some(SettingCommand::AutoPowerOff(AutoPowerOff {
+                enabled: false,
+                duration: AutoPowerOffDuration::SixtyMinutes,
+            }))
+        );
+        for (index, duration) in [
+            (1, AutoPowerOffDuration::ThirtyMinutes),
+            (2, AutoPowerOffDuration::SixtyMinutes),
+            (3, AutoPowerOffDuration::NinetyMinutes),
+            (4, AutoPowerOffDuration::OneHundredTwentyMinutes),
+        ] {
+            assert_eq!(
+                command("autoPowerOff", index),
+                Some(SettingCommand::AutoPowerOff(AutoPowerOff {
+                    enabled: true,
+                    duration,
+                })),
+                "{index}"
+            );
+        }
+        for index in [-1, 5, 99] {
+            assert_eq!(command("autoPowerOff", index), None, "{index}");
+        }
+        for (index, rate) in [
+            (0, DecibelReadingRefreshRate::RealTime),
+            (1, DecibelReadingRefreshRate::TenSeconds),
+            (2, DecibelReadingRefreshRate::OneMinute),
+        ] {
+            assert_eq!(
+                command("limitHighVolumeRefreshRate", index),
+                Some(SettingCommand::LimitHighVolumeRefreshRate(rate)),
+                "{index}"
+            );
+        }
+        for index in [-1, 3] {
+            assert_eq!(
+                command("limitHighVolumeRefreshRate", index),
+                None,
+                "{index}"
+            );
+        }
+        assert_eq!(
+            command("doublePress", 0),
+            Some(SettingCommand::ButtonDoublePress(None))
+        );
+        assert_eq!(
+            command("doublePress", 1),
+            Some(SettingCommand::ButtonDoublePress(Some(
+                ButtonAction::BassUp
+            )))
+        );
+        for index in [-1, 2] {
+            assert_eq!(command("doublePress", index), None, "{index}");
+        }
+        // The dispatched choices build the recorded measured frames.
+        let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
+        assert_eq!(
+            model.setting_frame(command("autoPowerOff", 2).expect("an auto power off command")),
+            Some(hex("08 EE 00 00 00 01 86 0C 00 01 01 8B"))
+        );
+        assert_eq!(
+            model.setting_frame(command("doublePress", 1).expect("a double press command")),
+            Some(hex("08 EE 00 00 00 04 81 0D 00 00 00 07 8F"))
+        );
+        assert_eq!(
+            model.setting_frame(
+                command("limitHighVolumeRefreshRate", 1).expect("a refresh rate command")
+            ),
+            Some(hex("08 EE 00 00 00 20 81 0B 00 01 A3"))
+        );
+        // The Sound mode tiles have their own path; toggles are not choices.
+        for id in ["ambientSoundMode", "sideTone", "spatialAudio", ""] {
+            assert_eq!(command(id, 0), None, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn a_range_release_keeps_only_the_measured_db_steps() {
+        let settings = measured_settings();
+        let command = |value| number_command("limitHighVolumeDbLimit", value, &settings);
+        for value in [75i32, 80, 85, 90, 95, 100] {
+            let db_limit =
+                DbLimit::new(u8::try_from(value).expect("the loop holds measured dB steps"))
+                    .expect("a measured dB step");
+            assert_eq!(
+                command(value),
+                Some(SettingCommand::LimitHighVolume {
+                    enabled: settings.limit_high_volume.enabled,
+                    db_limit,
+                }),
+                "{value}"
+            );
+        }
+        for value in [-5, 0, 74, 76, 79, 101, 1000, i32::MAX] {
+            assert_eq!(command(value), None, "{value}");
+        }
+        assert_eq!(
+            number_command("sideTone", 80, &settings),
+            None,
+            "an unknown id never writes"
+        );
+        // The enable flag travels with the dB limit, exactly as the device's
+        // measured body counts it.
+        let enabled = A3062Settings {
+            limit_high_volume: soundcore_models::LimitHighVolume {
+                enabled: true,
+                ..settings.limit_high_volume
+            },
+            ..settings
+        };
+        assert_eq!(
+            number_command("limitHighVolumeDbLimit", 100, &enabled),
+            Some(SettingCommand::LimitHighVolume {
+                enabled: true,
+                db_limit: DbLimit::new(100).expect("100 dB is a measured step"),
+            })
+        );
+    }
+
+    #[test]
+    fn a_failed_setting_write_names_the_setting_and_the_reason() {
+        let cases = [
+            (SessionError::Timeout, SettingFailure::TimedOut),
+            (
+                SessionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "connection reset by peer",
+                )),
+                SettingFailure::Disconnected,
+            ),
+            (
+                SessionError::Protocol(soundcore_session::ProtocolError::State(
+                    soundcore_models::StateError::NotAStateFrame,
+                )),
+                SettingFailure::Unreadable,
+            ),
+            (SessionError::UnsupportedSetting, SettingFailure::Unreadable),
+        ];
+        for (error, expected) in cases {
+            let failure = SettingFailure::from_session(error);
+            assert_eq!(failure, expected);
+            let label = failure.label(SettingCommand::SideTone(true));
+            assert_eq!(label, format!("Side tone ({})", failure.reason()));
+            assert!(readable(&label).contains("side tone"), "{label:?}");
+        }
+        // Every setting the toggles and choices write has a row name.
+        let settings = measured_settings();
+        let commands = [
+            SettingCommand::ButtonDoublePress(None),
+            SettingCommand::AmbientSoundModeCycle(settings.ambient_sound_mode_cycle),
+            SettingCommand::LowBatteryPrompt(true),
+            SettingCommand::DolbyAudio(true),
+            SettingCommand::Ldac(true),
+            SettingCommand::DualConnections(true),
+            SettingCommand::AutoPowerOff(settings.auto_power_off),
+            SettingCommand::LimitHighVolume {
+                enabled: false,
+                db_limit: settings.limit_high_volume.db_limit,
+            },
+            SettingCommand::LimitHighVolumeRefreshRate(settings.limit_high_volume.refresh_rate),
+            SettingCommand::SideTone(true),
+            SettingCommand::VoicePrompt(true),
+        ];
+        for setting in commands {
+            assert!(!setting_label(setting).is_empty(), "{setting:?}");
+            assert!(readable(setting_label(setting)).len() > 2);
+        }
+    }
+
+    #[test]
+    fn one_settings_write_is_one_frame_and_one_re_poll() {
+        // The connect state, then the device's answer after the write: side
+        // tone off.
+        let transport =
+            FakeTransport::scripted([captured_a3062_frame(), a3062_frame_with(&[(85, 0)])]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::SetSetting {
+                request: 1,
+                setting: SettingCommand::SideTone(false),
+            })
+            .expect("the settings write is queued");
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                hex("08 EE 00 00 00 01 84 0B 00 00 86"),
+                state_request(),
+            ],
+            "the connect poll, exactly one settings frame, then the re-poll"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected {
+                attempt: 9,
+                outcome: ConnectOutcome::Connected(..)
+            }
+        ));
+        match received.try_recv().expect("the settings change") {
+            Event::SettingChanged {
+                attempt: 9,
+                request: 1,
+                setting: SettingCommand::SideTone(false),
+                outcome: Ok(state),
+            } => {
+                assert!(
+                    !state.settings.expect("the re-polled settings").side_tone,
+                    "the event carries the device's answer"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_settings_write_surfaces_and_ends_the_worker() {
+        // Only the connect state is scripted, so the re-poll times out and the
+        // click queued behind the failing one must not be written.
+        let transport = FakeTransport::scripted([captured_a3062_frame()]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::SetSetting {
+                request: 1,
+                setting: SettingCommand::SideTone(false),
+            })
+            .expect("the first write is queued");
+        commands
+            .send(DeviceCommand::SetSetting {
+                request: 2,
+                setting: SettingCommand::Ldac(true),
+            })
+            .expect("the newer write is queued behind the first");
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                hex("08 EE 00 00 00 01 84 0B 00 00 86"),
+                state_request(),
+            ],
+            "the queued click must not be written after the failure"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected {
+                attempt: 9,
+                outcome: ConnectOutcome::Connected(..)
+            }
+        ));
+        assert!(matches!(
+            received.try_recv().expect("the failed write"),
+            Event::SettingChanged {
+                attempt: 9,
+                request: 1,
+                setting: SettingCommand::SideTone(false),
+                outcome: Err(SettingFailure::TimedOut)
+            }
+        ));
+        assert!(
+            received.try_recv().is_err(),
+            "the worker ended without running the queued click"
+        );
+    }
+
+    #[test]
+    fn the_system_settings_links_open_the_windows_settings_pages() {
+        // The Connections aside's two links and the Bluetooth-off banners all
+        // go through this mapping.
+        assert_eq!(
+            system_settings_uri(SystemPage::Bluetooth),
+            "ms-settings:bluetooth"
+        );
+        assert_eq!(system_settings_uri(SystemPage::Sound), "ms-settings:sound");
+    }
+
     #[test]
     fn the_real_a3949_capture_reads_as_a_hundred_and_eighty_percent() {
         // The acceptance case: a real P20i answered a 5-step battery of 5/4.
@@ -4046,8 +5450,12 @@ mod tests {
         // The committed capture was taken while the device was in normal mode.
         assert_eq!(state.sound_mode, Some(SoundMode::Normal));
         assert_eq!(
-            sound_pages(state.sound_mode, state.equalizer.is_some()),
-            vec![Page::SoundModes, Page::Equalizer]
+            sound_pages(
+                state.sound_mode,
+                state.equalizer.is_some(),
+                state.settings.is_some()
+            ),
+            vec![Page::SoundModes, Page::Equalizer, Page::Effects]
         );
         assert_eq!(mode_index(state.sound_mode), 2);
     }
@@ -4058,7 +5466,7 @@ mod tests {
         let state =
             soundcore_models::parse_state_frame(model, &captured_a3949_frame()).expect("parses");
         assert_eq!(state.sound_mode, None);
-        assert!(sound_pages(state.sound_mode, state.equalizer.is_some()).is_empty());
+        assert!(sound_pages(state.sound_mode, state.equalizer.is_some(), false).is_empty());
         assert!(mode_options(state.sound_mode).is_empty());
         assert_eq!(mode_index(state.sound_mode), -1);
     }
@@ -4672,8 +6080,12 @@ mod tests {
         let a3062_state = soundcore_models::parse_state_frame(a3062, &captured_a3062_frame())
             .expect("the A3062 capture parses");
         assert_eq!(
-            sound_pages(a3062_state.sound_mode, a3062_state.equalizer.is_some()),
-            vec![Page::SoundModes, Page::Equalizer]
+            sound_pages(
+                a3062_state.sound_mode,
+                a3062_state.equalizer.is_some(),
+                a3062_state.settings.is_some()
+            ),
+            vec![Page::SoundModes, Page::Equalizer, Page::Effects]
         );
         assert!(
             EqualizerDisplay::new(Some(a3062), a3062_state.equalizer.as_ref()).editable,
@@ -4692,7 +6104,14 @@ mod tests {
             a3949_state.equalizer.is_none(),
             "A3949 equalizer parsing is deferred"
         );
-        assert!(sound_pages(a3949_state.sound_mode, a3949_state.equalizer.is_some()).is_empty());
+        assert!(
+            sound_pages(
+                a3949_state.sound_mode,
+                a3949_state.equalizer.is_some(),
+                a3949_state.settings.is_some()
+            )
+            .is_empty()
+        );
         assert!(preset_options(Some(a3949)).is_empty());
         assert_eq!(
             selectable_preset_id(&preset_options(Some(a3949)), "0"),
@@ -5620,6 +7039,8 @@ mod tests {
             mode_change: Cell::new(0),
             preset_change: Cell::new(0),
             curve_change: Cell::new(0),
+            setting_change: Cell::new(0),
+            device: RefCell::new(None),
             profiles: RefCell::new(load_profiles(&path)),
             profiles_path: Some(path),
         })
@@ -5708,6 +7129,86 @@ mod tests {
             .invoke_set_option("ambientSoundMode".into(), index);
     }
 
+    /// Flips a section-page toggle through the wired `Actions.set-toggle`
+    /// callback, as the vendored row's toggle does.
+    fn click_toggle(ui: &AppWindow, id: &str, on: bool) {
+        ui.global::<Actions>().invoke_set_toggle(id.into(), on);
+    }
+
+    /// Chooses a section-page option through the wired `Actions.set-option`
+    /// callback.
+    fn click_option(ui: &AppWindow, id: &str, index: i32) {
+        ui.global::<Actions>().invoke_set_option(id.into(), index);
+    }
+
+    /// Releases a section-page range through the wired `Actions.set-number`
+    /// callback.
+    fn click_number(ui: &AppWindow, id: &str, value: i32) {
+        ui.global::<Actions>().invoke_set_number(id.into(), value);
+    }
+
+    /// The settings of the controller's last re-polled device state.
+    fn current_settings(inner: &Rc<Inner>) -> Option<A3062Settings> {
+        inner
+            .device
+            .borrow()
+            .as_ref()
+            .and_then(|device_state| device_state.settings)
+    }
+
+    /// Pumps the worker channel until the re-polled settings match `want`.
+    /// `None` when the error banner appeared first or the timeout expired.
+    fn wait_for_settings(
+        ui: &AppWindow,
+        inner: &Rc<Inner>,
+        want: impl Fn(&A3062Settings) -> bool,
+        label: &str,
+    ) -> Option<A3062Settings> {
+        let state = ui.global::<AppState>();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            drain_events(inner);
+            if !state.get_error_label().is_empty() {
+                println!("  error banner: {}", state.get_error_label());
+                return None;
+            }
+            if let Some(settings) = current_settings(inner)
+                && want(&settings)
+            {
+                return Some(settings);
+            }
+            if std::time::Instant::now() >= deadline {
+                println!("  timed out waiting for {label}");
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// The panels as printable lines: each panel's kind and each row's whole
+    /// value, for the hardware report.
+    fn describe_panels(panels: &[SettingsPanel]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for panel in panels {
+            lines.push(format!("{:?}", panel.kind));
+            for row in panel.rows.iter() {
+                lines.push(format!(
+                    "  {} {:?} checked={} index={} range={}..{} step={} value={} text={:?}",
+                    row.id,
+                    row.kind,
+                    row.checked,
+                    row.index,
+                    row.minimum,
+                    row.maximum,
+                    row.step,
+                    row.value,
+                    row.text,
+                ));
+            }
+        }
+        lines
+    }
+
     /// Manual hardware check of the Sound mode page on the real Space One Pro:
     ///
     /// ```text
@@ -5745,7 +7246,10 @@ mod tests {
             state.get_mode_scale(),
             state.get_mode_rows().row_count()
         );
-        assert_eq!(pages, vec![Page::SoundModes, Page::Equalizer]);
+        assert_eq!(
+            pages,
+            vec![Page::SoundModes, Page::Equalizer, Page::Effects]
+        );
         assert_eq!(values, ["NoiseCanceling", "Transparency", "Normal"]);
         assert_eq!(labels, ["Noise canceling", "Transparency", "Normal"]);
         assert!(!state.get_mode_scale(), "the 1-to-11 scale is out of scope");
@@ -5808,11 +7312,216 @@ mod tests {
             state.get_sound_pages().row_count(),
             state.get_error_label()
         );
-        assert_eq!(state.get_sound_pages().row_count(), 2, "the pages are back");
+        assert_eq!(state.get_sound_pages().row_count(), 3, "the pages are back");
         assert_eq!(state.get_error_label().as_str(), "", "the banner is gone");
         let reported = state.get_mode_index();
         println!("  retried connection reports mode index {reported}");
         assert_eq!(reported, initial, "the device kept the last mode");
+        disconnect(&ui, &inner);
+    }
+
+    /// Manual hardware check of the remaining settings pages on the real Space
+    /// One Pro:
+    ///
+    /// ```text
+    /// cargo test -p soundcore-desktop manual_settings_pages_and_writes -- --ignored --nocapture
+    /// ```
+    ///
+    /// Connects the suggested A3062, reads every section page's panels and rows,
+    /// checks the aside capabilities and the Connections links, then writes one
+    /// toggle, one select and one range through the wired actions and verifies
+    /// each against the `01 01` re-poll. Every setting found on connect is
+    /// restored and the final state is compared with it. Addresses and serials
+    /// are masked.
+    #[test]
+    #[ignore = "manual hardware check: needs a paired A3062"]
+    fn manual_settings_pages_and_writes() {
+        let ui = AppWindow::new().expect("the shell window builds");
+        let inner = test_inner(&ui);
+        wire_actions(&ui, &inner);
+        if connect_real_device(&ui, &inner, "A3062").is_none() {
+            return;
+        }
+        let state = ui.global::<AppState>();
+        let Some(initial) = current_settings(&inner) else {
+            println!("  the connected state carries no settings block");
+            disconnect(&ui, &inner);
+            return;
+        };
+
+        // The pages and their capabilities.
+        let device_pages: Vec<Page> = state.get_device_pages().iter().collect();
+        let sound_pages: Vec<Page> = state.get_sound_pages().iter().collect();
+        println!("  device-pages: {device_pages:?}");
+        println!("  sound-pages: {sound_pages:?}");
+        assert_eq!(
+            device_pages,
+            vec![
+                Page::Controls,
+                Page::Comfort,
+                Page::Power,
+                Page::Connections,
+                Page::About
+            ]
+        );
+        assert_eq!(
+            sound_pages,
+            vec![Page::SoundModes, Page::Equalizer, Page::Effects]
+        );
+        assert!(!state.get_has_sides(), "the A3062 has one control surface");
+        assert!(
+            state.get_has_ldac(),
+            "the Effects page offers the LDAC note"
+        );
+        assert!(!state.get_has_spatial(), "the A3062 has no spatial audio");
+        assert!(
+            state.get_system_settings_available(),
+            "the Connections links are offered"
+        );
+
+        // Every section page renders its measured rows from the connection.
+        for page in [
+            Page::Controls,
+            Page::Comfort,
+            Page::Power,
+            Page::Connections,
+            Page::Effects,
+            Page::About,
+        ] {
+            ui.global::<Actions>().invoke_navigate(page);
+            assert_eq!(state.get_page(), page);
+            let panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
+            println!("  == {page:?} ==");
+            for line in describe_panels(&panels) {
+                println!("  {line}");
+            }
+            assert!(!panels.is_empty(), "{page:?} has panels");
+        }
+        ui.global::<Actions>().invoke_navigate(Page::Controls);
+        let panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
+        assert_eq!(row_ids(&panels[0]), ["singlePress", "doublePress"]);
+        assert_eq!(select_options(&panels[0], 1), ["None", "Bass Up"]);
+        assert_eq!(panels[1].rows.row_count(), 3, "the three cycle toggles");
+        ui.global::<Actions>().invoke_navigate(Page::Connections);
+        let panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
+        assert_eq!(row_ids(&panels[0]), ["dualConnections"]);
+        assert_eq!(panels.len(), 1, "no remembered-device list in this slice");
+        ui.global::<Actions>().invoke_navigate(Page::About);
+        let panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
+        let about_ids = row_ids(&panels[0]);
+        println!("  About rows: {about_ids:?}");
+        assert!(
+            !about_ids.iter().any(|id| id == "serialNumber"),
+            "the serial is never shown"
+        );
+
+        // One toggle: the side tone, flipped and restored.
+        let target = !initial.side_tone;
+        println!("  side tone {} -> {target}", initial.side_tone);
+        click_toggle(&ui, "sideTone", target);
+        let after = wait_for_settings(
+            &ui,
+            &inner,
+            |settings| settings.side_tone == target,
+            "the side tone toggle",
+        )
+        .expect("the re-poll reports the written side tone");
+        assert_eq!(after.side_tone, target);
+        click_toggle(&ui, "sideTone", initial.side_tone);
+        wait_for_settings(
+            &ui,
+            &inner,
+            |settings| settings.side_tone == initial.side_tone,
+            "the side tone restore",
+        )
+        .expect("the re-poll reports the restored side tone");
+        println!("  side tone restored to {}", initial.side_tone);
+
+        // One select: the auto power off choice, moved to the next page index
+        // and restored, duration included.
+        let initial_index = auto_power_off_index(initial.auto_power_off);
+        let target_index = (initial_index + 1) % 5;
+        let Some(SettingCommand::AutoPowerOff(target_auto_power_off)) =
+            option_command("autoPowerOff", target_index, &initial)
+        else {
+            panic!("the auto power off index {target_index} names no command");
+        };
+        println!(
+            "  auto power off index {initial_index} -> {target_index} ({target_auto_power_off:?})"
+        );
+        click_option(&ui, "autoPowerOff", target_index);
+        let after = wait_for_settings(
+            &ui,
+            &inner,
+            |settings| settings.auto_power_off == target_auto_power_off,
+            "the auto power off select",
+        )
+        .expect("the re-poll reports the written auto power off");
+        assert_eq!(after.auto_power_off, target_auto_power_off);
+        click_option(&ui, "autoPowerOff", initial_index);
+        wait_for_settings(
+            &ui,
+            &inner,
+            |settings| settings.auto_power_off == initial.auto_power_off,
+            "the auto power off restore",
+        )
+        .expect("the re-poll reports the restored auto power off");
+        println!("  auto power off restored to {:?}", initial.auto_power_off);
+
+        // One range: the limit high volume dB limit, moved to another measured
+        // step and restored.
+        let initial_db = initial.limit_high_volume.db_limit.value();
+        let target_db = if initial_db < 100 {
+            initial_db + 5
+        } else {
+            initial_db - 5
+        };
+        let target_limit = soundcore_models::LimitHighVolume {
+            db_limit: DbLimit::new(target_db).expect("a measured dB step"),
+            ..initial.limit_high_volume
+        };
+        println!("  dB limit {initial_db} -> {target_db}");
+        click_number(&ui, "limitHighVolumeDbLimit", i32::from(target_db));
+        let after = wait_for_settings(
+            &ui,
+            &inner,
+            |settings| settings.limit_high_volume == target_limit,
+            "the dB limit range",
+        )
+        .expect("the re-poll reports the written dB limit");
+        assert_eq!(after.limit_high_volume, target_limit);
+        click_number(
+            &ui,
+            "limitHighVolumeDbLimit",
+            i32::from(initial.limit_high_volume.db_limit.value()),
+        );
+        wait_for_settings(
+            &ui,
+            &inner,
+            |settings| settings.limit_high_volume == initial.limit_high_volume,
+            "the dB limit restore",
+        )
+        .expect("the re-poll reports the restored dB limit");
+        println!(
+            "  dB limit restored to {}",
+            initial.limit_high_volume.db_limit.value()
+        );
+
+        // The About copy button copies the row text through the wired action.
+        ui.global::<Actions>().invoke_copy("OpenSCL4".into());
+        std::thread::sleep(Duration::from_millis(200));
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+            Ok(text) if text == "OpenSCL4" => println!("  clipboard: the About copy action works"),
+            other => println!("  clipboard: could not verify the copy: {other:?}"),
+        }
+
+        // Every setting found on connect is restored, field by field.
+        let final_settings = current_settings(&inner).expect("the re-polled settings");
+        assert_eq!(
+            final_settings, initial,
+            "the device is left with every setting found on connect"
+        );
+        println!("  final settings: {final_settings:?}");
         disconnect(&ui, &inner);
     }
 
@@ -6034,7 +7743,10 @@ mod tests {
             state.get_eq_max_text(),
             state.get_eq_band_count()
         );
-        assert_eq!(pages, vec![Page::SoundModes, Page::Equalizer]);
+        assert_eq!(
+            pages,
+            vec![Page::SoundModes, Page::Equalizer, Page::Effects]
+        );
         assert!(state.get_eq_available(), "the page is available");
         assert!(
             !state.get_eq_read_only(),
@@ -6149,7 +7861,7 @@ mod tests {
             state.get_eq_preset(),
             state.get_error_label()
         );
-        assert_eq!(state.get_sound_pages().row_count(), 2, "the pages are back");
+        assert_eq!(state.get_sound_pages().row_count(), 3, "the pages are back");
         assert_eq!(state.get_error_label().as_str(), "", "the banner is gone");
         assert_eq!(
             state.get_eq_preset().as_str(),
@@ -6361,7 +8073,7 @@ mod tests {
             wait_for_connection(&inner, &ui, Connection::Connected, Duration::from_secs(20)),
             "the banner's Retry reconnects"
         );
-        assert_eq!(state.get_sound_pages().row_count(), 2, "the pages are back");
+        assert_eq!(state.get_sound_pages().row_count(), 3, "the pages are back");
         assert_eq!(state.get_error_label().as_str(), "", "the banner is gone");
         assert_eq!(
             state.get_eq_preset().as_str(),
