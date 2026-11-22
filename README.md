@@ -4,7 +4,9 @@ Open-source Soundcore control app for Android, Windows and Linux.
 
 **OpenSCL4 2.0 development.** This branch is the first OpenSCL4 2.0 slice: the
 desktop product keeps the OpenSCL4 name, and its UI is vendored from OpenSCL4
-under GPL-3.0 — the window title, screens and strings stay unchanged. Protocol
+under GPL-3.0 — the window title and strings stay unchanged. The vendored tree
+keeps its upstream design; the one allowed change (the dual-connections row's
+Connect/Disconnect buttons) is recorded in `desktop/ui/SOURCE.md`. Protocol
 command/response data and device preset data are adapted from OpenSCL4 under
 GPL-3.0 too; the attribution is in `NOTICE`.
 
@@ -38,9 +40,9 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 | Other single-battery layouts | intentionally unimplemented (`UnsupportedLayout`) |
 | TLV D1203 | not started |
 | Diagnostics | read-only probes, session manifest, serial/MAC redaction, ZIP export |
-| Windows session/transport | session requests `01 01`, parses the answer and writes the measured A3062 `06 81` sound-mode, `03 87` equalizer and one-frame settings bodies; the Windows RFCOMM transport lists paired devices and connects by vendor UUID with an SPP fallback |
+| Windows session/transport | session requests `01 01`, parses the answer, reads the bounded multi-frame `0B 01` dual-connections list and writes the measured A3062 `06 81` sound-mode, `03 87` equalizer, one-frame settings and `0B 82`/`0B 81`/`0B 83` dual-connection bodies; the Windows RFCOMM transport lists paired devices and connects by vendor UUID with an SPP fallback |
 | Desktop (OpenSCL4 2.0) | OpenSCL4 Slint shell vendored under GPL-3.0; Add Device populated from the 39-model catalog; real paired Soundcore devices connect over Windows RFCOMM and Overview shows their battery (P20i A3949 and Space One Pro A3062 verified on hardware); the Space One Pro also gets the Sound mode, Equalizer and remaining-settings pages (Controls, Comfort, Power and prompts, Sound and effects, Connections, About), editable custom bands, saved equalizer profiles that persist across restarts, equalizer profile import and export, and the dual-connections remembered-device list (names and connected marker, per-row Connect/Disconnect/Forget writes that re-read the list) |
-| Desktop tray | notification-area icon and menu from the vendored `ui/tray.slint`: tooltip device/status/battery; menu status, battery, Sound mode submenu (writes and re-reads like the page), LDAC, Connect while a saved device is disconnected, Open and Quit; close-to-tray while the icon is shown; single instance (a second start reveals the hidden window); Settings “Desktop and quick access” switches and Quit; no quick presets, tray choices not persisted |
+| Desktop tray | notification-area icon and menu from the vendored `ui/tray.slint`: the tooltip names the device and, while connected, its battery (the vendored tooltip has no status word; status is the menu's device line); menu status, battery, Sound mode submenu (writes and re-reads like the page), LDAC, Connect while a saved device is disconnected, Open and Quit; close-to-tray while the icon is shown; single instance (a second start reveals the hidden window); Settings “Desktop and quick access” switches and Quit; no quick presets, tray choices not persisted |
 | Android UI | not started |
 
 ## Build and test
@@ -84,11 +86,15 @@ core/
     diagnostics/          # read-only probes and session manifest
 android/                  # Kotlin/Compose app (next)
 desktop/                  # Slint shell vendored from OpenSCL4 (GPL-3.0)
+  build.rs                # compiles ui/app.slint and the separate ui/tray.slint unit
   src/main.rs             # shell wiring: window state and Add Device callbacks
   src/controller.rs       # UI actions, Bluetooth workers, battery mapping, saved profiles and their import/export
   src/catalog_adapter.rs  # core catalog -> Add Device models, chips and art
   src/transport_windows.rs # paired devices, SDP services and RFCOMM transport
-  ui/                     # vendored OpenSCL4 Slint tree, not edited
+  src/tray.rs             # notification-area icon, menu and close-to-tray lifecycle
+  src/single_instance.rs  # Windows named mutex/event; a second start shows the hidden window
+  src/test_support.rs     # tests-only shared Slint thread for component tests
+  ui/                     # vendored OpenSCL4 Slint tree; only the changes SOURCE.md records
 .scratch/
   openscl4-2.0/            # spec and tickets for this 2.0 slice
   windows-mvp/             # spec and tickets for the Windows MVP
@@ -109,7 +115,10 @@ core-side.
 
 ## Boundaries
 
-- No serial numbers, MAC addresses or raw captures in commits.
+- No serial numbers, MAC addresses or raw captures in commits: a real capture is
+  committed only as a sanitized fixture, with names and addresses replaced by
+  neutral values and the checksum recalculated (as the `core/data/*.json`
+  fixtures do); raw traffic logs are never committed.
 - Core: protocol and preset data (command/response layouts, state offsets, preset tables and labels) adapted from `OpenSCL4/lib` under GPL-3.0 with attribution in `NOTICE`; the Rust implementation is this project's own.
 - UI: OpenSCL4 Compose/Slint files may be ported under GPL-3.0 with copyright headers and `NOTICE`, per ADR 0004.
 - No AI features, no vendor hints, no OTA.

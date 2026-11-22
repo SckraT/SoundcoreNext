@@ -120,7 +120,10 @@ no crate is added.
   the Open item uses, so no window handle ever crosses a thread boundary and the
   Slint event loop is not called from the watcher.
 - Object creation failures are logged and the app still starts (without a single
-  instance), so the lock can never keep the app from running.
+  instance), so the lock can never keep the app from running. If only one of the
+  two objects can be created, the created handle is closed again before the app
+  starts unclaimed, so a later start can still claim the app instead of finding
+  an owner with no watcher to answer its show request.
 - **Cargo feature note:** the ticket named `Win32_System_Threading` only, but
   `windows 0.62` gates `CreateMutexW`/`CreateEventW` behind `Win32_Security` as
   well because both take a `SECURITY_ATTRIBUTES` pointer; the reference app

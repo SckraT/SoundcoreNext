@@ -10,11 +10,11 @@ Verify tray and dual-connections on real A3062 and capture evidence.
 
 ## Requirements
 
-1. Build/run; tray icon appears; tooltip shows device/status/battery; menu Actions work (Open/Quit/Connect/mode/LDAC).
+1. Build/run; tray icon appears; tooltip names the device and, while connected, its battery (the vendored tooltip has no status word; status is the menu's device line); menu Actions work (Open/Quit/Connect/mode/LDAC).
 2. Close hides to tray; tray Open restores; second launch reveals window; Quit exits and removes icon.
 3. Settings TrayPanel toggles/Quit work.
 4. Connections: dual on lists devices with connected marker; forget works; connect/disconnect works where a second device exists; dual off hides list and no `0B 01`; refresh on navigate.
-5. No MAC/serial in UI/logs/docs; device pairing/settings restored.
+5. No MAC/serial in UI/logs/docs; device settings left as found. Pairing: the one user-approved **Forget** of the owner's phone is the deliberate exception — that pairing was removed on the earbuds and cannot be restored from this PC, so the owner must re-pair the phone; no other pairing changed.
 6. Capture `desktop/tray.png` (tray menu) and `desktop/dual-connections.png`; link READMEs; no identifiers.
 7. Gates: desktop/core test/fmt/clippy/build.
 8. Record OS/firmware, devices (names masked if needed), actions/results; ticket done only if real checks pass.
@@ -24,14 +24,17 @@ Verify tray and dual-connections on real A3062 and capture evidence.
 - [x] Tray and dual checks verified on real A3062.
 - [x] Screenshots stored/linked; no identifiers.
 - [x] Gates pass; ticket done.
+- [x] One approved **Forget** recorded as the deliberate pairing exception: the phone was un-paired from the earbuds, it cannot be restored from this PC, and the owner must re-pair it.
 
 ## Comments
 
 Run on the bench machine with the real paired A3062 out of the case, 2026-11-22,
 ~02:27–03:15 MSK. No Bluetooth address or serial number is recorded here; test
-output and screenshots omit them. Pairing was changed only by the one **Forget**
-the ticket allows (see below); every other pairing and device setting was left as
-found.
+output and screenshots omit them. Pairing was changed only by the one
+user-approved **Forget** the ticket allows (see below): the owner's phone is no
+longer in the earbuds' remembered list, that pairing cannot be restored from this
+PC, and the owner must re-pair the phone; every other pairing and device setting
+was left as found.
 
 ### Environment
 
@@ -194,6 +197,15 @@ already the branch base) and stayed clean.
 
 ### Blockers / caveats
 
+- **Silent-read bounding was not rechecked on hardware.** Ticket 03 observed that
+  a silent read on this Windows RFCOMM socket did not return within its
+  configured 5 s `SO_RCVTIMEO` and asked this ticket to confirm the transport
+  actually bounds a silent wait. This run did not reproduce that check, so the
+  bound stays unverified on hardware: the transport's own read deadline is the
+  limitation, and a silent device may keep the session waiting instead of
+  producing the session's timeout banner. The session and controller timeout
+  paths remain covered by the scripted-transport tests (ticket 03 and ticket 04),
+  not by a live silent read.
 - The phone row's **Connect** did not reach a connected state (the phone did not
   answer during the run); the write and re-read were still exercised. The tray
   **Connect** item was verified against a staged disconnected saved card because
