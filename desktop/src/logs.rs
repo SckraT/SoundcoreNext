@@ -28,6 +28,7 @@ impl History {
         self.lines.push_back(line.to_owned());
     }
 
+    #[allow(dead_code)] // only `recent` calls it; Copy logs is ticket 02
     fn text(&self) -> String {
         let mut text = header();
         text.push('\n');
@@ -84,7 +85,7 @@ pub fn open_file(config_directory: &Path) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = file;
     write_file_line(&header());
-    line("Application started");
+    line("Application started".to_owned());
 }
 
 fn write_file_line(text: &str) {
@@ -131,6 +132,7 @@ pub fn line(message: String) {
 }
 
 /// The real recent application messages, oldest first, with a version header.
+#[allow(dead_code)] // Copy logs in ticket 02 puts this on the clipboard
 pub fn recent() -> String {
     RECENT
         .lock()
@@ -149,7 +151,8 @@ mod tests {
             history.push(&format!("line {index}"));
         }
         history.push("");
-        let lines: Vec<&str> = history.text().lines().collect();
+        let text = history.text();
+        let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].starts_with("OpenSCL4 "));
         assert_eq!(lines.len(), KEPT_LINES + 1);
         assert_eq!(lines[1], "line 5");
