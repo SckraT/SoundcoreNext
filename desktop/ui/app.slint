@@ -14,12 +14,13 @@ import { OverviewPage, LayoutDialog, QuickTogglesDialog } from "pages/overview.s
 import { EqualizerPage, SaveProfileDialog, DeleteProfileDialog, ImportDialog } from "pages/equalizer.slint";
 import { SettingsPage } from "pages/settings.slint";
 import { PresetsPage, CreatePresetDialog, PresetEditorDialog, LoadPresetDialog, DeletePresetDialog } from "pages/presets.slint";
+import { DiagnosticsPage } from "pages/diagnostics.slint";
 
 export { Theme, PaletteChoice, AppState, Actions, Page, Connection, FailureKind, DeviceCard, ModelOption, PairedOption, Strings }
 export { RowKind, SettingRow, PanelKind, SettingsPanel, ModeOption, ToastKind, BlockKind, Battery, QuickToggle, OverviewBlockData, OverviewRow, LayoutBlock, PresetItem, EqBand, EqLine, EqProfile, ImportItem, TransferNote, PresetCard, PresetFieldRow, PresetGroup, SystemPage } from "types.slint";
 
 export component AppWindow inherits Window {
-    title: (AppState.connection == Connection.connected && AppState.page != Page.devices && AppState.page != Page.settings
+    title: (AppState.connection == Connection.connected && AppState.page != Page.devices && AppState.page != Page.settings && AppState.page != Page.diagnostics
         ? Strings.title(AppState.page) + " · " + AppState.device-name : Strings.title(AppState.page)) + " — OpenSCL4";
     // the window keeps its size: the content scale makes the text and shapes larger in it, as a zoom does
     preferred-width: 1280px;
@@ -32,9 +33,9 @@ export component AppWindow inherits Window {
     icon: @image-url("icons/app.svg");
 
     private property <bool> compact: root.width <= 1030px;
-    private property <bool> device-page: AppState.page != Page.devices && AppState.page != Page.settings;
+    private property <bool> device-page: AppState.page != Page.devices && AppState.page != Page.settings && AppState.page != Page.diagnostics;
     // pages with their own layout rather than the settings in panels
-    private property <bool> own-page: AppState.page == Page.overview || AppState.page == Page.equalizer || AppState.page == Page.presets;
+    private property <bool> own-page: AppState.page == Page.overview || AppState.page == Page.equalizer || AppState.page == Page.presets || AppState.page == Page.diagnostics;
 
     // the standard widgets (lists, number fields) follow the app's theme
     private property <bool> dark: Theme.dark;
@@ -98,6 +99,9 @@ export component AppWindow inherits Window {
                         wide: root.width - sidebar.width > 860px;
                     }
                     if AppState.page == Page.settings: SettingsPage {
+                        wide: root.width - sidebar.width > 900px;
+                    }
+                    if AppState.page == Page.diagnostics: DiagnosticsPage {
                         wide: root.width - sidebar.width > 900px;
                     }
                 }

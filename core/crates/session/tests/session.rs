@@ -1060,3 +1060,32 @@ fn reports_a_failed_dual_connections_write_as_an_io_error() {
         "unexpected error: {error}"
     );
 }
+
+#[test]
+fn probe_frame_writes_one_read_only_request_and_skips_other_frames() {
+    let model = model_by_code("A3062").expect("A3062");
+    let ack = encode(Direction::Inbound, Command::STATE, &[]);
+    let reply = encode(Direction::Inbound, Command::BATTERY, &[3]);
+    let transport = FakeTransport::scripted([Ok([ack, reply.clone()].concat())]);
+    let mut session = DeviceSession::new(model, transport.clone());
+
+    let raw = session
+        .probe_frame(Command::BATTERY)
+        .expect("the battery reply");
+    assert_eq!(raw, reply);
+    assert_eq!(transport.writes(), vec![request(Command::BATTERY)]);
+}
+
+#[test]
+fn probe_frame_passes_a_silent_transport_timeout_through() {
+    let model = model_by_code("A3062").expect("A3062");
+    let transport =
+        FakeTransport::scripted([Err(io::Error::new(io::ErrorKind::TimedOut, "no reply"))]);
+    let mut session = DeviceSession::new(model, transport);
+
+    let error = session.probe_frame(Command::CHARGING).expect_err("timeout");
+    assert!(
+        matches!(error, SessionError::Timeout),
+        "unexpected: {error}"
+    );
+}

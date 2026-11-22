@@ -166,6 +166,10 @@ export component Sidebar inherits Rectangle {
         Divider { background: Theme.line; }
         Rectangle { height: 6px; }
         NavItem {
+            page: Page.diagnostics;
+            compact: root.compact;
+        }
+        NavItem {
             page: Page.devices;
             compact: root.compact;
         }

@@ -15,14 +15,19 @@ use soundcore_protocol::{Command, encode, parse};
 /// any accompanying metadata.
 pub fn redact_state_frame(raw: &[u8], model: DeviceModel) -> Option<Vec<u8>> {
     let frame = parse(raw).ok()?;
-    if frame.command != Command::STATE || model.layout != Layout::TwsCmm2 {
+    if frame.command != Command::STATE {
         return Some(raw.to_vec());
     }
+    let serial_range = match model.layout {
+        Layout::TwsCmm2 => 16..33,
+        Layout::SingleCmm2 if model.code == "A3062" => 7..23,
+        _ => return Some(raw.to_vec()),
+    };
     let mut body = frame.body;
-    if body.len() >= 33 {
-        // 16 ASCII bytes of serial followed by NUL; zero the whole field so a
-        // parser sees "no serial" and a human sees no identifier.
-        body[16..33].fill(0);
+    if body.len() >= serial_range.end {
+        // Zero the whole serial field, so a parser sees "no serial" and a human
+        // sees no identifier. The checksum is recalculated by `encode`.
+        body[serial_range].fill(0);
     }
     Some(encode(frame.direction, frame.command, &body))
 }

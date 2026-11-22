@@ -18,9 +18,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use soundcore_diagnostics::export::export_zip;
+use soundcore_diagnostics::{
+    DiagnosticSession, PROBES, ProbeResult, ProbeStatus, hex as diagnostic_hex,
+};
 use soundcore_models::{
     A3062Settings, AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, ButtonAction,
     DbLimit, DecibelReadingRefreshRate, DeviceModel, DeviceState, DualConnectionDevice,
@@ -29,6 +33,7 @@ use soundcore_models::{
 use soundcore_profiles::{
     EqualizerProfile, ImportPreview, ProfileSet, export_json, preview_import,
 };
+use soundcore_protocol::{Direction, request};
 use soundcore_session::{DeviceSession, SessionError, Transport};
 use windows::core::GUID;
 
@@ -40,9 +45,9 @@ use crate::transport_windows::{
 };
 use crate::tray::{TrayActions, TrayContent, TraySettings, TrayShell};
 use crate::{
-    Actions, AppState, AppWindow, Battery, Connection, DeviceCard, EqBand, EqLine, EqProfile,
-    FailureKind, ImportItem, ModeOption, Page, PairedOption, PanelKind, RowKind, SettingRow,
-    SettingsPanel, SystemPage, ToastKind, TransferNote,
+    Actions, AppState, AppWindow, Battery, Connection, DeviceCard, DiagnosticProbe, DiagnosticStep,
+    EqBand, EqLine, EqProfile, FailureKind, ImportItem, ModeOption, Page, PairedOption, PanelKind,
+    RowKind, SettingRow, SettingsPanel, SystemPage, ToastKind, TransferNote,
 };
 
 /// The model chosen in the Add Device dialog: what the catalog card shows plus
@@ -1655,6 +1660,9 @@ enum DeviceCommand {
     /// Write one `0B 83`/`0B 82`/`0B 81` frame and re-read the list, so the
     /// Connections page shows the outcome instead of the optimistic click.
     DualConnectionWrite(DualAction),
+    /// Run the three read-only diagnostics probes on this session. `request`
+    /// identifies the capture so a newer click supersedes an older run.
+    RunDiagnostics { request: u64 },
 }
 
 /// A worker-to-UI message; the sequence number tells the UI whether the result
@@ -1710,6 +1718,22 @@ enum Event {
         action: DualAction,
         outcome: Result<Vec<DualConnectionDevice>, DualFailure>,
     },
+    /// One read-only diagnostics probe finished; the page shows it immediately.
+    DiagnosticProbe {
+        attempt: u64,
+        request: u64,
+        result: ProbeResult,
+    },
+    /// All diagnostics probes finished and the session is ready to review.
+    DiagnosticDone {
+        attempt: u64,
+        request: u64,
+        session: Box<DiagnosticSession>,
+    },
+    /// Saving the diagnostics ZIP finished (or the user cancelled the dialog).
+    DiagnosticSaved {
+        result: Result<Option<PathBuf>, String>,
+    },
     /// The import-file worker closed its file dialog: the file it read, or `None`
     /// when the dialog was cancelled. A read failure carries the note to show.
     ImportFilePicked {
@@ -1747,6 +1771,8 @@ struct Inner {
     /// The newest remaining-settings change; results of older changes are
     /// stale.
     setting_change: Cell<u64>,
+    /// The newest diagnostics capture; results of older captures are stale.
+    diagnostic_request: Cell<u64>,
     /// The last state of the connected device. It is kept on the UI thread so
     /// a section-page change refills the panels, and a settings write's
     /// re-poll replaces it, without another poll.
@@ -1788,6 +1814,19 @@ struct Inner {
     /// What the tray currently shows, kept on the UI thread so the icon can be
     /// created again with the last content and so the tests can read it.
     tray_content: RefCell<TrayContent>,
+    /// The last diagnostic capture's probes, in probe-catalog order.
+    diagnostic_probes: RefCell<Vec<ProbeResult>>,
+    /// The completed diagnostic session, kept for the ZIP export.
+    diagnostic_session: RefCell<Option<DiagnosticSession>>,
+    /// The in-memory ZIP built from the session, or `None` until Review.
+    diagnostic_archive: RefCell<Option<Vec<u8>>>,
+    /// The last saved ZIP path, so Done can show it and tests can read it.
+    diagnostic_file: RefCell<Option<PathBuf>>,
+    /// The note the user typed on Review; stored in the session before export.
+    diagnostic_note: RefCell<String>,
+    /// Whether the save dialog worker is running, so a second click does not
+    /// open a second dialog.
+    diagnostic_saving: Cell<bool>,
 }
 
 impl Inner {
@@ -1970,6 +2009,7 @@ impl Controller {
             preset_change: Cell::new(0),
             curve_change: Cell::new(0),
             setting_change: Cell::new(0),
+            diagnostic_request: Cell::new(0),
             device: RefCell::new(None),
             dual_devices: RefCell::new(Vec::new()),
             profiles: RefCell::new(profiles),
@@ -1983,6 +2023,12 @@ impl Controller {
             tray: RefCell::new(None),
             tray_settings: RefCell::new(TraySettings::default()),
             tray_content: RefCell::new(TrayContent::default()),
+            diagnostic_probes: RefCell::new(Vec::new()),
+            diagnostic_session: RefCell::new(None),
+            diagnostic_archive: RefCell::new(None),
+            diagnostic_file: RefCell::new(None),
+            diagnostic_note: RefCell::new(String::new()),
+            diagnostic_saving: Cell::new(false),
         });
         initial_state(ui);
         let shell = TrayShell::new(ui, tray_actions(&inner));
@@ -2015,6 +2061,7 @@ fn initial_state(ui: &AppWindow) {
     // page's content stays empty until an A3062 reports its settings.
     show_sound_mode(&state, None, false, false);
     show_equalizer(&state, &EqualizerDisplay::default());
+    reset_diagnostics(&state);
     clear_section_pages(&state);
     state.set_overview_rows(ModelRc::default());
     state.set_quick_toggles(ModelRc::default());
@@ -2362,6 +2409,64 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         let inner = Rc::clone(inner);
         move || crate::tray::quit(&inner.ui)
     });
+
+    actions.on_open_diagnostics({
+        let inner = Rc::clone(inner);
+        move || {
+            if let Some(window) = inner.ui.upgrade() {
+                window.global::<AppState>().set_page(Page::Diagnostics);
+            }
+        }
+    });
+    actions.on_diagnostic_start({
+        let inner = Rc::clone(inner);
+        move || {
+            if let Some(window) = inner.ui.upgrade() {
+                start_diagnostics(&window, &inner);
+            }
+        }
+    });
+    actions.on_diagnostic_cancel({
+        let inner = Rc::clone(inner);
+        move || {
+            if let Some(window) = inner.ui.upgrade() {
+                cancel_diagnostics(&window, &inner);
+            }
+        }
+    });
+    actions.on_diagnostic_save_zip({
+        let inner = Rc::clone(inner);
+        move || {
+            if let Some(window) = inner.ui.upgrade() {
+                save_diagnostics_zip(&window, &inner);
+            }
+        }
+    });
+    actions.on_diagnostic_open_issue({
+        let inner = Rc::clone(inner);
+        move || {
+            if let Some(window) = inner.ui.upgrade() {
+                open_diagnostics_issue(&window, &inner);
+            }
+        }
+    });
+    actions.on_diagnostic_restart({
+        let inner = Rc::clone(inner);
+        move || {
+            if let Some(window) = inner.ui.upgrade() {
+                restart_diagnostics(&window, &inner);
+            }
+        }
+    });
+    actions.on_diagnostic_note({
+        let inner = Rc::clone(inner);
+        move |note| {
+            *inner.diagnostic_note.borrow_mut() = note.to_string();
+            if let Some(window) = inner.ui.upgrade() {
+                window.global::<AppState>().set_diagnostic_note(note);
+            }
+        }
+    });
 }
 
 /// A tray menu item the controller answers: every one goes through the same
@@ -2586,6 +2691,9 @@ fn drain_events(inner: &Rc<Inner>) {
                         inner.stop_worker();
                     }
                     apply_outcome(&window, inner, outcome);
+                    if !keeps_worker {
+                        window.global::<AppState>().set_diagnostic_available(false);
+                    }
                     // A connected A3062 shows the Saved profiles panel, so the
                     // loaded rows and their Applied tags are filled here.
                     inner.refresh_saved_profiles(&window.global::<AppState>());
@@ -2678,6 +2786,34 @@ fn drain_events(inner: &Rc<Inner>) {
                     apply_dual_write(&window, inner, action, outcome);
                 }
             }
+            Ok(Event::DiagnosticProbe {
+                attempt,
+                request,
+                result,
+            }) => {
+                if attempt == inner.connect.get() && request == inner.diagnostic_request.get() {
+                    inner.diagnostic_probes.borrow_mut().push(result);
+                    if let Some(window) = inner.ui.upgrade() {
+                        let results = inner.diagnostic_probes.borrow().clone();
+                        apply_diagnostic_probe(&window.global::<AppState>(), &results);
+                    }
+                }
+            }
+            Ok(Event::DiagnosticDone {
+                attempt,
+                request,
+                session,
+            }) => {
+                if attempt == inner.connect.get() && request == inner.diagnostic_request.get() {
+                    let session = *session;
+                    *inner.diagnostic_probes.borrow_mut() = session.probes.clone();
+                    *inner.diagnostic_session.borrow_mut() = Some(session.clone());
+                    if let Some(window) = inner.ui.upgrade() {
+                        apply_diagnostic_done(&window.global::<AppState>(), session);
+                    }
+                }
+            }
+            Ok(Event::DiagnosticSaved { result }) => answer_diagnostic_saved(inner, result),
             Ok(Event::ImportFilePicked { result }) => {
                 inner.picking_import_file.set(false);
                 if let Some(window) = inner.ui.upgrade() {
@@ -2783,6 +2919,58 @@ fn run_device_worker(
 }
 
 /// Reports the initial state, then serves sound-mode and equalizer changes on
+/// Runs the diagnostics probes on the worker's open session. Every probe is a
+/// read-only request; the response is recorded with its elapsed time and the
+/// state frame is redacted by the diagnostics crate before it is stored.
+fn run_diagnostics<T: Transport>(
+    session: &mut DeviceSession<T>,
+    attempt: u64,
+    request_id: u64,
+    events: &Sender<Event>,
+) -> DiagnosticSession {
+    let mut diagnostic = DiagnosticSession::new(session.model());
+    for probe in PROBES {
+        let started = Instant::now();
+        let request_frame = request(probe.command);
+        diagnostic.record_raw_frame(0, Direction::Outbound, &request_frame);
+        let outcome = session.probe_frame(probe.command);
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let (status, response_hex) = match outcome {
+            Ok(raw) => {
+                diagnostic.record_raw_frame(elapsed_ms, Direction::Inbound, &raw);
+                let status = match soundcore_protocol::parse(&raw) {
+                    Ok(frame) if frame.body.is_empty() => ProbeStatus::Empty,
+                    Ok(_) => ProbeStatus::Ok,
+                    Err(_) => ProbeStatus::ChecksumError,
+                };
+                (status, Some(diagnostic_hex(&raw)))
+            }
+            Err(SessionError::Timeout) => (ProbeStatus::Timeout, None),
+            Err(SessionError::Io(error))
+                if error.kind() == io::ErrorKind::TimedOut
+                    || error.kind() == io::ErrorKind::WouldBlock =>
+            {
+                (ProbeStatus::Timeout, None)
+            }
+            Err(_) => (ProbeStatus::Unexpected, None),
+        };
+        let result = ProbeResult {
+            id: probe.id,
+            request_hex: diagnostic_hex(&request_frame),
+            response_hex,
+            status,
+            elapsed_ms,
+        };
+        diagnostic.record_probe(result.clone());
+        let _ = events.send(Event::DiagnosticProbe {
+            attempt,
+            request: request_id,
+            result,
+        });
+    }
+    diagnostic
+}
+
 /// the same session until the UI drops the command channel or a change fails.
 ///
 /// The last read equalizer state is kept for the equalizer writes: the `03 87`
@@ -2971,6 +3159,14 @@ fn serve_device<T: Transport>(
                     return;
                 }
             }
+            DeviceCommand::RunDiagnostics { request } => {
+                let session = run_diagnostics(&mut session, attempt, request, &events);
+                let _ = events.send(Event::DiagnosticDone {
+                    attempt,
+                    request,
+                    session: Box::new(session),
+                });
+            }
         }
     }
 }
@@ -3151,6 +3347,7 @@ fn begin_connecting(state: &AppState<'_>, inner: &Rc<Inner>, request: ConnectReq
     inner.clear_dual_devices();
     show_sound_mode(state, None, false, false);
     show_equalizer(state, &EqualizerDisplay::default());
+    reset_diagnostics(state);
     clear_section_pages(state);
     refresh_tray(inner, state);
     inner.request_connect(request);
@@ -3175,6 +3372,7 @@ fn cancel_connect(window: &AppWindow, inner: &Rc<Inner>) {
     inner.clear_dual_devices();
     show_sound_mode(&state, None, false, false);
     show_equalizer(&state, &EqualizerDisplay::default());
+    reset_diagnostics(&state);
     clear_section_pages(&state);
     refresh_tray(inner, &state);
 }
@@ -3207,6 +3405,7 @@ fn disconnect(window: &AppWindow, inner: &Rc<Inner>) {
     inner.clear_dual_devices();
     show_sound_mode(&state, None, false, false);
     show_equalizer(&state, &EqualizerDisplay::default());
+    reset_diagnostics(&state);
     clear_section_pages(&state);
     state.set_page(Page::Devices);
     refresh_tray(inner, &state);
@@ -3269,6 +3468,7 @@ fn apply_outcome(window: &AppWindow, inner: &Rc<Inner>, outcome: ConnectOutcome)
             );
             show_device_pages(&state, has_settings);
             show_equalizer(&state, &equalizer);
+            show_diagnostics_device(&state, model, &device_state);
             state.set_connection(Connection::Connected);
             state.set_connection_reason("".into());
             state.set_failure_kind(FailureKind::None);
@@ -3290,6 +3490,7 @@ fn apply_failure(inner: &Rc<Inner>, state: &AppState<'_>, failure: ConnectFailur
     inner.clear_dual_devices();
     show_sound_mode(state, None, false, false);
     show_equalizer(state, &EqualizerDisplay::default());
+    reset_diagnostics(state);
     clear_section_pages(state);
     state.set_connection(failure.connection());
     state.set_connection_reason("".into());
@@ -3299,7 +3500,368 @@ fn apply_failure(inner: &Rc<Inner>, state: &AppState<'_>, failure: ConnectFailur
     refresh_tray(inner, state);
 }
 
-/// Fills the vendored Sound mode page from a parsed state.
+/// Fills the diagnostics card for a connected model. The page keeps the last
+/// capture while the device stays connected; a new connection starts at the
+/// Device step again.
+fn show_diagnostics_device(state: &AppState<'_>, model: DeviceModel, device_state: &DeviceState) {
+    let firmware = device_state
+        .single_battery
+        .as_ref()
+        .and_then(|battery| battery.firmware.clone())
+        .or_else(|| device_state.firmware.left.clone())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let battery = batteries(device_state)
+        .first()
+        .map(|tile| tile.value.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+    state.set_diagnostic_device_name(state.get_device_name());
+    state.set_diagnostic_device_code(model.code.into());
+    state.set_diagnostic_device_meta(format!("Firmware {firmware} · Battery {battery}").into());
+    state.set_diagnostic_status("Supported".into());
+    state.set_diagnostic_available(true);
+}
+
+/// Empties the diagnostics page: no device, no probes, the Device step. Used on
+/// start-up, on disconnect and when a capture is restarted.
+fn reset_diagnostics(state: &AppState<'_>) {
+    state.set_diagnostic_step(DiagnosticStep::Device);
+    state.set_diagnostic_available(false);
+    state.set_diagnostic_busy(false);
+    state.set_diagnostic_probes(ModelRc::default());
+    state.set_diagnostic_device_name("".into());
+    state.set_diagnostic_device_code("".into());
+    state.set_diagnostic_device_meta("".into());
+    state.set_diagnostic_status("".into());
+    state.set_diagnostic_error("".into());
+    state.set_diagnostic_answered(0);
+    state.set_diagnostic_frames(0);
+    state.set_diagnostic_timeouts(0);
+    state.set_diagnostic_progress(0.0);
+    state.set_diagnostic_archive_size("".into());
+    state.set_diagnostic_file_name("".into());
+    state.set_diagnostic_issue_url("".into());
+    state.set_diagnostic_note("".into());
+}
+
+/// Starts a read-only capture on the connected device worker.
+fn start_diagnostics(window: &AppWindow, inner: &Rc<Inner>) {
+    let state = window.global::<AppState>();
+    if state.get_connection() != Connection::Connected || !state.get_diagnostic_available() {
+        return;
+    }
+    let request = inner.diagnostic_request.get() + 1;
+    inner.diagnostic_request.set(request);
+    inner.diagnostic_probes.borrow_mut().clear();
+    *inner.diagnostic_session.borrow_mut() = None;
+    *inner.diagnostic_archive.borrow_mut() = None;
+    *inner.diagnostic_file.borrow_mut() = None;
+    inner.diagnostic_note.borrow_mut().clear();
+    state.set_diagnostic_error("".into());
+    state.set_diagnostic_note("".into());
+    state.set_diagnostic_probes(ModelRc::new(VecModel::from(diagnostic_probe_rows(&[]))));
+    state.set_diagnostic_answered(0);
+    state.set_diagnostic_frames(0);
+    state.set_diagnostic_timeouts(0);
+    state.set_diagnostic_progress(0.0);
+    state.set_diagnostic_archive_size("".into());
+    state.set_diagnostic_file_name("".into());
+    state.set_diagnostic_busy(true);
+    state.set_diagnostic_step(DiagnosticStep::Capture);
+    if !inner.send_command(DeviceCommand::RunDiagnostics { request }) {
+        state.set_diagnostic_busy(false);
+        state.set_diagnostic_step(DiagnosticStep::Device);
+        state.set_diagnostic_error(
+            "The device worker is not running. Reconnect the device and try again.".into(),
+        );
+    }
+}
+
+/// Stops waiting for a capture. The worker may still finish its probes, but the
+/// request number makes its events stale; the Review step keeps what arrived.
+fn cancel_diagnostics(window: &AppWindow, inner: &Rc<Inner>) {
+    let state = window.global::<AppState>();
+    inner
+        .diagnostic_request
+        .set(inner.diagnostic_request.get() + 1);
+    state.set_diagnostic_busy(false);
+    if state.get_diagnostic_probes().row_count() == 0 {
+        state.set_diagnostic_step(DiagnosticStep::Device);
+    } else {
+        state.set_diagnostic_step(DiagnosticStep::Review);
+    }
+}
+
+fn restart_diagnostics(window: &AppWindow, inner: &Rc<Inner>) {
+    let state = window.global::<AppState>();
+    inner
+        .diagnostic_request
+        .set(inner.diagnostic_request.get() + 1);
+    inner.diagnostic_probes.borrow_mut().clear();
+    *inner.diagnostic_session.borrow_mut() = None;
+    *inner.diagnostic_archive.borrow_mut() = None;
+    *inner.diagnostic_file.borrow_mut() = None;
+    inner.diagnostic_note.borrow_mut().clear();
+    state.set_diagnostic_step(DiagnosticStep::Device);
+    state.set_diagnostic_probes(ModelRc::default());
+    state.set_diagnostic_busy(false);
+    state.set_diagnostic_error("".into());
+    state.set_diagnostic_answered(0);
+    state.set_diagnostic_frames(0);
+    state.set_diagnostic_timeouts(0);
+    state.set_diagnostic_progress(0.0);
+    state.set_diagnostic_archive_size("".into());
+    state.set_diagnostic_file_name("".into());
+    state.set_diagnostic_note("".into());
+    state.set_diagnostic_available(inner.device.borrow().is_some());
+}
+
+fn save_diagnostics_zip(window: &AppWindow, inner: &Rc<Inner>) {
+    let state = window.global::<AppState>();
+    if inner.diagnostic_saving.get() {
+        return;
+    }
+    let Some(mut session) = inner.diagnostic_session.borrow().clone() else {
+        state.set_diagnostic_error("There is no capture to save yet.".into());
+        return;
+    };
+    session.notes = inner.diagnostic_note.borrow().clone();
+    let bytes = match export_zip(&session) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            state.set_diagnostic_error(format!("Could not build the archive: {error}").into());
+            return;
+        }
+    };
+    *inner.diagnostic_archive.borrow_mut() = Some(bytes.clone());
+    *inner.diagnostic_session.borrow_mut() = Some(session.clone());
+    state.set_diagnostic_archive_size(format!("{:.1} KB", bytes.len() as f32 / 1024.0).into());
+    let file_name = diagnostic_file_name(&session);
+    state.set_diagnostic_file_name(file_name.clone().into());
+    inner.diagnostic_saving.set(true);
+    let sender = inner.sender.clone();
+    let spawned = std::thread::Builder::new()
+        .name("diagnostics-save".into())
+        .spawn(move || {
+            let path = rfd::FileDialog::new()
+                .set_file_name(&file_name)
+                .add_filter("ZIP archive", &["zip"])
+                .save_file();
+            let result = match path {
+                Some(path) => fs::write(&path, &bytes)
+                    .map(|()| Some(path))
+                    .map_err(|error| format!("Could not write the archive: {error}")),
+                None => Ok(None),
+            };
+            let _ = sender.send(Event::DiagnosticSaved { result });
+        });
+    if spawned.is_err() {
+        inner.diagnostic_saving.set(false);
+        state.set_diagnostic_error("Could not start the save dialog.".into());
+    }
+}
+
+fn diagnostic_file_name(session: &DiagnosticSession) -> String {
+    let code = session.model.map(|model| model.code).unwrap_or("unknown");
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("diagnostics-{code}-{seconds}.zip")
+}
+
+fn open_diagnostics_issue(window: &AppWindow, _inner: &Rc<Inner>) {
+    let state = window.global::<AppState>();
+    let url = state.get_diagnostic_issue_url();
+    if url.is_empty() {
+        state.set_diagnostic_error("The issue link is not ready yet.".into());
+        return;
+    }
+    open_url(url.as_str());
+}
+
+/// Answers the save-worker event on the UI thread.
+fn answer_diagnostic_saved(inner: &Rc<Inner>, result: Result<Option<PathBuf>, String>) {
+    inner.diagnostic_saving.set(false);
+    let Some(window) = inner.ui.upgrade() else {
+        return;
+    };
+    let state = window.global::<AppState>();
+    match result {
+        Ok(Some(path)) => {
+            *inner.diagnostic_file.borrow_mut() = Some(path.clone());
+            state.set_diagnostic_file_name(
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("diagnostics.zip")
+                    .to_owned()
+                    .into(),
+            );
+            state.set_diagnostic_error("".into());
+            state.set_diagnostic_step(DiagnosticStep::Done);
+            state.set_toast(ToastKind::FileSaved);
+            state.set_toast_count(0);
+        }
+        Ok(None) => {}
+        Err(error) => state.set_diagnostic_error(error.into()),
+    }
+}
+
+fn diagnostic_probe_rows(results: &[ProbeResult]) -> Vec<DiagnosticProbe> {
+    PROBES
+        .iter()
+        .map(|probe| {
+            let result = results.iter().find(|result| result.id == probe.id);
+            let (status, detail, ok, failed) = match result.map(|result| result.status) {
+                Some(ProbeStatus::Ok) => (
+                    "Done".to_owned(),
+                    format!("{} ms", result.map_or(0, |result| result.elapsed_ms)),
+                    true,
+                    false,
+                ),
+                Some(ProbeStatus::Timeout) => {
+                    ("No answer".to_owned(), "timeout".to_owned(), false, true)
+                }
+                Some(ProbeStatus::Empty) => {
+                    ("Empty reply".to_owned(), "empty".to_owned(), false, true)
+                }
+                Some(ProbeStatus::Unexpected) => (
+                    "Unexpected".to_owned(),
+                    "wrong command".to_owned(),
+                    false,
+                    true,
+                ),
+                Some(ProbeStatus::ChecksumError) => (
+                    "Bad checksum".to_owned(),
+                    "checksum".to_owned(),
+                    false,
+                    true,
+                ),
+                None => ("Waiting…".to_owned(), "".to_owned(), false, false),
+            };
+            DiagnosticProbe {
+                label: diagnostic_probe_label(probe.id).into(),
+                command: probe.command.to_string().into(),
+                status: status.into(),
+                detail: detail.into(),
+                ok,
+                failed,
+            }
+        })
+        .collect()
+}
+
+fn diagnostic_probe_label(id: soundcore_diagnostics::ProbeId) -> &'static str {
+    match id {
+        soundcore_diagnostics::ProbeId::State => "State",
+        soundcore_diagnostics::ProbeId::Battery => "Battery",
+        soundcore_diagnostics::ProbeId::Charging => "Charging",
+    }
+}
+
+/// Shows one completed probe without waiting for the rest of the capture.
+fn apply_diagnostic_probe(state: &AppState<'_>, results: &[ProbeResult]) {
+    let answered = results
+        .iter()
+        .filter(|result| result.status == ProbeStatus::Ok)
+        .count() as i32;
+    let timeouts = results
+        .iter()
+        .filter(|result| result.status == ProbeStatus::Timeout)
+        .count() as i32;
+    state.set_diagnostic_probes(ModelRc::new(VecModel::from(diagnostic_probe_rows(results))));
+    state.set_diagnostic_answered(answered);
+    state.set_diagnostic_timeouts(timeouts);
+    state.set_diagnostic_frames((results.len() * 2) as i32);
+    state.set_diagnostic_progress(results.len() as f32 / 3.0);
+}
+
+/// The Review step: the archive is built in memory so Save ZIP is instant.
+fn apply_diagnostic_done(state: &AppState<'_>, session: DiagnosticSession) {
+    let mut session = session;
+    state.set_diagnostic_probes(ModelRc::new(VecModel::from(diagnostic_probe_rows(
+        &session.probes,
+    ))));
+    state.set_diagnostic_answered(
+        session
+            .probes
+            .iter()
+            .filter(|probe| probe.status == ProbeStatus::Ok)
+            .count() as i32,
+    );
+    state.set_diagnostic_timeouts(
+        session
+            .probes
+            .iter()
+            .filter(|probe| probe.status == ProbeStatus::Timeout)
+            .count() as i32,
+    );
+    state.set_diagnostic_frames(session.frames.len() as i32);
+    state.set_diagnostic_progress(1.0);
+    session.notes = String::new();
+    state.set_diagnostic_archive_size(
+        export_zip(&session)
+            .map(|bytes| format!("{:.1} KB", bytes.len() as f32 / 1024.0))
+            .unwrap_or_default()
+            .into(),
+    );
+    state.set_diagnostic_issue_url(diagnostic_issue_url(&session).into());
+    state.set_diagnostic_step(DiagnosticStep::Review);
+    state.set_diagnostic_busy(false);
+}
+
+/// The prefilled GitHub issue URL; the ZIP is attached by the user, never by
+/// the app. It contains only the model code and the probe summary.
+fn diagnostic_issue_url(session: &DiagnosticSession) -> String {
+    let code = session.model.map(|model| model.code).unwrap_or("unknown");
+    let title = format!("[device-diagnostics] {code}: probe capture");
+    let body = format!(
+        "Device: {code}\n\nProbe results:\n{}\n\nI attached the diagnostics ZIP from OpenSCL4.",
+        session
+            .probes
+            .iter()
+            .map(|probe| format!(
+                "- {:?}: {:?} ({} ms)",
+                probe.id, probe.status, probe.elapsed_ms
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    format!(
+        "https://github.com/SckraT/OpenSCL4/issues/new?labels=device-diagnostics&title={}&body={}",
+        percent_encode(&title),
+        percent_encode(&body)
+    )
+}
+
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            b' ' => out.push_str("%20"),
+            b'\n' => out.push_str("%0A"),
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+fn open_url(url: &str) {
+    let uri = windows::core::HSTRING::from(url);
+    unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            &uri,
+            None,
+            None,
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        );
+    }
+}
+
 ///
 /// A device that reports a mode gets the three tiles, their labels and the
 /// Sound mode page; a P20i gets none of them, so it never offers a mode change.
@@ -5134,9 +5696,11 @@ fn reset_models(state: &AppState<'_>) {
 mod tests {
     use super::*;
     use crate::test_support::with_ui_window;
+    use soundcore_diagnostics::ProbeId;
     use soundcore_models::{
         BatteryScale, BatteryState, FirmwareVersions, HostDevice, Layout, SoundMode,
     };
+    use soundcore_protocol::{Command, encode};
     use std::sync::atomic::AtomicU64;
 
     /// A saved-profile document some tests write: a profile with the given name
@@ -10107,6 +10671,7 @@ mod tests {
             preset_change: Cell::new(0),
             curve_change: Cell::new(0),
             setting_change: Cell::new(0),
+            diagnostic_request: Cell::new(0),
             device: RefCell::new(None),
             dual_devices: RefCell::new(Vec::new()),
             profiles: RefCell::new(load_profiles(&path)),
@@ -10120,6 +10685,12 @@ mod tests {
             tray: RefCell::new(None),
             tray_settings: RefCell::new(TraySettings::default()),
             tray_content: RefCell::new(TrayContent::default()),
+            diagnostic_probes: RefCell::new(Vec::new()),
+            diagnostic_session: RefCell::new(None),
+            diagnostic_archive: RefCell::new(None),
+            diagnostic_file: RefCell::new(None),
+            diagnostic_note: RefCell::new(String::new()),
+            diagnostic_saving: Cell::new(false),
         })
     }
 
@@ -12638,5 +13209,155 @@ mod tests {
                 "no list read is queued while the list is hidden"
             );
         });
+    }
+
+    /// The Diagnostics page's rows are the three-catalog order, with waiting
+    /// rows before a capture and the device's status after it.
+    #[test]
+    fn diagnostics_rows_keep_the_probe_order_and_statuses() {
+        let waiting = diagnostic_probe_rows(&[]);
+        assert_eq!(waiting.len(), 3);
+        assert_eq!(waiting[0].label, "State");
+        assert_eq!(waiting[0].command, "01 01");
+        assert!(
+            waiting
+                .iter()
+                .all(|row| row.status == "Waiting…" && !row.ok && !row.failed)
+        );
+
+        let results = vec![
+            ProbeResult {
+                id: ProbeId::State,
+                request_hex: "08 EE 00 00 00 01 01 0A 00 02".into(),
+                response_hex: Some("09 FF".into()),
+                status: ProbeStatus::Ok,
+                elapsed_ms: 42,
+            },
+            ProbeResult {
+                id: ProbeId::Battery,
+                request_hex: "08 EE 00 00 00 01 03 0A 00 04".into(),
+                response_hex: None,
+                status: ProbeStatus::Timeout,
+                elapsed_ms: 3000,
+            },
+        ];
+        let rows = diagnostic_probe_rows(&results);
+        assert!(rows[0].ok);
+        assert_eq!(rows[0].status, "Done");
+        assert!(rows[1].failed);
+        assert_eq!(rows[1].status, "No answer");
+        assert!(!rows[2].ok && !rows[2].failed);
+    }
+
+    #[test]
+    fn the_issue_url_is_prefilled_and_has_no_identifiers() {
+        let session =
+            DiagnosticSession::new(soundcore_models::model_by_code("A3062").expect("A3062"));
+        let url = diagnostic_issue_url(&session);
+        assert!(url.starts_with("https://github.com/SckraT/OpenSCL4/issues/new?"));
+        assert!(url.contains("device-diagnostics"));
+        assert!(url.contains("A3062"));
+        assert!(!url.contains("A4:C1:39"));
+        assert_eq!(percent_encode("a b\nc/d"), "a%20b%0Ac%2Fd");
+    }
+
+    #[test]
+    fn the_worker_runs_the_three_read_only_diagnostics_probes() {
+        let state = a3062_frame_with(&[(79, 0)]);
+        let battery = encode(Direction::Inbound, Command::BATTERY, &[3]);
+        let charging = encode(Direction::Inbound, Command::CHARGING, &[0]);
+        let transport = FakeTransport::scripted([state.clone(), state, battery, charging]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::RunDiagnostics { request: 7 })
+            .expect("the capture is queued");
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                state_request(),
+                request(Command::BATTERY),
+                request(Command::CHARGING),
+            ],
+            "connect poll, then one read-only request per probe"
+        );
+        assert!(matches!(
+            received.try_recv().expect("state"),
+            Event::Connected { .. }
+        ));
+        for label in ["State", "Battery", "Charging"] {
+            match received.try_recv().expect("probe event") {
+                Event::DiagnosticProbe {
+                    attempt: 9,
+                    request: 7,
+                    result,
+                } => {
+                    assert_eq!(result.status, ProbeStatus::Ok, "{label}");
+                }
+                other => panic!("unexpected probe event: {other:?}"),
+            }
+        }
+        match received.try_recv().expect("done") {
+            Event::DiagnosticDone {
+                attempt: 9,
+                request: 7,
+                session,
+            } => {
+                assert_eq!(session.probes.len(), 3);
+                assert_eq!(session.frames.len(), 6, "one tx and one rx per probe");
+                assert!(session.frames.iter().all(|frame| frame.checksum_ok));
+            }
+            other => panic!("unexpected done event: {other:?}"),
+        }
+    }
+    /// Manual hardware check, not part of the automated suite:
+    ///
+    /// ```text
+    /// cargo test -p soundcore-desktop manual_diagnostics_capture -- --ignored --nocapture
+    /// ```
+    ///
+    /// Runs the same three read-only probes the Diagnostics page queues, against
+    /// the paired Space One Pro, and prints their statuses. Addresses are masked.
+    #[test]
+    #[ignore = "manual hardware check: needs a paired Soundcore device"]
+    fn manual_diagnostics_capture() {
+        let model = soundcore_models::model_by_code("A3062").expect("A3062");
+        let found = enumerate_candidates(Some((model.code, "Space One Pro"))).expect("paired list");
+        for candidate in found.iter().filter(|candidate| candidate.suggested) {
+            println!("candidate {} (<address masked>)", candidate.name);
+            let cancel = AtomicBool::new(false);
+            let request = ConnectRequest {
+                address: candidate.address,
+                model_code: model.code.to_owned(),
+                protocol: Some(model),
+            };
+            match open_session(&request, &cancel) {
+                OpenOutcome::Opened(mut session) => {
+                    let (events, _received) = mpsc::channel();
+                    let diagnostic = run_diagnostics(&mut session, 1, 1, &events);
+                    for probe in &diagnostic.probes {
+                        println!(
+                            "  {:?}: {:?} ({} ms)",
+                            probe.id, probe.status, probe.elapsed_ms
+                        );
+                    }
+                    println!(
+                        "frames: {} model: {:?}",
+                        diagnostic.frames.len(),
+                        diagnostic.model.map(|model| model.code)
+                    );
+                    return;
+                }
+                OpenOutcome::Cancelled => println!("open cancelled"),
+                OpenOutcome::Failed(failure) => println!("open failed: {failure:?}"),
+            }
+        }
+        panic!("no paired A3062 answered");
     }
 }

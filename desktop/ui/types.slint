@@ -18,6 +18,18 @@ export enum Page {
     other,
     devices,
     settings,
+    diagnostics,
+}
+
+export enum DiagnosticStep { device, capture, review, done }
+
+export struct DiagnosticProbe {
+    label: string,
+    command: string,
+    status: string,
+    detail: string,
+    ok: bool,
+    failed: bool,
 }
 
 export enum Connection { no-device, off, connecting, connected, recovering, lost, bluetooth-off, failed }
@@ -341,6 +353,26 @@ export global AppState {
 
     // a change the device did not take, shown above the page
     in property <string> error-label;
+
+    // Diagnostics: read-only probes, a local ZIP and a prefilled issue. The
+    // page keeps the device's own report; nothing is uploaded by the app.
+    in-out property <DiagnosticStep> diagnostic-step: DiagnosticStep.device;
+    in-out property <[DiagnosticProbe]> diagnostic-probes;
+    in property <bool> diagnostic-available;
+    in property <bool> diagnostic-busy;
+    in property <string> diagnostic-device-name;
+    in property <string> diagnostic-device-code;
+    in property <string> diagnostic-device-meta;
+    in property <string> diagnostic-status;
+    in property <string> diagnostic-error;
+    in property <int> diagnostic-answered;
+    in property <int> diagnostic-frames;
+    in property <int> diagnostic-timeouts;
+    in property <float> diagnostic-progress;
+    in property <string> diagnostic-archive-size;
+    in property <string> diagnostic-file-name;
+    in property <string> diagnostic-issue-url;
+    in-out property <string> diagnostic-note;
     in property <ToastKind> toast;
     in property <int> toast-count;
     in property <string> toast-name;
@@ -425,5 +457,11 @@ export global Actions {
     callback set-close-to-tray(bool);
     callback set-tray-item(int, bool);
     callback quit-app();
+    callback open-diagnostics();
+    callback diagnostic-start();
+    callback diagnostic-cancel();
+    callback diagnostic-save-zip();
+    callback diagnostic-open-issue();
+    callback diagnostic-restart();
+    callback diagnostic-note(string);
 }
-

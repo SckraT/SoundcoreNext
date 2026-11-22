@@ -84,3 +84,30 @@ fn malformed_frames_are_kept_as_errors() {
     let manifest = session.manifest_json();
     assert!(manifest.contains("\"checksumOk\": false"));
 }
+
+#[test]
+fn redacts_the_a3062_serial_before_export() {
+    let model = soundcore_models::model_by_code("A3062").expect("model");
+    let mut body = vec![0u8; 95];
+    body[..7].copy_from_slice(&[2, 0xFF, b'0', b'4', b'.', b'3', b'9']);
+    body[7..23].copy_from_slice(b"0123456789ABCDEF");
+    let mut session = DiagnosticSession::new(model);
+    session.record_raw_frame(
+        10,
+        Direction::Inbound,
+        &encode(Direction::Inbound, Command::STATE, &body),
+    );
+
+    let bytes = export_zip(&session).expect("export");
+    let frames = read_zip(&bytes, "frames.jsonl");
+    assert!(!frames.contains("0123456789ABCDEF"), "the serial is gone");
+    let line: serde_json::Value = serde_json::from_str(frames.trim()).expect("frame json");
+    let raw: Vec<u8> = line["hex"]
+        .as_str()
+        .expect("hex")
+        .split_whitespace()
+        .map(|byte| u8::from_str_radix(byte, 16).expect("hex"))
+        .collect();
+    let frame = parse(&raw).expect("valid frame");
+    assert!(frame.body[7..23].iter().all(|byte| *byte == 0));
+}
