@@ -5,9 +5,12 @@
 //! mutex that says the app runs, and an auto-reset event that carries a "show
 //! your window" request. A second start finds the mutex, sets the event and
 //! ends; the first may have its window hidden in the notification area, so it
-//! shows the window again. The handles are never closed on purpose: the objects
-//! have to exist for as long as the process does, and Windows releases them when
-//! it ends, so a crash leaves no stale lock behind.
+//! shows the window again. Once the claim is complete the handles are never
+//! closed on purpose: the objects have to exist for as long as the process does,
+//! and Windows releases them when it ends, so a crash leaves no stale lock
+//! behind. If only one of the two objects can be created, the created handle is
+//! closed again: a half-set-up start must not keep later starts thinking the app
+//! is running.
 //!
 //! The event is waited on by a worker thread, which only sets an atomic flag;
 //! the UI thread takes that flag on its existing worker-event tick and shows the
@@ -20,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::{
-    Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, WAIT_OBJECT_0},
+    Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, WAIT_OBJECT_0},
     System::Threading::{CreateEventW, CreateMutexW, INFINITE, SetEvent, WaitForSingleObject},
 };
 use windows::core::HSTRING;
@@ -114,9 +117,24 @@ pub fn claim(config_dir: &Path) -> Option<FirstInstance> {
     };
     // SAFETY: as above
     let event = unsafe { CreateEventW(None, false, false, &event_name) };
-    let (Ok(mutex), Ok(event)) = (mutex, event) else {
-        eprintln!("OpenSCL4: could not tell whether the app already runs; starting anyway");
-        return Some(FirstInstance::unclaimed());
+    let (mutex, event) = match (mutex, event) {
+        (Ok(mutex), Ok(event)) => (mutex, event),
+        (mutex, event) => {
+            // A half-created claim is worse than none: a kept mutex would tell a
+            // later start that this app runs while this start has no watcher to
+            // answer its show request, so release whatever was created and start
+            // without a claim.
+            if let Ok(mutex) = mutex {
+                // SAFETY: the mutex handle was just created and is not used again.
+                let _ = unsafe { CloseHandle(mutex) };
+            }
+            if let Ok(event) = event {
+                // SAFETY: the event handle was just created and is not used again.
+                let _ = unsafe { CloseHandle(event) };
+            }
+            eprintln!("OpenSCL4: could not tell whether the app already runs; starting anyway");
+            return Some(FirstInstance::unclaimed());
+        }
     };
     if already {
         // SAFETY: the event handle was just opened and this start does not use
@@ -231,6 +249,27 @@ mod tests {
         let first = claim(&temp_folder("one")).expect("the first folder claims the app");
         let second = claim(&temp_folder("two")).expect("another folder is another instance");
         assert!(!first.show_request().take_requested());
+        assert!(!second.show_request().take_requested());
+    }
+
+    #[test]
+    fn a_half_created_claim_releases_the_app_for_a_later_start() {
+        let folder = temp_folder("event-failure");
+        let (_, event_name) = instance_names(&folder);
+        // Occupy the event's name with a mutex of the same name: Windows refuses
+        // to create an event under a name an object of another type already uses,
+        // so this start gets its mutex but no event.
+        // SAFETY: the name lives through the call and the handle is closed below.
+        let blocker = unsafe { CreateMutexW(None, false, &HSTRING::from(event_name)) }
+            .expect("the blocking object is created");
+        let first = claim(&folder).expect("a failed claim still starts the app");
+        assert!(!first.show_request().take_requested());
+        // SAFETY: the blocker handle is owned by this test and is not used again.
+        let _ = unsafe { CloseHandle(blocker) };
+
+        // If the failed claim had kept its mutex, this start would find it and
+        // end without a window; it must be able to claim the app instead.
+        let second = claim(&folder).expect("a later start can still claim the app");
         assert!(!second.show_request().take_requested());
     }
 }

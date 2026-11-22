@@ -15,12 +15,12 @@ Show the earbuds’ remembered/connected devices, allow forget plus connect/disc
 - Core: `0B 01` multi-frame list parser (total/current, device length, connected flag, MAC order, UTF-8 truncated names), `0B 82` connect / `0B 81` disconnect / `0B 83` forget builders, session list read with bounded frames/timeouts, fixture from real A3062 capture.
 - Controller: fetch list after connect when dual is enabled; Connections = toggle + DualDevices panel; options mark connected; forget/connect/disconnect actions write and re-read; refresh on navigate; errors.
 - UI exception: add Connect/Disconnect buttons + `connect-item`/`disconnect-item` Actions callbacks to `desktop/ui/components/settings.slint` and `desktop/ui/types.slint`; no redesign.
-- Tray: Slint `SystemTrayIcon` using the vendored `ui/tray.slint`; icon/tooltip/menu; status/battery/mode/LDAC/Connect/Open/Quit; close-to-tray; Settings TrayPanel actions; Windows single-instance mutex/event; no new crates.
+- Tray: Slint `SystemTrayIcon` using the vendored `ui/tray.slint`; icon/tooltip/menu; status/battery/mode/LDAC/Connect/Open/Quit; the tooltip names the device and, while connected, its battery (the vendored tooltip has no status word — status is the menu's device line); choosing a Sound mode writes the same measured `06 81` frame as the page (an explicit quick action, no new mode support); close-to-tray; Settings TrayPanel actions; Windows single-instance mutex/event; no new crates.
 - A3062 only; A3949 deferred.
 
 ## Out of scope
 
-- Tray quick presets (app has none), mode changes beyond display, persistence of tray settings, Linux/macOS tray.
+- Tray quick presets (app has none), mode changes beyond the existing measured `06 81` three-mode write that the tray's Sound mode submenu reuses (no new modes, controls or writes), persistence of tray settings, Linux/macOS tray.
 - Legacy migration/export.
 - Dual list for other models.
 
@@ -39,11 +39,11 @@ Show the earbuds’ remembered/connected devices, allow forget plus connect/disc
 1. Gates pass (desktop/core test, fmt, clippy, build).
 2. Connections shows remembered/connected devices with names and connected marker; forget removes; connect/disconnect update after re-read; disabled dual hides the list and no `0B 01` is sent.
 3. No MAC or serial in UI, logs or docs.
-4. Tray icon appears with tooltip device/status/battery; menu status/battery, Connect (when disconnected), Sound mode submenu (read-only selection or current), LDAC toggle, Open, Quit.
+4. Tray icon appears with a tooltip naming the device and, while connected, its battery (the vendored tooltip has no status word; status is the menu's device line); menu status/battery, Connect (when disconnected), Sound mode submenu (the current mode checked; choosing one writes the existing measured `06 81` mode frame through the page's path and re-reads `01 01`), LDAC toggle (the existing settings write), Open, Quit.
 5. Close hides to tray; tray Open restores; Quit exits; second launch reveals the hidden window.
 6. Settings TrayPanel toggles and Quit button work in memory.
 7. Screenshots of dual list and tray menu stored/linked; no identifiers.
-8. Device pairing/settings left as found after acceptance.
+8. Device settings left as found after acceptance. Pairing is left as found except for one user-approved **Forget** of the owner's phone from the earbuds' remembered list: that pairing was deliberately removed, it cannot be restored from this PC, and the owner must re-pair the phone.
 
 ## Closure
 

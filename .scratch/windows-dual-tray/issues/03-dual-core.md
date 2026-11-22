@@ -204,6 +204,13 @@ was abandoned rather than wait), so ticket 05's "timeout → banner, no panic"
 hardware check should confirm the transport actually bounds a silent read; the
 core timeout paths themselves are covered by the scripted-transport tests above.
 
+**Update (ticket 05):** the acceptance run did **not** reproduce that hardware
+check, so the silent-read bound stays unverified on hardware and is recorded in
+ticket 05 as a transport limitation: a silent device may keep the session
+waiting past its budget instead of reaching the timeout banner. The scripted
+tests above and ticket 04's scripted worker tests still cover the timeout paths;
+no live silent read was used as evidence.
+
 ## Acceptance
 
 - [x] core gates pass (tests, fmt, clippy; desktop tests/fmt/clippy too).

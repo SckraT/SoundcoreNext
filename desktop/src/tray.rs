@@ -310,6 +310,24 @@ pub fn closes_to_tray(icon_hosted: bool, close_to_tray: bool) -> bool {
     icon_hosted && close_to_tray
 }
 
+/// Whether a `Tray::show` result means the platform put the icon in the
+/// notification area.
+///
+/// A platform error is the only signal the app gets that the icon is not there;
+/// it is logged, and the caller must not record the shell as available or as
+/// hosting an icon. Otherwise the Settings page would report the tray as
+/// available and closing the window would hide it with no icon to reopen it
+/// from, instead of quitting.
+fn show_hosted(result: Result<(), slint::PlatformError>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(err) => {
+            eprintln!("OpenSCL4: could not show the notification-area icon: {err}");
+            false
+        }
+    }
+}
+
 /// The menu choices the controller answers. Open and Quit stay in the shell
 /// because it owns the window it shows and the loop it ends.
 pub struct TrayActions {
@@ -341,7 +359,7 @@ pub struct TrayShell {
     close_to_tray: Rc<Cell<bool>>,
     /// Whether an icon is on screen right now; shared with the close handler.
     icon_hosted: Rc<Cell<bool>>,
-    /// Whether the platform has hosted an icon at all: `app-tray-available`.
+    /// Whether a `show` has succeeded at least once: `app-tray-available`.
     host_available: Cell<bool>,
 }
 
@@ -396,6 +414,11 @@ impl TrayShell {
     }
 
     /// Creates the component if there is none yet and shows it.
+    ///
+    /// The icon is only recorded as hosted when the platform's `show` succeeds:
+    /// a refused icon must leave `available` false and `icon_hosted` false, so
+    /// the Settings page does not offer a tray that is not there and the window's
+    /// close handler quits instead of hiding with nothing to reopen it from.
     fn create_icon(&self) {
         if self.tray.borrow().is_some() {
             return;
@@ -429,8 +452,11 @@ impl TrayShell {
             move |on| set_ldac(on)
         });
         render(&tray, &self.content.borrow());
-        if let Err(err) = tray.show() {
-            eprintln!("OpenSCL4: could not show the notification-area icon: {err}");
+        if !show_hosted(tray.show()) {
+            // The component is dropped here and the icon never reaches the
+            // notification area; `host_available` and `icon_hosted` keep their
+            // previous (false) values and the close handler quits the program.
+            return;
         }
         self.host_available.set(true);
         self.icon_hosted.set(true);
@@ -657,6 +683,21 @@ mod tests {
         assert!(!closes_to_tray(true, false));
         assert!(!closes_to_tray(false, true));
         assert!(!closes_to_tray(false, false));
+    }
+
+    #[test]
+    fn a_refused_show_is_not_a_hosted_icon_and_close_quits() {
+        assert!(show_hosted(Ok(())), "a shown icon counts as hosted");
+        let refused =
+            || slint::PlatformError::Other("the platform refused the notification icon".into());
+        assert!(
+            !show_hosted(Err(refused())),
+            "a failed show must not be recorded as a hosted icon"
+        );
+        assert!(
+            !closes_to_tray(show_hosted(Err(refused())), true),
+            "with no icon on screen, closing the window quits instead of hiding"
+        );
     }
 
     #[test]

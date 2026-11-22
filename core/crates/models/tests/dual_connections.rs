@@ -393,7 +393,9 @@ fn builds_the_exact_read_connect_disconnect_and_forget_frames() {
 
 #[test]
 fn every_write_frame_carries_its_address_bytes_unchanged_and_in_order() {
-    let address = [0x66, 0x14, 0x92, 0x2C, 0x3A, 0xD4];
+    // A neutral, locally administered fixture address: the bytes travel in reply
+    // order and are never reversed or re-encoded on the way into a frame.
+    let address = [0x02, 0x00, 0x00, 0x00, 0x00, 0x06];
     for frame in [
         dual_connections_connect_frame(address),
         dual_connections_disconnect_frame(address),
