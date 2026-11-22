@@ -23,6 +23,11 @@ windows = { version = "0.62", features = [
     "Win32_Devices_Bluetooth",
     "Win32_Foundation",
     "Win32_Networking_WinSock",
+    # The single-instance mutex and event. The two creation calls take a
+    # `SECURITY_ATTRIBUTES` pointer, which the windows crate gates behind
+    # `Win32_Security` as well (the reference app enables the same pair).
+    "Win32_Security",
+    "Win32_System_Threading",
     # The Connections page's links open the Windows settings pages.
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

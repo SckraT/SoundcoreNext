@@ -392,6 +392,18 @@ export component SettingRowView inherits Rectangle {
                     horizontal-stretch: 1;
                 }
                 Button {
+                    text: @tr("Connect");
+                    kind: ButtonKind.ghost;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Actions.connect-item(root.setting.id, i); }
+                }
+                Button {
+                    text: @tr("Disconnect");
+                    kind: ButtonKind.ghost;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Actions.disconnect-item(root.setting.id, i); }
+                }
+                Button {
                     text: @tr("Forget");
                     kind: ButtonKind.ghost;
                     y: (parent.height - self.height) / 2;

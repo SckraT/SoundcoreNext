@@ -1,0 +1,25 @@
+{
+  "model": "A3062",
+  "source": "real capture of Space One Pro (firmware 04.39) over the Windows RFCOMM transport on 2026-11-21: the complete 0B 01 reply to the empty list request; device names replaced by same-length placeholders and Bluetooth addresses by neutral bytes, with flags, name-field lengths, device order and frame order unchanged; checksum recalculated after masking",
+  "frames": [
+    {
+      "frame_hex": "09 FF 00 00 01 0B 01 5C 00 01 01 28 01 02 00 00 00 00 01 44 65 73 6B 74 6F 70 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 28 00 02 00 00 00 00 02 50 68 6F 6E 65 20 6D 6F 64 65 6C 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 D0",
+      "total": 1,
+      "current": 1
+    }
+  ],
+  "expected": {
+    "devices": [
+      {
+        "name": "Desktop",
+        "mac": "02:00:00:00:00:01",
+        "connected": true
+      },
+      {
+        "name": "Phone model",
+        "mac": "02:00:00:00:00:02",
+        "connected": false
+      }
+    ]
+  }
+}

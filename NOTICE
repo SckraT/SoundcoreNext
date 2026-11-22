@@ -49,6 +49,16 @@ project, under GPL-3.0-or-later:
   `lib/src/devices/soundcore/common/packet/outbound/set_ambient_sound_mode_cycle.rs`,
   `.../dual_connections.rs`, `.../set_auto_power_off.rs` and
   `.../set_limit_high_volume.rs`;
+- the A3062 dual-connections `0B 01` remembered-device list (the multi-frame
+  total/current counts, the per-device record of length, connected flag, six
+  address bytes and NUL-padded UTF-8 name field, and the "connected only when
+  exactly 1" flag rule), adapted from
+  `lib/src/devices/soundcore/common/packet/inbound/dual_connections_device.rs`
+  and `lib/src/devices/soundcore/common/structures/dual_connections.rs`, and its
+  measured `0B 82` connect, `0B 81` disconnect and `0B 83` forget bodies (the six
+  address bytes in reply order) from
+  `lib/src/devices/soundcore/common/packet/outbound/dual_connections.rs` (the
+  same module already named for the `0B 84` enable above);
 - the OpenSCL4 transfer-profile format (`name` plus `volumeAdjustments`), its
   serialization in both directions (profile import and export) and its
   `scaled_to_device` decibel-to-band rounding rule for profile import, adapted
@@ -62,4 +72,5 @@ project, under GPL-3.0-or-later:
 
 The Rust implementations in `core/` are this project's own; the adapted data and
 its evidence are recorded in `.scratch/windows-eq-presets/`,
-`.scratch/windows-settings-import/` and in the commits that introduce them.
+`.scratch/windows-settings-import/` and `.scratch/windows-dual-tray/`, and in the
+commits that introduce them.
