@@ -118,6 +118,40 @@ layout, components, pages, icons, fonts and art.
   a stale value. The banner means the write or its confirmation poll failed, not
   that the device kept the old value: the vendored second sentence is fixed
   wording, so the device's state is unknown until **Retry** re-polls it.
+- **Dual connections** is implemented for the A3062: after connecting, while the
+  device reports dual connections on, the app reads the earbuds' remembered-device
+  list with a bounded multi-frame `0B 01` read and shows it on **Connections** as
+  the vendored list panel — one row per remembered device with the parsed name and
+  a “— connected” marker taken from the device's own connected flag (the address
+  bytes are never shown, logged or put in an option string). Each row offers
+  **Connect**, **Disconnect** and **Forget**; a click writes exactly one measured
+  `0B 82` / `0B 81` / `0B 83` frame and then re-reads `0B 01` (the connect and
+  disconnect writes retry the read for a few seconds because the earbuds take a
+  moment to settle), so the list and its markers follow the device's own answer.
+  With dual connections off the list is hidden and no `0B 01` is sent; turning it
+  on writes `0B 84` on, re-polls `01 01`, and only then reads the list. Options and
+  row actions are built from the same last reply, so an index can never name a
+  different device. **Forget** is the device's own `0B 83`: it removes the row from
+  the earbuds' remembered list for good (it un-pairs that device from the earbuds),
+  which is why the vendored note warns that forgetting this computer ends control
+  of the earbuds. The list is A3062-only; the P20i (A3949) never reads or writes a
+  `0B` frame and keeps the Connections page without the list.
+- The **notification-area tray** uses the vendored `ui/tray.slint` component and
+  Slint's Windows `SystemTrayIcon`: the OpenSCL4 icon with a tooltip naming the
+  device and, while connected, its battery (“OpenSCL4 · soundcore Space One Pro”
+  over “Battery 40%”), and a menu with the device and its connection status, the
+  battery line, the **Sound mode** submenu (the current mode checked; choosing one
+  writes the same `06 81` frame as the page and re-reads `01 01`), the **LDAC**
+  item (the same settings write as the Sound and effects row), **Connect** while a
+  saved device is not connected (the same retry as the page's banner),
+  **Open OpenSCL4** and **Quit**. Closing the window hides it to the notification
+  area while the icon is hosted and close-to-tray is on; the icon's Open item (or
+  a left click) shows it again; **Quit** ends the program and removes the icon. A
+  second start of the executable finds the running instance, asks it to show the
+  window and exits, so there is only ever one window and one icon. The Settings
+  page's **Desktop and quick access** panel hosts the switches (the icon, the four
+  menu sections, close-to-tray) and a **Quit** button; the choices live in memory
+  for the run and are not persisted.
 - The P20i (A3949) equalizer is deliberately deferred in this slice: the
   committed A3949 state carries an equalizer block at body 32..44, but no A3949
   `03 87` write body is verified, so the page stays hidden and no equalizer
@@ -126,21 +160,39 @@ layout, components, pages, icons, fonts and art.
   pages or settings writes: it keeps only Overview and My devices as before.
 - Connecting shows “Connecting…”, and Bluetooth off, not found, timeout and
   unsupported-layout failures each show a readable message instead of a crash.
-  Cancel and Retry are wired. The vendored UI has no disconnect control; the
-  controller's `disconnect` action clears the current device and returns to My
-  Devices.
+  Cancel and Retry are wired. The vendored UI has no control that drops the app's
+  own connection (the dual-connections list disconnects remembered devices, not
+  the app's link); the controller's `disconnect` action, used by the tests,
+  clears the current device and returns to My Devices.
 - The only device writes are the `01 01` state request, the `06 81` sound-mode
   frame, the `03 87` equalizer frames (a built-in preset, the custom bands, and
-  an applied saved profile's custom curve) and the measured one-frame settings
-  writes behind the section pages; the only app file the shell writes is the
-  saved-profile document above. Pairing stays in Windows settings and the app
-  never changes it.
+  an applied saved profile's custom curve), the measured one-frame settings
+  writes behind the section pages, and the dual-connections writes (`0B 84` for
+  the setting, `0B 82`/`0B 81`/`0B 83` for a list row); its `0B 01` list request
+  is the only other read. The only app file the shell writes is the saved-profile
+  document above. Windows pairing stays in Windows settings and the app never
+  changes it; **Forget** asks the earbuds themselves to drop a remembered device,
+  which is the un-pairing the vendored note warns about.
 - ANC strength, wind noise, adaptive ANC and the 1-to-11 strength scale are not
   part of this slice, so the Sound mode page shows only the three mode tiles.
   Legacy migration and HearID are out of scope: their vendored controls keep
-  their empty or hidden state, as described above. The dual-connections
-  remembered-device list (connect, disconnect, forget) is a follow-up too, so
-  Connections shows the toggle and the Windows links only.
+  their empty or hidden state, as described above.
+- Tray **Quick presets** stay out of scope: the app has no quick presets, so the
+  vendored panel's preset switch is kept in memory but the menu never shows a
+  preset section (and never says “No presets yet”). The tray does not change the
+  sound mode beyond the three modes the Sound mode page has. The tray choices are
+  not persisted, so a new run starts with the defaults (icon and close-to-tray on,
+  battery/modes/LDAC sections on, presets off), and this slice has no tray on
+  Linux or macOS.
+- Writing the dual-connections setting or LDAC makes the real A3062 reset its
+  Bluetooth links: the write can be acknowledged and the following re-poll or
+  list read then hits a closed link, so the page shows the readable “connection
+  lost” banner (and `0B 01` list read/`LDAC (connection lost)` names) and
+  **Retry** opens a fresh connection. The same happens when the list's
+  **Disconnect** is used on this computer's own row: the earbuds drop the PC link
+  the app talks over, the banner says the list could not be re-read, and
+  **Retry** reconnects. That is device behaviour, not a crash: every reconnect
+  then read or wrote normally again.
 - The shell keeps the RFCOMM link open between writes rather than polling, so a
   link that Windows or the device drops while the window sits idle is noticed on
   the next write: the page shows the readable “connection lost” banner (after
@@ -154,6 +206,36 @@ layout, components, pages, icons, fonts and art.
   and this shell does not implement them.
 
 ## Screenshots
+
+![Tray menu with a connected Space One Pro](tray.png)
+
+The notification-area menu from the running app on Windows: a paired
+**soundcore Space One Pro** (A3062) is connected over RFCOMM, so the icon's
+tooltip reads “OpenSCL4 · soundcore Space One Pro” over “Battery 40%” and the
+menu shows the device with **Connected**, the battery line, the **Sound mode**
+submenu with the current mode checked (“✓ Normal”), the **LDAC** item, **Open
+OpenSCL4** and **Quit**. This capture was taken with the Sound mode submenu open;
+the menu was opened from the notification-area icon through its Win32 callback
+message, and every action was exercised on the bench: a mode chosen from the
+submenu was written and re-read (the check moved from Normal to Transparency and
+back), LDAC was toggled on and off again, Open restored the window after a close,
+and Quit ended the process and removed the icon. No Bluetooth address or serial
+number appears in the capture; the names are the devices' own names.
+
+![Dual connections with a connected Space One Pro](dual-connections.png)
+
+The **Connections** page from the running app on Windows: a paired **soundcore
+Space One Pro** (A3062) is connected over RFCOMM with dual connections on, and the
+vendored **Connected devices** list shows the devices the earbuds remember —
+**DALUNEV — connected** (this computer) and **Pixel 8 Pro** — each with
+**Connect**, **Disconnect** and **Forget**. The list is read with a bounded
+multi-frame `0B 01` read; the row actions write one measured `0B 82` / `0B 81` /
+`0B 83` frame and re-read it. On the bench **Forget** removed **Pixel 8 Pro** from
+the earbuds' remembered list (a re-read then showed only this computer) and the
+row was gone; **Connect** on the disconnected phone row wrote `0B 82` and re-read
+the list, but the phone did not report connected (it did not answer the earbuds'
+page during the run). No Bluetooth address or serial number appears in the
+capture.
 
 ![Overview with a connected P20i](overview-connected.png)
 
@@ -257,6 +339,15 @@ on Windows.
 cd desktop
 cargo run
 ```
+
+Closing the window keeps OpenSCL4 running in the notification area while the
+icon is shown and **Close to notification area** is on; the tray's **Open** item
+(or a left click on the icon) brings the window back, and **Quit** in the tray or
+on the Settings page ends the program and removes the icon. Starting the
+executable again while it runs only asks the running copy to show its window.
+The tray and desktop switches are not persisted: they start at their defaults on
+every run. The app needs the earbuds paired in Windows (pairing itself is done in
+Windows settings) and never changes the pairing.
 
 ## License and attribution
 
