@@ -39,9 +39,7 @@ use windows::core::GUID;
 
 use crate::catalog_adapter::{self, Chip};
 use crate::overview::{self, OverviewBlock, OverviewLayout, OverviewPreferences, OverviewPreset};
-use crate::settings::{
-    self, Accent, AppTheme, ContentScale, DesktopSettings, DeviceColor, SoundModeView,
-};
+use crate::settings::{self, DesktopSettings};
 use crate::single_instance::ShowRequest;
 use crate::transport_windows::{
     BluetoothError, VENDOR_SERVICE_PREFIX, WindowsRfcommTransport, format_mac, installed_services,
@@ -50,8 +48,8 @@ use crate::transport_windows::{
 use crate::tray::{TrayActions, TrayContent, TraySettings, TrayShell};
 use crate::{
     Actions, AppState, AppWindow, Battery, Connection, DeviceCard, DiagnosticProbe, DiagnosticStep,
-    EqBand, EqLine, EqProfile, FailureKind, ImportItem, ModeOption, Page, PairedOption, PaletteChoice,
-    PanelKind, RowKind, SettingRow, SettingsPanel, Strings, SystemPage, Theme, ToastKind, TransferNote,
+    EqBand, EqLine, EqProfile, FailureKind, ImportItem, ModeOption, Page, PairedOption, PanelKind,
+    RowKind, SettingRow, SettingsPanel, SystemPage, ToastKind, TransferNote,
 };
 
 /// The model chosen in the Add Device dialog: what the catalog card shows plus
@@ -1856,10 +1854,13 @@ struct Inner {
     /// The notification-area icon. `None` in tests, which never create a real
     /// icon; the desktop start fills it before the event loop runs.
     tray: RefCell<Option<TrayShell>>,
-    /// The Settings page's persisted tray and close-button choices.
-    tray_settings: RefCell<TraySettings>,
-    /// `None` in tests and when Windows provides no roaming app-data directory.
-    tray_settings_path: Option<PathBuf>,
+    /// The Settings page's persisted appearance, language and tray choices. The
+    /// tray code reads [`DesktopSettings::tray`]; the other fields are loaded and
+    /// preserved for the Settings wiring in ticket 02.
+    settings: RefCell<DesktopSettings>,
+    /// The document `settings` is saved to; `None` in tests and when Windows
+    /// provides no roaming app-data directory.
+    settings_path: Option<PathBuf>,
     /// What the tray currently shows, kept on the UI thread so the icon can be
     /// created again with the last content and so the tests can read it.
     tray_content: RefCell<TrayContent>,
@@ -2050,11 +2051,13 @@ impl Controller {
             .as_deref()
             .map(overview::load_preferences)
             .unwrap_or_default();
-        let tray_settings_path = default_desktop_preferences_path();
-        let tray_settings = tray_settings_path
+        let settings_path = default_desktop_preferences_path();
+        let desktop_settings = settings_path
             .as_deref()
-            .map(crate::tray::load_settings)
+            .map(settings::load_settings)
             .unwrap_or_default();
+        // The tray shell only needs its own section, which is `Copy`.
+        let tray_settings = desktop_settings.tray;
         let (sender, receiver) = mpsc::channel();
         let inner = Rc::new(Inner {
             ui: ui.as_weak(),
@@ -2082,8 +2085,8 @@ impl Controller {
             picking_export_file: Cell::new(false),
             show_request,
             tray: RefCell::new(None),
-            tray_settings: RefCell::new(tray_settings),
-            tray_settings_path,
+            settings: RefCell::new(desktop_settings),
+            settings_path,
             tray_content: RefCell::new(TrayContent::default()),
             diagnostic_probes: RefCell::new(Vec::new()),
             diagnostic_session: RefCell::new(None),
@@ -2096,7 +2099,7 @@ impl Controller {
         let shell = TrayShell::new(ui, tray_actions(&inner), tray_settings);
         *inner.tray.borrow_mut() = Some(shell);
         let state = ui.global::<AppState>();
-        let tray_settings = *inner.tray_settings.borrow();
+        let tray_settings = inner.settings.borrow().tray;
         show_tray_settings(&state, &tray_settings, inner.tray_available());
         refresh_tray(&inner, &state);
         inner.refresh_saved_profiles(&state);
@@ -2108,6 +2111,14 @@ impl Controller {
         });
         Self { _timer: timer }
     }
+
+    /// Called once the native window exists, which is when Windows can report
+    /// its current light/dark app mode and its language.
+    ///
+    /// TODO(ticket 02): resolve Follow system, apply the saved theme, accent and
+    /// language from `Inner::settings`, and listen for app-mode changes. It is a
+    /// no-op for now so build recovery does not change any UI behavior.
+    pub fn shown(&self) {}
 }
 
 fn clear_overview(state: &AppState<'_>) {
@@ -2787,7 +2798,7 @@ fn show_tray_settings(state: &AppState<'_>, settings: &TraySettings, available: 
 /// read. Called on every change the menu reflects: the connect outcome and its
 /// re-polls, a sound-mode or settings write, and a tray setting toggle.
 fn refresh_tray(inner: &Rc<Inner>, state: &AppState<'_>) {
-    let settings = *inner.tray_settings.borrow();
+    let settings = inner.settings.borrow().tray;
     let device = inner.device.borrow();
     let content = TrayContent::from_state(state, device.as_deref(), &settings);
     *inner.tray_content.borrow_mut() = content.clone();
@@ -2800,17 +2811,20 @@ fn refresh_tray(inner: &Rc<Inner>, state: &AppState<'_>) {
 /// whether the icon is hosted on this platform.
 fn show_tray_choices(window: &AppWindow, inner: &Rc<Inner>) {
     let state = window.global::<AppState>();
-    let settings = *inner.tray_settings.borrow();
+    let settings = inner.settings.borrow().tray;
     show_tray_settings(&state, &settings, inner.tray_available());
 }
 
-/// Persists the current tray choices without blocking startup or turning a file
-/// error into a crash. The running window keeps the user's selected values.
+/// Persists the current desktop settings without blocking startup or turning a
+/// file error into a crash. The running window keeps the user's selected values.
+///
+/// The document holds appearance and language choices the Settings page will
+/// wire in ticket 02; saving the whole in-memory document keeps those fields.
 fn persist_tray_settings(inner: &Rc<Inner>) {
-    let Some(path) = inner.tray_settings_path.as_deref() else {
+    let Some(path) = inner.settings_path.as_deref() else {
         return;
     };
-    if let Err(error) = crate::tray::save_settings(path, &inner.tray_settings.borrow()) {
+    if let Err(error) = settings::save_settings(path, &inner.settings.borrow()) {
         eprintln!(
             "OpenSCL4: could not save desktop preferences ({}): {error}",
             path.display()
@@ -2821,7 +2835,7 @@ fn persist_tray_settings(inner: &Rc<Inner>) {
 /// Answers the Settings panel's "Notification area icon" switch: shows or takes
 /// away the icon and saves the choice for the next run.
 fn set_tray(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
-    inner.tray_settings.borrow_mut().icon = on;
+    inner.settings.borrow_mut().tray.icon = on;
     persist_tray_settings(inner);
     if let Some(shell) = inner.tray.borrow().as_ref() {
         shell.set_icon(on);
@@ -2833,7 +2847,7 @@ fn set_tray(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
 /// Answers the Settings panel's "Close to notification area" switch; the
 /// window's close handler reads the same saved choice.
 fn set_close_to_tray(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
-    inner.tray_settings.borrow_mut().close_to_tray = on;
+    inner.settings.borrow_mut().tray.close_to_tray = on;
     persist_tray_settings(inner);
     if let Some(shell) = inner.tray.borrow().as_ref() {
         shell.set_close_to_tray(on);
@@ -2846,12 +2860,13 @@ fn set_close_to_tray(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
 /// quick presets, so its saved switch never makes a menu section appear.
 fn set_tray_item(window: &AppWindow, inner: &Rc<Inner>, index: i32, on: bool) {
     {
-        let mut settings = inner.tray_settings.borrow_mut();
+        let mut settings = inner.settings.borrow_mut();
+        let tray = &mut settings.tray;
         match index {
-            0 => settings.battery = on,
-            1 => settings.modes = on,
-            2 => settings.presets = on,
-            3 => settings.ldac = on,
+            0 => tray.battery = on,
+            1 => tray.modes = on,
+            2 => tray.presets = on,
+            3 => tray.ldac = on,
             _ => return,
         }
     }
@@ -11174,9 +11189,9 @@ mod tests {
             picking_export_file: Cell::new(false),
             show_request: None,
             tray: RefCell::new(None),
-            tray_settings: RefCell::new(TraySettings::default()),
+            settings: RefCell::new(DesktopSettings::default()),
             // Unit and manual tests must never overwrite the user's real file.
-            tray_settings_path: None,
+            settings_path: None,
             tray_content: RefCell::new(TrayContent::default()),
             diagnostic_probes: RefCell::new(Vec::new()),
             diagnostic_session: RefCell::new(None),
@@ -13636,7 +13651,11 @@ mod tests {
             let path = temp.path().join(DESKTOP_PREFERENCES_FILE_NAME);
             Rc::get_mut(&mut inner)
                 .expect("the new test controller has no other owners")
-                .tray_settings_path = Some(path.clone());
+                .settings_path = Some(path.clone());
+            // Appearance and language are ticket 02's wiring; a tray write must
+            // still keep whatever document already holds them.
+            inner.settings.borrow_mut().theme = settings::AppTheme::Dark;
+            inner.settings.borrow_mut().language = Some("ru".into());
             let state = ui.global::<AppState>();
             show_tray_settings(&state, &TraySettings::default(), inner.tray_available());
             assert!(state.get_app_tray());
@@ -13649,13 +13668,13 @@ mod tests {
 
             set_tray(ui, &inner, false);
             assert!(!state.get_app_tray());
-            assert!(!inner.tray_settings.borrow().icon);
+            assert!(!inner.settings.borrow().tray.icon);
             set_tray(ui, &inner, true);
             assert!(state.get_app_tray());
 
             set_close_to_tray(ui, &inner, false);
             assert!(!state.get_app_close_to_tray());
-            assert!(!inner.tray_settings.borrow().close_to_tray);
+            assert!(!inner.settings.borrow().tray.close_to_tray);
 
             set_tray_item(ui, &inner, 0, false);
             assert!(!state.get_tray_battery());
@@ -13665,15 +13684,24 @@ mod tests {
             assert!(!state.get_tray_ldac());
             set_tray_item(ui, &inner, 2, true);
             assert!(state.get_tray_presets());
-            let expected = TraySettings {
-                close_to_tray: false,
-                battery: false,
-                modes: false,
-                presets: true,
-                ldac: false,
-                ..TraySettings::default()
+            let expected = DesktopSettings {
+                tray: TraySettings {
+                    close_to_tray: false,
+                    battery: false,
+                    modes: false,
+                    presets: true,
+                    ldac: false,
+                    ..TraySettings::default()
+                },
+                theme: settings::AppTheme::Dark,
+                language: Some("ru".into()),
+                ..DesktopSettings::default()
             };
-            assert_eq!(crate::tray::load_settings(&path), expected);
+            assert_eq!(
+                settings::load_settings(&path),
+                expected,
+                "the tray switches are saved and the other preferences preserved"
+            );
 
             let before_unknown = fs::read(&path).expect("the saved document exists");
             set_tray_item(ui, &inner, 9, false);

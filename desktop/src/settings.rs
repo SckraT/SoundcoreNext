@@ -4,6 +4,11 @@
 //! meaning and the version-tolerant JSON document, so an unknown index cannot
 //! silently reset a preference.
 
+// Ticket 02 wires the Settings controls to the validated mappings below; until
+// then the binary uses only the document load/save, and the mappings are
+// exercised by this module's tests.
+#![allow(dead_code)]
+
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -314,7 +319,7 @@ pub fn language_from_index(index: i32) -> Option<Option<&'static Language>> {
     usize::try_from(index.checked_sub(1)?)
         .ok()
         .and_then(|index| LANGUAGES.get(index))
-        .map(|language| Some(language))
+        .map(Some)
 }
 
 pub fn language_index(code: Option<&str>) -> i32 {
@@ -402,7 +407,10 @@ mod tests {
     #[test]
     fn choice_indexes_are_strict_and_round_trip() {
         for index in 0..3 {
-            assert_eq!(AppTheme::from_index(index).map(AppTheme::index), Some(index));
+            assert_eq!(
+                AppTheme::from_index(index).map(AppTheme::index),
+                Some(index)
+            );
             assert_eq!(Accent::from_index(index).map(Accent::index), Some(index));
             assert_eq!(
                 DeviceColor::from_index(index).map(DeviceColor::index),
@@ -431,11 +439,15 @@ mod tests {
     fn language_indexes_and_windows_locale_fallbacks_are_stable() {
         assert_eq!(language_from_index(0), Some(None));
         assert_eq!(
-            language_from_index(1).flatten().map(|language| language.code),
+            language_from_index(1)
+                .flatten()
+                .map(|language| language.code),
             Some("en")
         );
         assert_eq!(
-            language_from_index(14).flatten().map(|language| language.code),
+            language_from_index(14)
+                .flatten()
+                .map(|language| language.code),
             Some("ru")
         );
         assert_eq!(language_from_index(-1), None);
@@ -506,6 +518,13 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_document_loads_the_defaults() {
+        let missing = path("missing");
+        let _ = fs::remove_file(&missing);
+        assert_eq!(load_settings(&missing), DesktopSettings::default());
+    }
+
+    #[test]
     fn malformed_files_and_unknown_languages_fall_back_safely() {
         let malformed = path("malformed");
         fs::write(&malformed, b"not json").unwrap();
@@ -513,7 +532,11 @@ mod tests {
         assert_eq!(fs::read_to_string(&malformed).unwrap(), "not json");
 
         let unknown = path("unknown-language");
-        fs::write(&unknown, br#"{"language":"not-a-language","accent":"sage"}"#).unwrap();
+        fs::write(
+            &unknown,
+            br#"{"language":"not-a-language","accent":"sage"}"#,
+        )
+        .unwrap();
         let loaded = load_settings(&unknown);
         assert_eq!(loaded.language, None);
         assert_eq!(loaded.accent, Accent::Sage);
