@@ -1,0 +1,353 @@
+// Diagnostics: three read-only probes, a local ZIP and a prefilled GitHub
+// issue. Nothing here writes device settings or uploads the archive.
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { AppState, Actions, Page, DiagnosticStep } from "../types.slint";
+import { Icon, Button, ButtonKind, Banner, Panel, PanelHeading, Divider, Tag } from "../components/basics.slint";
+import { PageHeading } from "../shell.slint";
+import { LineEdit } from "std-widgets.slint";
+
+component StepBadge inherits Rectangle {
+    in property <int> number;
+    in property <bool> active;
+    in property <bool> done;
+    width: 24px;
+    height: 24px;
+    border-radius: 12px;
+    background: root.active ? Theme.primary : root.done ? Theme.primary-container : Theme.container;
+    Text {
+        text: root.done ? "✓" : @tr("{}", root.number);
+        color: root.active ? Theme.on-primary : root.done ? Theme.on-primary-container : Theme.muted;
+        font-size: 11px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component StepLabel inherits Text {
+    in property <bool> active;
+    in property <bool> done;
+    color: root.active ? Theme.primary : root.done ? Theme.text : Theme.muted;
+    font-size: 12px;
+    font-weight: root.active ? 650 : 450;
+    vertical-alignment: center;
+}
+
+component StepRow inherits HorizontalLayout {
+    in property <int> number;
+    in property <string> label;
+    in property <bool> active;
+    in property <bool> done;
+    spacing: 7px;
+    StepBadge { number: root.number; active: root.active; done: root.done; }
+    StepLabel { text: root.label; active: root.active; done: root.done; }
+}
+
+component ProbeRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> command;
+    in property <string> status;
+    in property <string> detail;
+    in property <bool> ok;
+    in property <bool> failed;
+    padding-top: 10px;
+    padding-bottom: 10px;
+    spacing: 10px;
+    Text {
+        text: root.ok ? "✓" : root.failed ? "!" : "…";
+        color: root.ok ? Theme.green : root.failed ? Theme.error : Theme.muted;
+        font-weight: 700;
+        width: 18px;
+        horizontal-alignment: center;
+    }
+    Text { text: root.label; font-weight: 550; }
+    Text { text: root.command; color: Theme.muted; font-family: "Consolas"; font-size: 11px; vertical-alignment: center; }
+    Rectangle { horizontal-stretch: 1; }
+    Text { text: root.status; color: root.ok ? Theme.green : root.failed ? Theme.error : Theme.muted; font-size: 11px; vertical-alignment: center; }
+    Text { text: root.detail; color: Theme.muted; font-size: 11px; vertical-alignment: center; width: 72px; horizontal-alignment: end; }
+}
+
+
+
+component FileRow inherits HorizontalLayout {
+    in property <string> name;
+    in property <string> description;
+    in property <string> size;
+    padding-top: 8px;
+    padding-bottom: 8px;
+    spacing: 10px;
+    Icon { source: Icons.file; tint: Theme.muted; width: 17px; height: 17px; y: (parent.height - self.height) / 2; }
+    VerticalLayout {
+        horizontal-stretch: 1;
+        alignment: center;
+        Text { text: root.name; font-family: "Consolas"; font-size: 11px; }
+        Text { text: root.description; color: Theme.muted; font-size: 10px; wrap: word-wrap; }
+    }
+    Text { text: root.size; color: Theme.muted; font-size: 10px; vertical-alignment: center; }
+}
+
+component ProbeList inherits VerticalLayout {
+    spacing: 0px;
+    for probe in AppState.diagnostic-probes: VerticalLayout {
+        spacing: 0px;
+        ProbeRow {
+            label: probe.label;
+            command: probe.command;
+            status: probe.status;
+            detail: probe.detail;
+            ok: probe.ok;
+            failed: probe.failed;
+        }
+        Divider { }
+    }
+}
+
+export component DiagnosticsPage inherits VerticalLayout {
+    in property <bool> wide;
+
+    width: 100%;
+    spacing: 0px;
+    PageHeading { page: Page.diagnostics; }
+
+    // The step line is a status, not a control: a step is reached by the
+    // buttons below it so the app never skips a capture it has not run.
+    HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+        padding-bottom: 18px;
+        StepRow {
+            number: 1; label: @tr("Device");
+            active: AppState.diagnostic-step == DiagnosticStep.device;
+            done: AppState.diagnostic-step != DiagnosticStep.device;
+        }
+        Rectangle { width: 18px; height: 1px; background: Theme.line; }
+        StepRow {
+            number: 2; label: @tr("Capture");
+            active: AppState.diagnostic-step == DiagnosticStep.capture;
+            done: AppState.diagnostic-step == DiagnosticStep.review || AppState.diagnostic-step == DiagnosticStep.done;
+        }
+        Rectangle { width: 18px; height: 1px; background: Theme.line; }
+        StepRow {
+            number: 3; label: @tr("Review");
+            active: AppState.diagnostic-step == DiagnosticStep.review;
+            done: AppState.diagnostic-step == DiagnosticStep.done;
+        }
+        Rectangle { width: 18px; height: 1px; background: Theme.line; }
+        StepRow {
+            number: 4; label: @tr("Done");
+            active: AppState.diagnostic-step == DiagnosticStep.done;
+            done: false;
+        }
+    }
+
+    if AppState.diagnostic-step == DiagnosticStep.device: VerticalLayout {
+        spacing: 12px;
+        if AppState.diagnostic-error != "": Banner {
+            error: true;
+            icon: Icons.warning;
+            text: AppState.diagnostic-error;
+        }
+        if AppState.diagnostic-device-name != "": Panel {
+            PanelHeading { text: @tr("Device"); icon: Icons.devices; }
+            HorizontalLayout {
+                spacing: 14px;
+                Rectangle {
+                    width: 54px;
+                    height: 54px;
+                    border-radius: 16px;
+                    background: Theme.primary-container;
+                    Icon { source: Icons.headphones; tint: Theme.primary; width: 26px; height: 26px; y: (parent.height - self.height) / 2; x: (parent.width - self.width) / 2; }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 3px;
+                    alignment: center;
+                    Text { text: AppState.diagnostic-device-code; color: Theme.muted; font-size: 10px; }
+                    Text { text: AppState.diagnostic-device-name; font-size: 21px; font-weight: 650; }
+                    HorizontalLayout {
+                        spacing: 7px;
+                        alignment: start;
+                        Tag { text: @tr("Connected"); fill: Theme.primary-container; tint: Theme.on-primary-container; }
+                        Tag { text: AppState.diagnostic-status; }
+                    }
+                    Text { text: AppState.diagnostic-device-meta; color: Theme.muted; font-size: 11px; }
+                }
+            }
+        }
+        if AppState.diagnostic-device-name == "": Panel {
+            PanelHeading { text: @tr("Device"); icon: Icons.devices; }
+            Text {
+                text: @tr("No device connected. Connect a Soundcore device from My devices, then return here to collect read-only answers.");
+                color: Theme.muted;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: start;
+                Button {
+                    text: @tr("Open My devices");
+                    clicked => { Actions.navigate(Page.devices); }
+                }
+            }
+        }
+        Panel {
+            PanelHeading { text: @tr("What we collect"); icon: Icons.shield; }
+            Text {
+                text: @tr("Three read-only probes — state, battery and charging. The archive also keeps the frames exchanged during the capture.");
+                color: Theme.muted;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                padding-top: 12px;
+                spacing: 8px;
+                alignment: start;
+                Tag { text: "01 01 · State"; }
+                Tag { text: "01 03 · Battery"; }
+                Tag { text: "01 04 · Charging"; }
+            }
+            Rectangle { height: 12px; }
+            Text {
+                text: @tr("Read-only by design. Missing answers are recorded as timeouts; no setting is changed on the device.");
+                color: Theme.muted;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+        }
+        Panel {
+            PanelHeading { text: @tr("Privacy"); icon: Icons.shield; }
+            Text { text: @tr("Serial numbers and Bluetooth addresses are removed before the archive is written. The app never uploads anything."); color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Button {
+                text: AppState.diagnostic-busy ? @tr("Capturing…") : @tr("Start capture");
+                kind: ButtonKind.primary;
+                enabled: AppState.diagnostic-available && !AppState.diagnostic-busy;
+                clicked => { Actions.diagnostic-start(); }
+            }
+            Button {
+                text: @tr("Back to settings");
+                kind: ButtonKind.ghost;
+                clicked => { Actions.navigate(Page.settings); }
+            }
+        }
+    }
+
+    if AppState.diagnostic-step == DiagnosticStep.capture: VerticalLayout {
+        spacing: 12px;
+        Panel {
+            PanelHeading { text: @tr("Capturing diagnostics"); icon: Icons.shield; }
+            Text {
+                text: AppState.diagnostic-busy ? @tr("Keep the device nearby and connected. This can take up to a minute.") : @tr("Capture finished.");
+                color: Theme.muted;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            Rectangle { height: 12px; }
+            Rectangle {
+                height: 7px;
+                border-radius: 4px;
+                background: Theme.container;
+                Rectangle {
+                    height: 7px;
+                    border-radius: 4px;
+                    background: Theme.primary;
+                    width: parent.width * AppState.diagnostic-progress;
+                }
+            }
+            HorizontalLayout {
+                padding-top: 7px;
+                Text { text: @tr("{} of 3 probes", AppState.diagnostic-answered); color: Theme.muted; font-size: 11px; horizontal-stretch: 1; }
+                Text { text: @tr("{} frames", AppState.diagnostic-frames); color: Theme.muted; font-size: 11px; }
+            }
+            Rectangle { height: 10px; }
+            ProbeList { }
+            HorizontalLayout {
+                padding-top: 14px;
+                spacing: 10px;
+                alignment: start;
+                if !AppState.diagnostic-busy: Button {
+                    text: @tr("Review results");
+                    kind: ButtonKind.primary;
+                    clicked => { Actions.diagnostic-cancel(); }
+                }
+                Button {
+                    text: @tr("Cancel");
+                    kind: ButtonKind.ghost;
+                    enabled: AppState.diagnostic-busy;
+                    clicked => { Actions.diagnostic-cancel(); }
+                }
+            }
+        }
+    }
+
+    if AppState.diagnostic-step == DiagnosticStep.review: VerticalLayout {
+        spacing: 12px;
+        if AppState.diagnostic-error != "": Banner {
+            error: true;
+            icon: Icons.warning;
+            text: AppState.diagnostic-error;
+        }
+        Panel {
+            PanelHeading { text: @tr("Review before sharing"); icon: Icons.file; }
+            Text { text: @tr("The archive is built locally. Save it and attach it to the GitHub issue yourself — nothing is uploaded automatically."); color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+            HorizontalLayout {
+                padding-top: 14px;
+                spacing: 10px;
+                Rectangle { border-radius: 14px; background: Theme.container; horizontal-stretch: 1; VerticalLayout { padding: 10px; Text { text: @tr("{} of 3", AppState.diagnostic-answered); font-size: 18px; font-weight: 650; } Text { text: @tr("probes answered"); color: Theme.muted; font-size: 10px; } } }
+                Rectangle { border-radius: 14px; background: Theme.container; horizontal-stretch: 1; VerticalLayout { padding: 10px; Text { text: @tr("{}", AppState.diagnostic-frames); font-size: 18px; font-weight: 650; } Text { text: @tr("frames"); color: Theme.muted; font-size: 10px; } } }
+                Rectangle { border-radius: 14px; background: Theme.container; horizontal-stretch: 1; VerticalLayout { padding: 10px; Text { text: @tr("{}", AppState.diagnostic-timeouts); font-size: 18px; font-weight: 650; } Text { text: @tr("timeouts"); color: Theme.muted; font-size: 10px; } } }
+                Rectangle { border-radius: 14px; background: Theme.container; horizontal-stretch: 1; VerticalLayout { padding: 10px; Text { text: AppState.diagnostic-archive-size; font-size: 18px; font-weight: 650; } Text { text: @tr("archive"); color: Theme.muted; font-size: 10px; } } }
+            }
+        }
+        Panel {
+            PanelHeading { text: @tr("Archive contents"); icon: Icons.file; }
+            FileRow { name: "manifest.json"; description: @tr("Device, probes and redaction flags"); size: @tr("included"); }
+            Divider { }
+            FileRow { name: "frames.jsonl"; description: @tr("Every tx/rx frame, one JSON object per line"); size: @tr("included"); }
+            Divider { }
+            FileRow { name: "README.txt"; description: @tr("How to attach and read the archive"); size: @tr("included"); }
+            Rectangle { height: 8px; } Text { text: @tr("Serial numbers and Bluetooth addresses are redacted by the core exporter."); color: Theme.muted; font-size: 10px; }
+        }
+        Panel {
+            PanelHeading { text: @tr("Optional note"); icon: Icons.edit; }
+            note := LineEdit {
+                text: AppState.diagnostic-note;
+                placeholder-text: @tr("What were you doing when the problem happened?");
+                edited => { Actions.diagnostic-note(self.text); }
+            }
+            Rectangle { height: 6px; } Text { text: @tr("Do not include personal information or your serial number."); color: Theme.muted; font-size: 10px; }
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Button { text: @tr("Back"); kind: ButtonKind.ghost; clicked => { Actions.diagnostic-restart(); } }
+            Button { text: @tr("Save ZIP"); clicked => { Actions.diagnostic-save-zip(); } }
+            Button { text: @tr("Open GitHub issue"); kind: ButtonKind.primary; clicked => { Actions.diagnostic-open-issue(); } }
+        }
+    }
+
+    if AppState.diagnostic-step == DiagnosticStep.done: VerticalLayout {
+        spacing: 12px;
+        Panel {
+            PanelHeading { text: @tr("Report ready"); icon: Icons.check; }
+            Text { text: @tr("The archive was saved locally. Open the prefilled issue and attach the ZIP to send it."); color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+            Rectangle { height: 8px; } Text { text: AppState.diagnostic-file-name; font-family: "Consolas"; font-size: 11px; color: Theme.primary; }
+            if AppState.diagnostic-error != "": Text { text: AppState.diagnostic-error; color: Theme.error; font-size: 11px; wrap: word-wrap; }
+            HorizontalLayout {
+                padding-top: 12px;
+                spacing: 10px;
+                alignment: start;
+                Button { text: @tr("Open issue again"); clicked => { Actions.diagnostic-open-issue(); } }
+                Button { text: @tr("Done"); kind: ButtonKind.primary; clicked => { Actions.diagnostic-restart(); Actions.navigate(Page.settings); } }
+            }
+        }
+        Panel {
+            Text { text: @tr("What happens next"); font-weight: 650; }
+            Text { text: @tr("The issue is triaged and labelled device-diagnostics. Support is not promised for every model; the log is the first step."); color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+        }
+    }
+}

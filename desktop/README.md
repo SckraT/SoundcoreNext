@@ -4,9 +4,10 @@ The desktop app is the **OpenSCL4 2.0 desktop shell**: the product keeps the
 OpenSCL4 name, and the UI is **vendored from OpenSCL4** under GPL-3.0; it is not
 a new design. The Slint tree in `ui/` comes from
 `D:\Projects\OpenSCL4\desktop\ui` at commit `01276e08` and keeps the upstream
-layout, components, pages, icons, fonts and art; the only adaptation is the two
-Connect/Disconnect ghost buttons the spec allows in the Connections list row,
-recorded in `ui/SOURCE.md`.
+layout, components, pages, icons, fonts and art; the shell adaptations are the
+two Connect/Disconnect ghost buttons the spec allows in the Connections list
+row and the Diagnostics page plumbing (the page itself is new), recorded in
+`ui/SOURCE.md`.
 
 ## Status
 
@@ -202,10 +203,17 @@ recorded in `ui/SOURCE.md`.
   connection. During the acceptance run this happened twice on the bench while
   the window was idle between steps; every fresh connection then wrote and
   re-polled normally.
-- Pages other than Overview, My Devices, Settings, Sound mode, Equalizer, Sound
-  and effects and the five A3062 device pages still open in their placeholder
-  state, which is expected: the A3062 has no case, sleep, lights or alarms page
-  and this shell does not implement them.
+- The **Diagnostics** page runs the three read-only probes (`01 01`, `01 03`,
+  `01 04`) on the connected device worker, shows each probe's answer as it
+  arrives, builds a local ZIP with `manifest.json`, `frames.jsonl` and
+  `README.txt`, saves it through the native dialog and opens a prefilled GitHub
+  issue. The A3062 serial and Bluetooth addresses are redacted by the core
+  before the archive is written; nothing is uploaded by the app. The page also
+  opens without a device and shows an empty state.
+- Pages other than Overview, My Devices, Settings, Diagnostics, Sound mode,
+  Equalizer, Sound and effects and the five A3062 device pages still open in
+  their placeholder state, which is expected: the A3062 has no case, sleep,
+  lights or alarms page and this shell does not implement them.
 
 ## Screenshots
 
@@ -334,6 +342,49 @@ address or serial number appears in the capture.
 
 The Add Device dialog with the catalog populated, captured from the running app
 on Windows.
+
+![Diagnostics on a connected Space One Pro](diagnostics-page.png)
+
+The **Diagnostics** page from the running app on Windows with a paired
+**soundcore Space One Pro** (A3062) connected: the page shows the device, the
+three read-only probes it will run (`01 01`, `01 03`, `01 04`), the redaction
+notice and **Start capture**. The buttons and cards are laid out by the same
+vendored shell as the other pages.
+
+![Diagnostics review and archive](diagnostics-capture.png)
+
+The **Review** step after a real capture: all three probes answered, six frames
+were recorded, the archive is 1.2 KB and its three files are listed. **Save
+ZIP** writes the local archive through the native dialog; the real exported ZIP
+was inspected — its manifest names A3062, its six frames contain no serial or
+Bluetooth address, and it is **not** uploaded by the app. **Open GitHub issue**
+opens a prefilled issue; the ZIP is attached by the user.
+
+![Diagnostics at the 800 px minimum](diagnostics-800.png)
+
+The same page at the 800×700 minimum window: the sidebar is compact (68 px),
+the diagnostics cards are one column and no content is clipped horizontally;
+**Start capture** stays reachable by scrolling. This is the adaptive check
+described below.
+
+## Adaptive layout checks
+
+Every UI change is checked at the real window breakpoints, not only at the
+preferred size:
+
+- **800×700** — the minimum window; sidebar is compact (68 px), the content is
+  one column, and the page still has no horizontal scroll or clipped controls.
+- **1030×760** — the compact-sidebar boundary; labels may collapse but every
+  icon still has an accessible name and the active page stays obvious.
+- **1280×820** — the preferred window; two-column pages keep their aside and
+  panels do not stretch past their content.
+- **1440×900** — wide layout; the aside stays aligned to the top and no panel
+  drifts into empty space.
+
+Also check Windows display scaling at 100%, 125% and 150%. A page passes when
+there is no horizontal overflow, no truncated label without an ellipsis or
+tooltip, dialogs fit the window, and all primary actions remain reachable by
+mouse and keyboard. Keep a screenshot for each width when the change is visual.
 
 ## Run
 

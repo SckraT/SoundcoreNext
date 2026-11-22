@@ -257,6 +257,29 @@ impl<T: Transport> DeviceSession<T> {
         }
     }
 
+    /// Write one read-only diagnostics request and return the first complete
+    /// reply frame of the same command.
+    ///
+    /// Diagnostics never write device state: the command is one of the
+    /// read-only probes (`01 01`, `01 03`, `01 04`). Frames of other commands
+    /// that arrive before the answer (acknowledgements, notifications) are
+    /// consumed and skipped, exactly as [`Self::poll_state`] does. Blocking;
+    /// the transport bounds a silent wait.
+    pub fn probe_frame(&mut self, command: Command) -> Result<Vec<u8>, SessionError> {
+        self.transport.write_all(&request(command))?;
+        loop {
+            if let Some(raw) = self.next_frame() {
+                let frame = parse(&raw)
+                    .map_err(|error| SessionError::Protocol(ProtocolError::Frame(error)))?;
+                if frame.command != command {
+                    continue;
+                }
+                return Ok(raw);
+            }
+            self.fill()?;
+        }
+    }
+
     /// Write this model's `06 81` sound-mode frame and return once every byte
     /// of it is written.
     ///

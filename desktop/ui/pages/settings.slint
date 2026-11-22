@@ -281,7 +281,13 @@ component AsideColumn inherits VerticalLayout {
     AsidePanel {
         title: @tr("Diagnostics");
         icon: Icons.shield;
-        text: @tr("Copy the latest log entries to find the cause of a problem.");
+        text: @tr("Collect read-only answers, a local ZIP and a prefilled issue.");
+        Button {
+            text: @tr("Open diagnostics");
+            has-icon: true;
+            icon: Icons.shield;
+            clicked => { Actions.navigate(Page.diagnostics); }
+        }
         Button {
             text: @tr("Copy logs");
             has-icon: true;

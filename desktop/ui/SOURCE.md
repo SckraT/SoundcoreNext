@@ -31,6 +31,20 @@ and drive the A3062 dual-connections list") and is limited to:
   existing **Forget** button, with the same style and vertical placement.
 
 No layout, wording, colour or other visual change is made; the two buttons are
-the spec's minimal exception and no other `.slint` file is edited. Any later
-change to a vendored file is made in a commit that names the file and the
-reason; the upstream copyright and GPL-3.0 terms stay in place.
+the spec's minimal exception. The Diagnostics page adds one more shell
+adaptation, recorded here because it changes vendored files:
+
+- `types.slint`: `Page.diagnostics`; `DiagnosticStep`/`DiagnosticProbe`; the
+  diagnostics `AppState` fields and `Actions` callbacks.
+- `strings.slint`: the Diagnostics title, slogan, description and shield icon.
+- `shell.slint`: one **Diagnostics** nav item in the bottom group.
+- `app.slint`: routes `Page.diagnostics` to the new page; the page is not a
+  device page, so it opens without a connection and has no device banner.
+- `pages/settings.slint`: the Diagnostics aside gains an **Open diagnostics**
+  button next to the existing **Copy logs**.
+- `pages/diagnostics.slint` is a new page built from the vendored `Panel`,
+  `Button`, `Banner`, `Tag` and `PageHeading` components; it is not copied
+  upstream code.
+
+Any later change to a vendored file is made in a commit that names the file and
+the reason; the upstream copyright and GPL-3.0 terms stay in place.

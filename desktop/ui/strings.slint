@@ -31,6 +31,7 @@ export global Strings {
         if page == Page.alarms { return @tr("Alarms"); }
         if page == Page.other { return @tr("Other"); }
         if page == Page.devices { return @tr("My devices"); }
+        if page == Page.diagnostics { return @tr("Diagnostics"); }
         return @tr("Settings");
     }
 
@@ -46,6 +47,7 @@ export global Strings {
         if page == Page.case { return @tr("A little case. More possibilities."); }
         if page == Page.about { return @tr("All about your device."); }
         if page == Page.devices { return @tr("Your devices."); }
+        if page == Page.diagnostics { return @tr("Collect safe answers."); }
         if page == Page.settings { return @tr("Make it yours."); }
         return "";
     }
@@ -64,6 +66,7 @@ export global Strings {
         if page == Page.case { return @tr("The case screen’s features and how the case is doing."); }
         if page == Page.about { return @tr("Battery, firmware and serial numbers."); }
         if page == Page.devices { return @tr("All your familiar headphones in one place."); }
+        if page == Page.diagnostics { return @tr("Read-only answers, a local ZIP and a prefilled issue."); }
         if page == Page.settings { return @tr("An app that feels comfortable to use."); }
         return "";
     }
@@ -73,7 +76,7 @@ export global Strings {
         if page == Page.sound-modes || page == Page.equalizer || page == Page.effects || page == Page.presets {
             return @tr("Sound");
         }
-        if page == Page.overview || page == Page.devices || page == Page.settings { return ""; }
+        if page == Page.overview || page == Page.devices || page == Page.settings || page == Page.diagnostics { return ""; }
         return @tr("Device");
     }
 
@@ -93,6 +96,7 @@ export global Strings {
         if page == Page.lights { return Icons.sun; }
         if page == Page.alarms { return Icons.bolt; }
         if page == Page.devices { return Icons.devices; }
+        if page == Page.diagnostics { return Icons.shield; }
         return Icons.settings;
     }
 }
