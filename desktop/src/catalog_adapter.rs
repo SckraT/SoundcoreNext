@@ -85,41 +85,86 @@ pub fn entries() -> Vec<CatalogEntry> {
     entries
 }
 
-/// The vendored device art, embedded as SVG bytes at compile time.
-///
-/// The vendored tree ships silver and black pairs; silver is the colour the
-/// OpenSCL4 shell picks for its light theme, and a baked image cannot follow a
-/// theme change.
-fn art_svg(form_factor: FormFactor) -> &'static [u8] {
-    match form_factor {
-        FormFactor::TwsEarbuds => include_bytes!("../ui/art/sound_art_stem_premium_silver.svg"),
-        FormFactor::Headphones => include_bytes!("../ui/art/sound_art_headphones_silver.svg"),
-        FormFactor::OpenEar => include_bytes!("../ui/art/sound_art_open_clip_silver.svg"),
-        FormFactor::Speaker => include_bytes!("../ui/art/sound_art_motion_plus_silver.svg"),
-        FormFactor::SleepBuds => include_bytes!("../ui/art/sound_art_buds_compact_silver.svg"),
+/// The vendored device art, embedded as SVG bytes at compile time. Both colors
+/// stay available so Settings and Follow system can change an existing picture.
+fn art_svg(form_factor: FormFactor, black: bool) -> &'static [u8] {
+    match (form_factor, black) {
+        (FormFactor::TwsEarbuds, false) => {
+            include_bytes!("../ui/art/sound_art_stem_premium_silver.svg")
+        }
+        (FormFactor::TwsEarbuds, true) => {
+            include_bytes!("../ui/art/sound_art_stem_premium_black.svg")
+        }
+        (FormFactor::Headphones, false) => {
+            include_bytes!("../ui/art/sound_art_headphones_silver.svg")
+        }
+        (FormFactor::Headphones, true) => {
+            include_bytes!("../ui/art/sound_art_headphones_black.svg")
+        }
+        (FormFactor::OpenEar, false) => {
+            include_bytes!("../ui/art/sound_art_open_clip_silver.svg")
+        }
+        (FormFactor::OpenEar, true) => {
+            include_bytes!("../ui/art/sound_art_open_clip_black.svg")
+        }
+        (FormFactor::Speaker, false) => {
+            include_bytes!("../ui/art/sound_art_motion_plus_silver.svg")
+        }
+        (FormFactor::Speaker, true) => {
+            include_bytes!("../ui/art/sound_art_motion_plus_black.svg")
+        }
+        (FormFactor::SleepBuds, false) => {
+            include_bytes!("../ui/art/sound_art_buds_compact_silver.svg")
+        }
+        (FormFactor::SleepBuds, true) => {
+            include_bytes!("../ui/art/sound_art_buds_compact_black.svg")
+        }
     }
 }
 
 thread_local! {
-    static ART: RefCell<[Option<slint::Image>; 5]> =
-        const { RefCell::new([None, None, None, None, None]) };
+    static ART: RefCell<[[Option<slint::Image>; 2]; 5]> = const {
+        RefCell::new([
+            [None, None],
+            [None, None],
+            [None, None],
+            [None, None],
+            [None, None],
+        ])
+    };
 }
 
-/// The vendored illustration of the form factor, decoded once per thread and
+/// The vendored illustration of the form factor, decoded once per color and
 /// shared by every model of that shape.
-pub fn art(form_factor: FormFactor) -> slint::Image {
+pub fn art_in_color(form_factor: FormFactor, black: bool) -> slint::Image {
     let index = FormFactor::ALL
         .iter()
         .position(|candidate| *candidate == form_factor)
         .expect("every form factor is listed in FormFactor::ALL");
+    let color = usize::from(black);
     ART.with(|cache| {
-        cache.borrow_mut()[index]
+        cache.borrow_mut()[index][color]
             .get_or_insert_with(|| {
-                slint::Image::load_from_svg_data(art_svg(form_factor))
+                slint::Image::load_from_svg_data(art_svg(form_factor, black))
                     .expect("the vendored device art is a valid SVG")
             })
             .clone()
     })
+}
+
+/// The original silver illustration, used until the controller applies settings.
+pub fn art(form_factor: FormFactor) -> slint::Image {
+    art_in_color(form_factor, false)
+}
+
+/// Resolves a catalog model's shape for recoloring its existing UI images.
+pub fn form_factor(code: &str) -> Option<FormFactor> {
+    let model = catalog::model(code)?;
+    Some(
+        catalog::family(model.family)
+            .expect("every catalog model lists a family of the catalog")
+            .form_factor,
+    )
 }
 
 /// The entries the dialog lists for a query and a chip.

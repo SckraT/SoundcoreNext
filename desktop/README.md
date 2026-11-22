@@ -1,13 +1,12 @@
 # OpenSCL4 2.0 desktop shell
 
 The desktop app is the **OpenSCL4 2.0 desktop shell**: the product keeps the
-OpenSCL4 name, and the UI is **vendored from OpenSCL4** under GPL-3.0; it is not
-a new design. The Slint tree in `ui/` comes from
-`D:\Projects\OpenSCL4\desktop\ui` at commit `01276e08` and keeps the upstream
-layout, components, pages, icons, fonts and art; the shell adaptations are the
-two Connect/Disconnect ghost buttons the spec allows in the Connections list
-row and the Diagnostics page plumbing (the page itself is new), recorded in
-`ui/SOURCE.md`.
+OpenSCL4 name, and its Slint UI is based on **OpenSCL4** under GPL-3.0. The tree
+in `ui/` comes from `D:\Projects\OpenSCL4\desktop\ui` at commit `01276e08` and
+keeps the upstream palette, typography, icons, fonts and art. Local adaptations
+include the Connections row actions, the Diagnostics workflow, the restored
+configurable Overview and the internal UI kit documented in `ui/UI_KIT.md`;
+vendored-file changes are recorded in `ui/SOURCE.md`.
 
 ## Status
 
@@ -31,8 +30,20 @@ row and the Diagnostics page plumbing (the page itself is new), recorded in
   service with the standard SPP fallback; the session
   (`core/crates/session`) writes the `01 01` state request and parses the
   answer, and writes the measured A3062 `06 81` sound-mode, `03 87` equalizer
-  and remaining-settings frames; **Overview** then shows the connected device's
-  name, code and battery tiles (`src/controller.rs`).
+  and remaining-settings frames. **Overview** then shows the connected device's
+  identity, battery tiles and the blocks supported by its actual state: Sound
+  mode and Equalizer panels plus Controls, Comfort, Sound and effects, Power,
+  and Connections shortcuts (`src/overview.rs`, `src/controller.rs`). The user
+  can reorder or hide supported blocks, choose Minimal/Standard/Full layouts and
+  select per-model quick toggles; the A3062 defaults to LDAC. Choosing which
+  toggles to display changes only UI preferences, while clicking a displayed
+  chip uses the normal device write-and-re-poll path. Quick presets and case are
+  not shown until the core supplies real data for them.
+- Overview layout and per-model quick-toggle selection persist in
+  `%APPDATA%\OpenSCL4\overview-preferences.json`, written atomically through a
+  temporary file and a rename. Its comma-separated block IDs and `!` visibility
+  markers retain the previous desktop/Android layout format; unknown and
+  duplicate IDs are ignored, and device state is never stored in the document.
 - Battery tiles are left/right for the TWS models. Single-battery models show
   one whole-device tile on their own step scale, e.g. a raw `2/10` reads `20 %`.
 - The **Sound mode** page is implemented for the models the core measures a mode
@@ -153,8 +164,11 @@ row and the Diagnostics page plumbing (the page itself is new), recorded in
   second start of the executable finds the running instance, asks it to show the
   window and exits, so there is only ever one window and one icon. The Settings
   page's **Desktop and quick access** panel hosts the switches (the icon, the four
-  menu sections, close-to-tray) and a **Quit** button; the choices live in memory
-  for the run and are not persisted.
+  menu sections, close-to-tray) and a **Quit** button. Choices persist in
+  `%APPDATA%\OpenSCL4\desktop-preferences.json`, separately from Overview and
+  profiles. They load before the icon is created; missing fields use defaults,
+  missing/malformed files start safely, and saves use a flushed temporary file
+  and rename.
 - The P20i (A3949) equalizer is deliberately deferred in this slice: the
   committed A3949 state carries an equalizer block at body 32..44, but no A3949
   `03 87` write body is verified, so the page stays hidden and no equalizer
@@ -163,30 +177,31 @@ row and the Diagnostics page plumbing (the page itself is new), recorded in
   pages or settings writes: it keeps only Overview and My devices as before.
 - Connecting shows “Connecting…”, and Bluetooth off, not found, timeout and
   unsupported-layout failures each show a readable message instead of a crash.
-  Cancel and Retry are wired. The vendored UI has no control that drops the app's
-  own connection (the dual-connections list disconnects remembered devices, not
-  the app's link); the controller's `disconnect` action, used by the tests,
-  clears the current device and returns to My Devices.
-- The only device writes are the `01 01` state request, the `06 81` sound-mode
-  frame, the `03 87` equalizer frames (a built-in preset, the custom bands, and
-  an applied saved profile's custom curve), the measured one-frame settings
-  writes behind the section pages, and the dual-connections writes (`0B 84` for
-  the setting, `0B 82`/`0B 81`/`0B 83` for a list row); its `0B 01` list request
-  is the only other read. The only app file the shell writes is the saved-profile
-  document above. Windows pairing stays in Windows settings and the app never
-  changes it; **Forget** asks the earbuds themselves to drop a remembered device,
-  which is the un-pairing the vendored note warns about.
+  Cancel and Retry are wired. The connected card in **My devices** has a visible
+  **Disconnect** action: it drops only the app's link, keeps the saved card and
+  returns to My Devices. This is distinct from the dual-connections list, whose
+  Disconnect operates on a device remembered by the earbuds.
+- The only device writes are the read-only `01 01` state request, the `06 81`
+  sound-mode frame, the `03 87` equalizer frames (a built-in preset, the custom
+  bands, and an applied saved profile's custom curve), the measured one-frame
+  settings writes behind the section pages, and the dual-connections writes
+  (`0B 84` for the setting, `0B 82`/`0B 81`/`0B 83` for a list row); its `0B 01`
+  list request is the only other read. The app's persisted files are the saved
+  profiles, Overview preferences and desktop/tray preferences. Windows pairing
+  stays in Windows settings and the app never changes it; **Forget** asks the
+  earbuds themselves to drop a remembered device, which is the un-pairing the
+  vendored note warns about.
 - ANC strength, wind noise, adaptive ANC and the 1-to-11 strength scale are not
   part of this slice, so the Sound mode page shows only the three mode tiles.
   Legacy migration and HearID are out of scope: their vendored controls keep
   their empty or hidden state, as described above.
 - Tray **Quick presets** stay out of scope: the app has no quick presets, so the
-  vendored panel's preset switch is kept in memory but the menu never shows a
-  preset section (and never says “No presets yet”). The tray does not change the
-  sound mode beyond the three modes the Sound mode page has. The tray choices are
-  not persisted, so a new run starts with the defaults (icon and close-to-tray on,
-  battery/modes/LDAC sections on, presets off), and this slice has no tray on
-  Linux or macOS.
+  vendored panel's preset switch is saved with the other choices but the menu
+  never shows a preset section (and never says “No presets yet”). The tray does
+  not change the sound mode beyond the three modes the Sound mode page has. A
+  new installation starts with icon and close-to-tray on, battery/modes/LDAC
+  sections on and presets off; later runs load the saved choices. This slice has
+  no tray on Linux or macOS.
 - Writing the dual-connections setting or LDAC makes the real A3062 reset its
   Bluetooth links: the write can be acknowledged and the following re-poll or
   list read then hits a closed link, so the page shows the readable “connection
@@ -195,21 +210,26 @@ row and the Diagnostics page plumbing (the page itself is new), recorded in
   **Disconnect** is used on this computer's own row: the earbuds drop the PC link
   the app talks over, the banner says the list could not be re-read, and
   **Retry** reconnects. That is device behaviour, not a crash: every reconnect
-  then read or wrote normally again.
-- The shell keeps the RFCOMM link open between writes rather than polling, so a
-  link that Windows or the device drops while the window sits idle is noticed on
-  the next write: the page shows the readable “connection lost” banner (after
-  the socket timeouts, up to about ten seconds) and **Retry** opens a fresh
-  connection. During the acceptance run this happened twice on the bench while
-  the window was idle between steps; every fresh connection then wrote and
-  re-polled normally.
+  then read or wrote normally again. One user-requested connection makes at most
+  four attempts with short pauses when Windows is still closing the previous
+  RFCOMM link; this is not an automatic reconnect after an idle-link failure.
+- For models with a persistent device worker, 15 seconds of command idle time
+  triggers a read-only `01 01` heartbeat on that same worker. A successful answer
+  changes no setting and emits no synthetic UI update. A failed heartbeat clears
+  the worker, shows **Connection lost** with **Connect again**, and leaves the
+  saved card available; there is deliberately no automatic reconnect. Commands
+  already queued run before the first heartbeat, and Disconnect drops the command
+  channel so no further heartbeat is scheduled.
 - The **Diagnostics** page runs the three read-only probes (`01 01`, `01 03`,
   `01 04`) on the connected device worker, shows each probe's answer as it
   arrives, builds a local ZIP with `manifest.json`, `frames.jsonl` and
   `README.txt`, saves it through the native dialog and opens a prefilled GitHub
   issue. The A3062 serial and Bluetooth addresses are redacted by the core
   before the archive is written; nothing is uploaded by the app. The page also
-  opens without a device and shows an empty state.
+  opens without a device and shows an empty state. Its device summary, panels,
+  progress, probe states and metric tiles use the internal UI kit; wide layouts
+  place supporting information in an aside, while narrow layouts stack content
+  and actions in one scrollable column.
 - Pages other than Overview, My Devices, Settings, Diagnostics, Sound mode,
   Equalizer, Sound and effects and the five A3062 device pages still open in
   their placeholder state, which is expected: the A3062 has no case, sleep,
@@ -398,9 +418,9 @@ icon is shown and **Close to notification area** is on; the tray's **Open** item
 (or a left click on the icon) brings the window back, and **Quit** in the tray or
 on the Settings page ends the program and removes the icon. Starting the
 executable again while it runs only asks the running copy to show its window.
-The tray and desktop switches are not persisted: they start at their defaults on
-every run. The app needs the earbuds paired in Windows (pairing itself is done in
-Windows settings) and never changes the pairing.
+The tray and desktop switches are restored from `desktop-preferences.json` on
+the next run. The app needs the earbuds paired in Windows (pairing itself is done
+in Windows settings) and never changes the pairing.
 
 ## License and attribution
 

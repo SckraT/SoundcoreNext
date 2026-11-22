@@ -2,10 +2,11 @@
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { AppState, Actions, Page, Battery, BlockKind, OverviewBlockData, LayoutBlock, PresetItem, QuickToggle } from "../types.slint";
-import { Icon, Button, ButtonKind, Chip, IconButton, TextLink, Toggle, Panel, PanelHeading, Banner } from "../components/basics.slint";
+import { Icon, Button, ButtonKind, Chip, IconButton, TextLink, Toggle, Panel, PanelHeading, Banner, Row } from "../components/basics.slint";
 import { ModeTiles, ModeScale, ModeRow } from "../components/modes.slint";
 import { PageHeading } from "../shell.slint";
 import { DialogFrame } from "add_device.slint";
+import { ScrollArea } from "../components/scrollarea.slint";
 
 export global BlockText {
     public pure function title(kind: BlockKind) -> string {
@@ -93,141 +94,181 @@ component BatteryTile inherits Rectangle {
     }
 }
 
-// The connected device: its name, whether only one earbud is in, its batteries and the quick toggles.
+component DeviceIdentity inherits HorizontalLayout {
+    in property <bool> compact;
+    spacing: root.compact ? Theme.space-3 : Theme.space-4;
+    horizontal-stretch: 1;
+    Image {
+        source: AppState.device-art;
+        width: root.compact ? 72px * Theme.content-scale : 96px * Theme.content-scale;
+        height: root.compact ? 72px * Theme.content-scale : 96px * Theme.content-scale;
+        image-fit: contain;
+    }
+    VerticalLayout {
+        alignment: center;
+        spacing: 6px * Theme.content-scale;
+        horizontal-stretch: 1;
+        Text {
+            text: "SOUNDCORE · " + AppState.device-code;
+            color: Theme.on-sage;
+            opacity: 0.65;
+            font-size: Theme.font-caption;
+            font-weight: 600;
+            letter-spacing: 1px;
+            overflow: elide;
+        }
+        Text {
+            text: AppState.device-name;
+            color: Theme.on-sage;
+            font-size: root.compact ? Theme.font-title : Theme.font-device;
+            font-weight: 650;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            alignment: start;
+            Rectangle {
+                border-radius: Theme.radius-control;
+                background: Theme.on-sage.transparentize(91%);
+                height: 24px * Theme.content-scale;
+                HorizontalLayout {
+                    padding-left: 9px;
+                    padding-right: 9px;
+                    spacing: 6px;
+                    Rectangle {
+                        width: 6px;
+                        height: 6px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 3px;
+                        background: Theme.green;
+                    }
+                    Text {
+                        text: @tr("Connected");
+                        color: Theme.on-sage;
+                        font-size: Theme.font-caption;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            if AppState.one-earbud && AppState.show-one-earbud-badge: Rectangle {
+                border-radius: Theme.radius-control;
+                background: Theme.pink;
+                height: 24px * Theme.content-scale;
+                HorizontalLayout {
+                    padding-left: 9px;
+                    padding-right: 9px;
+                    Text {
+                        text: @tr("1 earbud");
+                        color: Theme.on-pink;
+                        font-size: Theme.font-caption;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
+
+component BatteryList inherits HorizontalLayout {
+    in property <bool> align-end: true;
+    spacing: 6px * Theme.content-scale;
+    alignment: root.align-end ? end : start;
+    for battery in AppState.batteries: BatteryTile {
+        battery: battery;
+        width: 92px * Theme.content-scale;
+        height: 68px * Theme.content-scale;
+    }
+}
+
+// Desktop uses compact, content-sized buttons in their own panel. The fixed
+// maximum width keeps them button-like instead of stretching across the page;
+// the responsive column count still keeps every selected toggle reachable.
+component QuickToggleGrid inherits Rectangle {
+    in property <bool> wide;
+    private property <length> gap: Theme.space-2;
+    private property <length> min-cell-width: 156px * Theme.content-scale;
+    private property <length> max-cell-width: 204px * Theme.content-scale;
+    private property <int> available-columns: max(1, floor((self.width + gap) / min-cell-width));
+    private property <int> count: AppState.quick-toggles.length;
+    private property <int> columns: max(1, min(count, root.wide ? min(6, available-columns) : min(3, available-columns)));
+    private property <length> cell-width: min(max-cell-width, (self.width - (columns - 1) * gap) / columns);
+    private property <length> cell-height: Theme.control-height-compact;
+    height: count == 0 ? 0px : ceil(count / columns) * (cell-height + gap) - gap;
+    for toggle[i] in AppState.quick-toggles: Chip {
+        text: toggle.label;
+        selected: toggle.on;
+        enabled: toggle.enabled;
+        x: mod(i, root.columns) * (root.cell-width + root.gap);
+        y: floor(i / root.columns) * (root.cell-height + root.gap);
+        width: root.cell-width;
+        height: root.cell-height;
+        clicked => { Actions.set-toggle(toggle.id, !toggle.on); }
+    }
+}
+
+component QuickSettingsPanel inherits Panel {
+    in property <bool> wide;
+    inner-padding: Theme.space-4;
+    PanelHeading {
+        text: @tr("Quick settings");
+        icon: Icons.bolt;
+        padding-bottom: Theme.space-3;
+        IconButton {
+            icon: Icons.plus;
+            label: @tr("Choose quick settings");
+            clicked => { AppState.choosing-toggles = true; }
+        }
+    }
+    if AppState.quick-toggles.length == 0: Row {
+        alignment: start;
+        Button {
+            text: @tr("Add quick settings");
+            has-icon: true;
+            icon: Icons.plus;
+            clicked => { AppState.choosing-toggles = true; }
+        }
+    }
+    if AppState.quick-toggles.length > 0: QuickToggleGrid { wide: root.wide; }
+    for toggle in AppState.quick-toggles: VerticalLayout {
+        padding-top: toggle.enabled ? 0px : Theme.space-2;
+        spacing: 0px;
+        if !toggle.enabled: Text {
+            text: toggle.label + ": " + toggle.reason;
+            color: Theme.muted;
+            font-size: Theme.font-caption;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// The connected device keeps only its identity and batteries on desktop.
+// Android may retain quick settings inside this hero to conserve vertical space.
 component DeviceHero inherits Rectangle {
     in property <bool> wide;
     border-radius: Theme.radius-panel;
     background: Theme.sage;
-    private property <length> battery-width: 92px;
-    // as tall as what it holds, quick toggles included
-    height: max(136px, content.preferred-height);
+    height: max(136px * Theme.content-scale, content.preferred-height);
     content := VerticalLayout {
-        padding: 18px;
-        padding-left: 22px;
-        padding-right: 22px;
-        spacing: 12px;
-        HorizontalLayout {
-            spacing: 20px;
-            HorizontalLayout {
-                spacing: 11px;
-                horizontal-stretch: 1;
-                Image {
-                    source: AppState.device-art;
-                    width: 96px;
-                    height: 96px;
-                    image-fit: contain;
-                }
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 6px;
-                    Text {
-                        text: "SOUNDCORE · " + AppState.device-code;
-                        color: Theme.on-sage;
-                        opacity: 0.65;
-                        font-size: 10px;
-                        font-weight: 600;
-                        letter-spacing: 1px;
-                    }
-                    Text {
-                        text: AppState.device-name;
-                        color: Theme.on-sage;
-                        font-size: 24px;
-                        font-weight: 650;
-                        wrap: word-wrap;
-                    }
-                    // the one earbud badge is on the status line, as on Android
-                    HorizontalLayout {
-                        spacing: 8px;
-                        alignment: start;
-                        Rectangle {
-                            border-radius: 12px;
-                            background: Theme.on-sage.transparentize(91%);
-                            height: 24px;
-                            HorizontalLayout {
-                                padding-left: 9px;
-                                padding-right: 9px;
-                                spacing: 6px;
-                                Rectangle {
-                                    width: 6px;
-                                    height: 6px;
-                                    y: (parent.height - self.height) / 2;
-                                    border-radius: 3px;
-                                    background: Theme.green;
-                                }
-                                Text {
-                                    text: @tr("Connected");
-                                    color: Theme.on-sage;
-                                    font-size: 10px;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                        if AppState.one-earbud && AppState.show-one-earbud-badge: Rectangle {
-                            border-radius: 12px;
-                            background: Theme.pink;
-                            height: 24px;
-                            HorizontalLayout {
-                                padding-left: 9px;
-                                padding-right: 9px;
-                                Text {
-                                    text: @tr("1 earbud");
-                                    color: Theme.on-pink;
-                                    font-size: 10px;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            HorizontalLayout {
-                spacing: 6px;
-                alignment: end;
-                for battery in AppState.batteries: BatteryTile {
-                    battery: battery;
-                    width: root.battery-width;
-                    height: 68px;
-                    y: (parent.height - self.height) / 2;
-                }
-            }
+        padding: Theme.space-5;
+        padding-left: Theme.space-6;
+        padding-right: Theme.space-6;
+        spacing: Theme.space-3;
+        if root.wide: HorizontalLayout {
+            spacing: Theme.space-5;
+            DeviceIdentity { compact: false; }
+            BatteryList { }
         }
-        if AppState.all-toggles.length > 0: VerticalLayout {
-            spacing: 4px;
-            HorizontalLayout {
-                spacing: 6px;
-                alignment: start;
-                for toggle in AppState.quick-toggles: Chip {
-                    text: toggle.label;
-                    selected: toggle.on;
-                    enabled: toggle.enabled;
-                    on-card: true;
-                    clicked => { Actions.set-toggle(toggle.id, !toggle.on); }
-                }
-                Chip {
-                    text: AppState.quick-toggles.length == 0 ? @tr("Add quick toggles") : "";
-                    has-icon: true;
-                    icon: Icons.plus;
-                    on-card: true;
-                    accessible-label: @tr("Quick toggles");
-                    clicked => { AppState.choosing-toggles = true; }
-                }
-            }
-            // a disabled toggle keeps its current value and says why it cannot be changed
-            for toggle in AppState.quick-toggles: Text {
-                visible: !toggle.enabled;
-                text: toggle.label + ": " + toggle.reason;
-                color: Theme.on-sage;
-                opacity: 0.75;
-                font-size: Theme.font-caption;
-                wrap: word-wrap;
-            }
+        if !root.wide: VerticalLayout {
+            spacing: Theme.space-3;
+            DeviceIdentity { compact: true; }
+            if AppState.batteries.length > 0: BatteryList { align-end: false; }
         }
     }
 }
 
 component EqualizerCurve inherits Rectangle {
     in property <string> commands;
-    height: 70px;
+    height: 70px * Theme.content-scale;
     Path {
         width: parent.width;
         height: parent.height;
@@ -238,6 +279,51 @@ component EqualizerCurve inherits Rectangle {
         stroke: Theme.primary;
         stroke-width: 2.2px;
         fill: transparent;
+    }
+}
+
+component EqualizerDetails inherits VerticalLayout {
+    alignment: center;
+    spacing: 6px * Theme.content-scale;
+    Text {
+        text: @tr("Current profile");
+        color: Theme.muted;
+        font-size: Theme.font-small;
+    }
+    Text {
+        text: AppState.eq-name != "" ? AppState.eq-name : @tr("Your own settings");
+        color: Theme.text;
+        font-size: Theme.font-body;
+        font-weight: 600;
+        wrap: word-wrap;
+    }
+    Text {
+        text: @tr("{} bands · {}…{} dB", AppState.eq-band-count, AppState.eq-min-text, AppState.eq-max-text);
+        color: Theme.muted;
+        font-size: Theme.font-caption;
+        wrap: word-wrap;
+    }
+}
+
+component EqualizerPlot inherits VerticalLayout {
+    horizontal-stretch: 1;
+    alignment: center;
+    spacing: 6px * Theme.content-scale;
+    EqualizerCurve { commands: AppState.eq-curve; }
+    HorizontalLayout {
+        Text {
+            text: @tr("Low frequencies");
+            color: Theme.muted;
+            font-size: Theme.font-caption;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        Text {
+            text: @tr("High frequencies");
+            color: Theme.muted;
+            font-size: Theme.font-caption;
+            overflow: elide;
+        }
     }
 }
 
@@ -262,50 +348,15 @@ component BlockPanel inherits Panel {
         color: Theme.muted;
         font-size: Theme.font-small;
     }
-    if root.data.kind == BlockKind.equalizer && !AppState.one-earbud: HorizontalLayout {
-        spacing: 24px;
-        VerticalLayout {
-            alignment: center;
-            spacing: 6px;
-            width: 190px;
-            Text {
-                text: @tr("Current profile");
-                color: Theme.muted;
-                font-size: Theme.font-small;
-            }
-            Text {
-                text: AppState.eq-name != "" ? AppState.eq-name : @tr("Your own settings");
-                color: Theme.text;
-                font-size: 16px;
-                font-weight: 600;
-                wrap: word-wrap;
-            }
-            Text {
-                text: @tr("{} bands · {}…{} dB", AppState.eq-band-count, AppState.eq-min-text, AppState.eq-max-text);
-                color: Theme.muted;
-                font-size: Theme.font-caption;
-                wrap: word-wrap;
-            }
-        }
-        VerticalLayout {
-            horizontal-stretch: 1;
-            alignment: center;
-            spacing: 6px;
-            EqualizerCurve { commands: AppState.eq-curve; }
-            HorizontalLayout {
-                Text {
-                    text: @tr("Low frequencies");
-                    color: Theme.muted;
-                    font-size: 10px;
-                    horizontal-stretch: 1;
-                }
-                Text {
-                    text: @tr("High frequencies");
-                    color: Theme.muted;
-                    font-size: 10px;
-                }
-            }
-        }
+    if root.data.kind == BlockKind.equalizer && !AppState.one-earbud && !root.compact: HorizontalLayout {
+        spacing: Theme.space-5;
+        EqualizerDetails { width: 170px * Theme.content-scale; }
+        EqualizerPlot { }
+    }
+    if root.data.kind == BlockKind.equalizer && !AppState.one-earbud && root.compact: VerticalLayout {
+        spacing: Theme.space-4;
+        EqualizerDetails { }
+        EqualizerPlot { }
     }
     if root.data.kind == BlockKind.quick-presets: VerticalLayout {
         spacing: 8px;
@@ -428,10 +479,10 @@ component Shortcut inherits Rectangle {
 
 component Shortcuts inherits Rectangle {
     in property <[OverviewBlockData]> blocks;
-    private property <length> gap: 10px;
-    private property <int> columns: max(1, min(blocks.length, floor((self.width + gap) / 170px)));
+    private property <length> gap: Theme.space-3;
+    private property <int> columns: max(1, min(blocks.length, floor((self.width + gap) / (170px * Theme.content-scale))));
     private property <length> cell-width: (self.width - (columns - 1) * gap) / columns;
-    private property <length> cell-height: 86px;
+    private property <length> cell-height: 86px * Theme.content-scale;
     height: ceil(blocks.length / columns) * (cell-height + gap) - gap;
     for block[i] in root.blocks: Shortcut {
         data: block;
@@ -460,6 +511,7 @@ export component OverviewPage inherits VerticalLayout {
         icon: Icons.ear;
         text: @tr("Only one earbud is connected. The equalizer is unavailable, LDAC cannot be switched, and other settings can still be changed.");
     }
+    if AppState.all-toggles.length > 0: QuickSettingsPanel { wide: root.wide; }
     for row in AppState.overview-rows: VerticalLayout {
         if !row.shortcuts && root.wide: HorizontalLayout {
             spacing: 16px;
@@ -470,8 +522,8 @@ export component OverviewPage inherits VerticalLayout {
             }
         }
         if !row.shortcuts && !root.wide: VerticalLayout {
-            spacing: 16px;
-            for block in row.blocks: BlockPanel { data: block; }
+            spacing: Theme.space-4;
+            for block in row.blocks: BlockPanel { data: block; compact: true; }
         }
         if row.shortcuts: Shortcuts { blocks: row.blocks; }
     }
@@ -543,13 +595,20 @@ export component LayoutDialog inherits DialogFrame {
             clicked => { Actions.layout-use(i); }
         }
     }
-    VerticalLayout {
-        spacing: 8px;
-        padding-top: 8px;
-        for block[i] in AppState.layout-blocks: LayoutRow {
-            block: block;
-            index: i;
-            last: i == AppState.layout-blocks.length - 1;
+    layout-scroll := ScrollArea {
+        preferred-height: min(layout-list.preferred-height, max(100px, root.height - 320px * Theme.content-scale));
+        vertical-stretch: 0;
+        bar-outset: 22px;
+        content-height: layout-list.preferred-height;
+        layout-list := VerticalLayout {
+            width: layout-scroll.visible-width;
+            spacing: Theme.space-2;
+            padding-top: Theme.space-2;
+            for block[i] in AppState.layout-blocks: LayoutRow {
+                block: block;
+                index: i;
+                last: i == AppState.layout-blocks.length - 1;
+            }
         }
     }
     HorizontalLayout {
@@ -565,26 +624,33 @@ export component LayoutDialog inherits DialogFrame {
 
 export component QuickTogglesDialog inherits DialogFrame {
     title: @tr("Quick toggles");
-    description: @tr("Choose the switches on the device card. The settings themselves do not change.");
+    description: @tr("Choose the switches in Quick settings. The settings themselves do not change.");
     dialog-width: 520px;
     close => { AppState.choosing-toggles = false; }
-    VerticalLayout {
-        spacing: 4px;
-        for toggle in AppState.all-toggles: HorizontalLayout {
-            spacing: 12px;
-            padding-top: 6px;
-            padding-bottom: 6px;
-            Text {
-                text: toggle.label;
-                color: Theme.text;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-                wrap: word-wrap;
-            }
-            Toggle {
-                checked: toggle.on;
-                label: toggle.label;
-                toggled(on) => { Actions.choose-toggle(toggle.id, on); }
+    toggles-scroll := ScrollArea {
+        preferred-height: min(toggles-list.preferred-height, max(100px, root.height - 260px * Theme.content-scale));
+        vertical-stretch: 0;
+        bar-outset: 22px;
+        content-height: toggles-list.preferred-height;
+        toggles-list := VerticalLayout {
+            width: toggles-scroll.visible-width;
+            spacing: Theme.space-1;
+            for toggle in AppState.all-toggles: HorizontalLayout {
+                spacing: Theme.space-3;
+                padding-top: 6px * Theme.content-scale;
+                padding-bottom: 6px * Theme.content-scale;
+                Text {
+                    text: toggle.label;
+                    color: Theme.text;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    wrap: word-wrap;
+                }
+                Toggle {
+                    checked: toggle.on;
+                    label: toggle.label;
+                    toggled(on) => { Actions.choose-toggle(toggle.id, on); }
+                }
             }
         }
     }

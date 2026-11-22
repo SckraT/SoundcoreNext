@@ -3,14 +3,167 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 
 export enum ButtonKind { normal, primary, soft, ghost, danger }
+export enum StatusKind { neutral, pending, success, error }
+
+// Composition primitives. Their defaults are the UI-kit rhythm; page-specific
+// values are still possible through gap without introducing another scale.
+export component Stack inherits VerticalLayout {
+    in property <length> gap: Theme.space-3;
+    spacing: root.gap;
+}
+
+export component Row inherits HorizontalLayout {
+    in property <length> gap: Theme.space-3;
+    spacing: root.gap;
+}
+
+export component Spacer inherits Rectangle {
+    in property <length> size: Theme.space-3;
+    height: root.size;
+}
+
+// Type roles. Consolas is deliberately reserved for commands and file names.
+export component BodyText inherits Text {
+    in property <bool> secondary: false;
+    color: root.secondary ? Theme.muted : Theme.text;
+    font-size: Theme.font-body;
+    wrap: word-wrap;
+}
+
+export component CaptionText inherits Text {
+    in property <bool> secondary: true;
+    color: root.secondary ? Theme.muted : Theme.text;
+    font-size: Theme.font-caption;
+    wrap: word-wrap;
+}
+
+export component CodeText inherits Text {
+    in property <bool> secondary: false;
+    color: root.secondary ? Theme.muted : Theme.primary;
+    font-family: "Consolas";
+    font-size: Theme.font-caption;
+    overflow: elide;
+}
+
+// A single-line field with the app's own surface, focus and type roles.
+export component TextField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback edited();
+    callback accepted();
+    height: Theme.control-height;
+    border-radius: Theme.radius-control;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.primary : Theme.line;
+    background: root.enabled ? Theme.low : Theme.container;
+    opacity: root.enabled ? 1 : 0.5;
+    clip: true;
+    forward-focus: input;
+    if root.text == "": Text {
+        x: Theme.space-3;
+        width: parent.width - 2 * Theme.space-3;
+        height: parent.height;
+        text: root.placeholder;
+        color: Theme.muted;
+        font-size: Theme.font-body;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    input := TextInput {
+        x: Theme.space-3;
+        width: parent.width - 2 * Theme.space-3;
+        height: parent.height;
+        text <=> root.text;
+        enabled: root.enabled;
+        single-line: true;
+        color: Theme.text;
+        font-size: Theme.font-body;
+        vertical-alignment: center;
+        accessible-label: root.label != "" ? root.label : root.placeholder;
+        edited => { root.edited(); }
+        accepted => { root.accepted(); }
+    }
+}
 
 // A tinted line icon.
 export component Icon inherits Image {
     in property <color> tint: Theme.text;
-    width: 20px;
-    height: 20px;
+    width: Theme.icon-medium;
+    height: Theme.icon-medium;
     colorize: tint;
     image-fit: contain;
+}
+
+export component StatusIcon inherits Rectangle {
+    in property <StatusKind> status: StatusKind.neutral;
+    in property <string> pending-text: "…";
+    width: Theme.icon-medium;
+    height: Theme.icon-medium;
+    accessible-role: text;
+    accessible-label: root.status == StatusKind.success ? @tr("Succeeded")
+        : root.status == StatusKind.error ? @tr("Failed")
+        : root.status == StatusKind.pending ? @tr("Pending") : @tr("Not run");
+    Text {
+        text: root.status == StatusKind.success ? "✓"
+            : root.status == StatusKind.error ? "!"
+            : root.status == StatusKind.pending ? root.pending-text : "–";
+        color: root.status == StatusKind.success ? Theme.green
+            : root.status == StatusKind.error ? Theme.error : Theme.muted;
+        font-size: Theme.font-body;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component ProgressBar inherits Rectangle {
+    in property <float> progress;
+    in property <length> thickness: 7px * Theme.content-scale;
+    height: root.thickness;
+    border-radius: root.height / 2;
+    background: Theme.container;
+    clip: true;
+    accessible-role: progress-indicator;
+    accessible-value: root.progress;
+    Rectangle {
+        x: 0px;
+        width: parent.width * max(0, min(1, root.progress));
+        height: parent.height;
+        border-radius: parent.height / 2;
+        background: Theme.primary;
+        animate width { duration: 160ms; }
+    }
+}
+
+export component MetricTile inherits Rectangle {
+    in property <string> value;
+    in property <string> label;
+    in property <bool> compact: false;
+    // Metrics live inside a panel: a second filled card adds visual noise.
+    background: transparent;
+    VerticalLayout {
+        padding-left: 0px;
+        padding-right: Theme.space-2;
+        padding-top: Theme.space-1;
+        padding-bottom: Theme.space-1;
+        spacing: Theme.space-1;
+        alignment: center;
+        Text {
+            text: root.value;
+            color: Theme.primary;
+            font-size: root.compact ? Theme.font-title : Theme.font-metric;
+            font-weight: 600;
+            overflow: elide;
+        }
+        CaptionText {
+            text: root.label;
+            font-size: Theme.font-small;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+    }
 }
 
 export component Button inherits Rectangle {
@@ -25,7 +178,7 @@ export component Button inherits Rectangle {
         : kind == ButtonKind.soft ? Theme.on-primary-container
         : kind == ButtonKind.ghost ? Theme.primary
         : kind == ButtonKind.danger ? Theme.error : Theme.text;
-    min-height: 37px;
+    min-height: Theme.control-height;
     border-radius: Theme.radius-control;
     background: kind == ButtonKind.primary ? Theme.primary
         : kind == ButtonKind.soft ? Theme.primary-container
@@ -149,8 +302,9 @@ export component Chip inherits Rectangle {
     callback clicked();
     private property <color> foreground: selected ? (on-card ? Theme.on-primary : Theme.on-primary-container)
         : (on-card ? Theme.on-sage : Theme.text);
-    min-height: 31px;
+    min-height: Theme.control-height-compact;
     border-radius: Theme.radius-chip;
+    clip: true;
     background: selected ? (on-card ? Theme.primary : Theme.primary-container) : touch.has-hover && enabled ? Theme.hover : transparent;
     border-width: selected ? 0px : 1px;
     border-color: on-card ? Theme.on-sage.transparentize(80%) : Theme.line;
@@ -176,6 +330,9 @@ export component Chip inherits Rectangle {
             color: root.foreground;
             font-size: Theme.font-small;
             vertical-alignment: center;
+            horizontal-stretch: 1;
+            min-width: 0px;
+            overflow: elide;
         }
     }
     touch := TouchArea {

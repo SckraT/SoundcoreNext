@@ -4,10 +4,12 @@ Open-source Soundcore control app for Android, Windows and Linux.
 
 **OpenSCL4 2.0 development.** This branch is the first OpenSCL4 2.0 slice: the
 desktop product keeps the OpenSCL4 name, and its UI is vendored from OpenSCL4
-under GPL-3.0 — the window title and strings stay unchanged. The vendored tree
-keeps its upstream design; the one allowed change (the dual-connections row's
-Connect/Disconnect buttons) is recorded in `desktop/ui/SOURCE.md`. Protocol
-command/response data and device preset data are adapted from OpenSCL4 under
+under GPL-3.0 — the window title and product name stay unchanged. The vendored
+tree keeps its upstream visual language; local UI-kit, Overview, Diagnostics,
+connection and settings adaptations are recorded in `desktop/ui/SOURCE.md`, with
+component contracts in `desktop/ui/UI_KIT.md` and the implementation workflow in
+`desktop/ui/GUIDE.md`. Protocol command/response data and device preset data are
+adapted from OpenSCL4 under
 GPL-3.0 too; the attribution is in `NOTICE`.
 
 - **Core** (`core/`) — Rust: protocol framing, model state parsers, diagnostics. The command/response layouts, state offsets and device preset tables it implements are adapted from OpenSCL4's command/response and preset data (authorized use; see `NOTICE`) and from the research wiki; the Rust implementation is this project's own.
@@ -41,8 +43,8 @@ The normative specification lives in the research repository at `D:\Pixel 8 Pro\
 | TLV D1203 | not started |
 | Diagnostics | Windows Diagnostics page with three read-only probes (`01 01`, `01 03`, `01 04`), per-probe progress, a local redacted ZIP (`manifest.json`, `frames.jsonl`, `README.txt`) saved through a native dialog, and a prefilled GitHub issue; no automatic upload, A3062 serial and Bluetooth addresses redacted |
 | Windows session/transport | session requests `01 01`, parses the answer, reads the bounded multi-frame `0B 01` dual-connections list and writes the measured A3062 `06 81` sound-mode, `03 87` equalizer, one-frame settings and `0B 82`/`0B 81`/`0B 83` dual-connection bodies; the Windows RFCOMM transport lists paired devices and connects by vendor UUID with an SPP fallback |
-| Desktop (OpenSCL4 2.0) | OpenSCL4 Slint shell vendored under GPL-3.0; Add Device populated from the 39-model catalog; real paired Soundcore devices connect over Windows RFCOMM and Overview shows their battery (P20i A3949 and Space One Pro A3062 verified on hardware); the Space One Pro also gets the Sound mode, Equalizer and remaining-settings pages (Controls, Comfort, Power and prompts, Sound and effects, Connections, About), editable custom bands, saved equalizer profiles that persist across restarts, equalizer profile import and export, the dual-connections remembered-device list (names and connected marker, per-row Connect/Disconnect/Forget writes that re-read the list), and a Diagnostics page with read-only probes, a local redacted ZIP and a prefilled GitHub issue |
-| Desktop tray | notification-area icon and menu from the vendored `ui/tray.slint`: the tooltip names the device and, while connected, its battery (the vendored tooltip has no status word; status is the menu's device line); menu status, battery, Sound mode submenu (writes and re-reads like the page), LDAC, Connect while a saved device is disconnected, Open and Quit; close-to-tray while the icon is shown; single instance (a second start reveals the hidden window); Settings “Desktop and quick access” switches and Quit; no quick presets, tray choices not persisted |
+| Desktop (OpenSCL4 2.0) | OpenSCL4 Slint shell vendored under GPL-3.0; Add Device populated from the 39-model catalog; real paired Soundcore devices connect over Windows RFCOMM and Overview shows their battery (P20i A3949 and Space One Pro A3062 verified on hardware); the Space One Pro also gets the Sound mode, Equalizer and remaining-settings pages (Controls, Comfort, Power and prompts, Sound and effects, Connections, About), editable custom bands, saved equalizer profiles that persist across restarts, equalizer profile import and export, the dual-connections remembered-device list (names and connected marker, per-row Connect/Disconnect/Forget writes that re-read the list), and a Diagnostics page with read-only probes, a local redacted ZIP and a prefilled GitHub issue. The shared UI kit and its agent workflow are documented; the connected card exposes app-level Disconnect, and a serial read-only idle heartbeat reports Lost without automatic reconnect |
+| Desktop tray | notification-area icon and menu from the vendored `ui/tray.slint`: the tooltip names the device and, while connected, its battery (the vendored tooltip has no status word; status is the menu's device line); menu status, battery, Sound mode submenu (writes and re-reads like the page), LDAC, Connect while a saved device is disconnected, Open and Quit; close-to-tray while the icon is shown; single instance (a second start reveals the hidden window); Settings “Desktop and quick access” switches and Quit; no quick presets. Tray choices persist atomically in `%APPDATA%\OpenSCL4\desktop-preferences.json` and load before icon creation |
 | Android UI | not started |
 
 ## Build and test

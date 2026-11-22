@@ -32,6 +32,7 @@ pub use generated::Tray;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use serde::{Deserialize, Serialize};
 use slint::{CloseRequestResponse, ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use soundcore_models::DeviceState;
 
@@ -40,9 +41,13 @@ use crate::{AppState, AppWindow, Battery, Connection};
 /// The product name the tray shows in its tooltip, its title and its "Open" item.
 const APP_NAME: &str = "OpenSCL4";
 
-/// What the Settings page's "Desktop and quick access" panel chooses. Every
-/// choice lives in memory only: this slice persists nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the Settings page's "Desktop and quick access" panel chooses.
+///
+/// The controller stores this small document separately from device state and
+/// Overview preferences. Missing fields use the defaults so newer versions can
+/// add choices without invalidating an existing document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TraySettings {
     /// `app-tray`: whether the notification-area icon is shown at all.
     pub icon: bool,
@@ -364,14 +369,13 @@ pub struct TrayShell {
 }
 
 impl TrayShell {
-    /// Creates and shows the icon, fills in the empty menu, and wires the menu's
-    /// Open and Quit items and the window's close button.
+    /// Creates the shell from the already-loaded settings, shows the icon when
+    /// requested, fills in the empty menu, and wires Open, Quit and close.
     ///
     /// A platform without a notification area gets a warning and the program
     /// keeps working with no icon; closing the window then quits as usual.
-    pub fn new(ui: &AppWindow, actions: TrayActions) -> Self {
+    pub fn new(ui: &AppWindow, actions: TrayActions, settings: TraySettings) -> Self {
         let window = ui.as_weak();
-        let settings = TraySettings::default();
         let close_to_tray = Rc::new(Cell::new(settings.close_to_tray));
         let icon_hosted = Rc::new(Cell::new(false));
         let shell = Self {
@@ -745,5 +749,68 @@ mod tests {
             assert!(tray.get_has_ldac());
             assert!(tray.get_ldac());
         });
+    }
+
+    fn settings_path(label: &str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "openscl4-desktop-preferences-{}-{sequence}-{label}.json",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn missing_and_malformed_desktop_preferences_use_defaults() {
+        let missing = settings_path("missing");
+        let _ = fs::remove_file(&missing);
+        assert_eq!(load_settings(&missing), TraySettings::default());
+
+        let malformed = settings_path("malformed");
+        fs::write(&malformed, b"not json").expect("the malformed fixture is written");
+        assert_eq!(load_settings(&malformed), TraySettings::default());
+        assert_eq!(
+            fs::read_to_string(&malformed).expect("the invalid source remains readable"),
+            "not json",
+            "loading does not silently destroy the user's document"
+        );
+        let _ = fs::remove_file(malformed);
+    }
+
+    #[test]
+    fn missing_desktop_preference_fields_keep_their_defaults() {
+        let path = settings_path("partial");
+        fs::write(&path, br#"{"icon":false}"#).expect("the partial fixture is written");
+        assert_eq!(
+            load_settings(&path),
+            TraySettings {
+                icon: false,
+                ..TraySettings::default()
+            }
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn desktop_preferences_roundtrip_through_an_atomic_save() {
+        let path = settings_path("roundtrip");
+        let _ = fs::remove_file(&path);
+        let settings = TraySettings {
+            icon: false,
+            close_to_tray: false,
+            battery: false,
+            modes: false,
+            presets: true,
+            ldac: false,
+        };
+        save_settings(&path, &settings).expect("the first save succeeds");
+        assert_eq!(load_settings(&path), settings);
+        save_settings(&path, &TraySettings::default()).expect("replacement succeeds");
+        assert_eq!(load_settings(&path), TraySettings::default());
+        assert!(
+            !std::path::PathBuf::from(format!("{}.tmp", path.display())).exists(),
+            "the temporary file is renamed away"
+        );
+        let _ = fs::remove_file(path);
     }
 }

@@ -327,14 +327,16 @@ export component SettingRowView inherits Rectangle {
                 clicked => { Actions.copy(root.setting.text); }
             }
         }
-        if root.setting.kind == RowKind.action: Button {
-            text: root.setting.id == "resetButtonsToDefault" ? @tr("Reset") : root.setting.id == "powerOff" ? @tr("Turn off") : root.label;
-            kind: ButtonKind.danger;
-            has-icon: true;
-            icon: root.setting.id == "powerOff" ? Icons.power : Icons.reset;
-            enabled: root.setting.enabled;
-            y: (parent.height - self.height) / 2;
-            clicked => { Actions.press(root.setting.id); }
+        if root.setting.kind == RowKind.action: VerticalLayout {
+            alignment: center;
+            Button {
+                text: root.setting.id == "resetButtonsToDefault" ? @tr("Reset") : root.setting.id == "powerOff" ? @tr("Turn off") : root.label;
+                kind: ButtonKind.danger;
+                has-icon: true;
+                icon: root.setting.id == "powerOff" ? Icons.power : Icons.reset;
+                enabled: root.setting.enabled;
+                clicked => { Actions.press(root.setting.id); }
+            }
         }
         if root.setting.kind == RowKind.time: HorizontalLayout {
             spacing: 6px;
@@ -372,10 +374,10 @@ export component SettingRowView inherits Rectangle {
             HorizontalLayout {
                 padding: 14px;
                 spacing: 14px;
+                cross-axis-alignment: center;
                 Rectangle {
                     width: 40px;
                     height: 40px;
-                    y: (parent.height - self.height) / 2;
                     border-radius: 13px;
                     background: Theme.container;
                     Icon {
@@ -394,19 +396,16 @@ export component SettingRowView inherits Rectangle {
                 Button {
                     text: @tr("Connect");
                     kind: ButtonKind.ghost;
-                    y: (parent.height - self.height) / 2;
                     clicked => { Actions.connect-item(root.setting.id, i); }
                 }
                 Button {
                     text: @tr("Disconnect");
                     kind: ButtonKind.ghost;
-                    y: (parent.height - self.height) / 2;
                     clicked => { Actions.disconnect-item(root.setting.id, i); }
                 }
                 Button {
                     text: @tr("Forget");
                     kind: ButtonKind.ghost;
-                    y: (parent.height - self.height) / 2;
                     clicked => { Actions.remove-item(root.setting.id, i); }
                 }
             }

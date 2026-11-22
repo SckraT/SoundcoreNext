@@ -13,8 +13,15 @@ arboard = { version = "3.7", default-features = false }
 # features are the Linux xdg-portal and Wayland backends; the Windows backend
 # needs none of them.
 rfd = { version = "0.17", default-features = false }
-slint = "1.18"
+# Overview layout and quick-toggle preferences are a small version-tolerant
+# JSON document; device state itself is never stored in it.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Native theme-change notifications and bundled Slint translations.
+slint = { version = "1.18", features = ["unstable-winit-030"] }
 soundcore-models = { path = "../core/crates/models" }
+# Follow system for App language; maps Windows locale tags to bundled languages.
+sys-locale = "0.3"
 # Diagnostics records the raw tx/rx frames and parses the replies before the
 # redacted session is exported.
 soundcore-protocol = { path = "../core/crates/protocol" }
@@ -33,6 +40,8 @@ windows = { version = "0.62", features = [
     # `SECURITY_ATTRIBUTES` pointer, which the windows crate gates behind
     # `Win32_Security` as well (the reference app enables the same pair).
     "Win32_Security",
+    # Follow system reads the current app mode from the user's registry hive.
+    "Win32_System_Registry",
     "Win32_System_Threading",
     # The Connections page's links open the Windows settings pages.
     "Win32_UI_Shell",

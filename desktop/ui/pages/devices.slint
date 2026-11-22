@@ -63,12 +63,23 @@ component DeviceCardView inherits Rectangle {
             font-size: Theme.font-caption;
         }
         Rectangle { vertical-stretch: 1; }
-        if root.live: Button {
-            text: @tr("Open");
-            kind: ButtonKind.primary;
-            has-icon: true;
-            icon: Icons.chevron;
-            clicked => { Actions.navigate(Page.overview); }
+        if root.live: HorizontalLayout {
+            spacing: Theme.space-2;
+            Button {
+                text: @tr("Open");
+                kind: ButtonKind.primary;
+                has-icon: true;
+                icon: Icons.chevron;
+                horizontal-stretch: 1;
+                clicked => { Actions.navigate(Page.overview); }
+            }
+            Button {
+                text: @tr("Disconnect");
+                kind: ButtonKind.ghost;
+                has-icon: true;
+                icon: Icons.disconnect;
+                clicked => { Actions.disconnect(); }
+            }
         }
         if !root.live: Button {
             text: root.connecting ? @tr("Connecting…") : @tr("Connect");
@@ -173,7 +184,8 @@ export component DevicesPage inherits VerticalLayout {
         private property <length> gap: 18px;
         private property <int> columns: max(1, floor((self.width + gap) / 270px));
         private property <length> cell-width: (self.width - (columns - 1) * gap) / columns;
-        private property <length> cell-height: 340px;
+        // Two-line names and the connected actions must stay inside at every content scale.
+        private property <length> cell-height: 360px * Theme.content-scale;
         height: ceil((AppState.devices.length + 1) / columns) * (cell-height + gap) - gap;
         for card[index] in AppState.devices: DeviceCardView {
             card: card;

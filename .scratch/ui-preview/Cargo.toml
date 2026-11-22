@@ -1,0 +1,11 @@
+[package]
+name = "openscl4-ui-visual-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+slint = "1.18"
+
+[build-dependencies]
+slint-build = "1.18"

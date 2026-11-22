@@ -4,47 +4,91 @@
 - Commit: `01276e08` (the checkout used for the port)
 - Source path: `desktop/ui`
 - License: GNU General Public License v3.0 (see root `LICENSE`)
-- Copyright: OpenSCL4 contributors; each file retains its upstream content.
+- Copyright: OpenSCL4 contributors; upstream copyright and GPL-3.0 terms remain
+  in place.
 
 ## What is vendored
 
-The complete `desktop/ui` tree: `app.slint`, `shell.slint`, `theme.slint`,
+The original tree supplied `app.slint`, `shell.slint`, `theme.slint`,
 `types.slint`, `strings.slint`, `tray.slint`, `icons.slint`, `components/`,
-`pages/`, `icons/`, `art/`, `fonts/`.
+`pages/`, `icons/`, `art/` and `fonts/`. The application adapts that shell to its
+controller and Rust core (whose protocol/preset data is attributed in the root
+`NOTICE`). The shell opens with empty state until the controller fills it.
 
-## Changes
+## Local changes
 
-This application adapts the shell to a new controller and its own Rust core
-(whose protocol/preset data is attributed in the root `NOTICE`). The shell opens
-with empty state until the controller fills it.
+### Connections
 
-The spec's one UI exception — the dual-connections row actions — is the only
-change made to the vendored tree so far. It was made in commit `cd309be` ("Show
-and drive the A3062 dual-connections list") and is limited to:
+Commit `cd309be` ("Show and drive the A3062 dual-connections list") added the
+spec's dual-connections row actions:
 
-- `types.slint`: the `Actions` global gains `connect-item(string, int)` and
-  `disconnect-item(string, int)` callbacks. They carry a list row's id and the
-  option index, the same shape the existing `remove-item(string, int)` Forget
-  callback uses.
-- `components/settings.slint`: the `SettingRowView` list row gains one
-  **Connect** and one **Disconnect** `ButtonKind.ghost` button next to the
-  existing **Forget** button, with the same style and vertical placement.
+- `types.slint`: `connect-item(string, int)` and `disconnect-item(string, int)`
+  carry a list row's id and option index, like the existing Forget callback.
+- `components/settings.slint`: the list row adds Connect and Disconnect ghost
+  buttons beside Forget.
 
-No layout, wording, colour or other visual change is made; the two buttons are
-the spec's minimal exception. The Diagnostics page adds one more shell
-adaptation, recorded here because it changes vendored files:
+### Diagnostics plumbing
 
-- `types.slint`: `Page.diagnostics`; `DiagnosticStep`/`DiagnosticProbe`; the
+The Diagnostics feature adds:
+
+- `types.slint`: `Page.diagnostics`, `DiagnosticStep`, `DiagnosticProbe`, the
   diagnostics `AppState` fields and `Actions` callbacks.
 - `strings.slint`: the Diagnostics title, slogan, description and shield icon.
-- `shell.slint`: one **Diagnostics** nav item in the bottom group.
-- `app.slint`: routes `Page.diagnostics` to the new page; the page is not a
-  device page, so it opens without a connection and has no device banner.
-- `pages/settings.slint`: the Diagnostics aside gains an **Open diagnostics**
-  button next to the existing **Copy logs**.
-- `pages/diagnostics.slint` is a new page built from the vendored `Panel`,
-  `Button`, `Banner`, `Tag` and `PageHeading` components; it is not copied
-  upstream code.
+- `shell.slint`: a Diagnostics navigation item in the bottom group.
+- `app.slint`: the Diagnostics route. It opens without a connection and has no
+  device-error banner because it is not a device settings page.
+- `pages/settings.slint`: an Open diagnostics button beside Copy logs.
+- `pages/diagnostics.slint`: a new page, not copied upstream code.
 
-Any later change to a vendored file is made in a commit that names the file and
-the reason; the upstream copyright and GPL-3.0 terms stay in place.
+### Internal UI kit, restored Overview and Diagnostics styling
+
+The current redesign keeps the upstream palette, Onest font, radii and general
+visual language. It does not introduce a third-party UI framework.
+
+- `theme.slint`: adds semantic spacing, small-radius, control-height, icon-size
+  and device/metric type tokens. All dimensional tokens include content scale.
+- `components/basics.slint`: adds `StatusKind`, `Stack`, `Row`, `Spacer`,
+  `BodyText`, `CaptionText`, `CodeText`, `TextField`, `StatusIcon`, `ProgressBar`
+  and `MetricTile`; ordinary buttons use the control-height token. Chips use the
+  compact control token and elide labels so long quick toggles do not expand a
+  fixed grid. Text fields use the shared surface, focus, font and radius tokens.
+- `pages/overview.slint`: restores the previous client's useful Overview
+  structure. On Windows the device hero contains only identity and batteries;
+  capability-filtered quick toggles use compact, bounded-width buttons in their
+  own panel below it. Sound mode and Equalizer panels, shortcut cards, layout
+  editing and quick toggle selection follow. Wide and narrow arrangements share
+  the same content; wrapping grids and scrollable dialogs keep controls
+  reachable. Quick presets and case stay hidden because this core provides no
+  real data for them.
+- `pages/sections.slint`: sound-mode explanations use fixed icon wells and the
+  shared type scale so differently shaped icons stay aligned.
+- `pages/diagnostics.slint`: replaces page-local visual treatment with the
+  common typography, panels, buttons, tags, status, progress and metric
+  components. Review metrics are borderless, with accent values and readable
+  muted labels rather than nested gray cards. The note uses `TextField` and Save
+  ZIP is a soft secondary action. The device summary follows the Overview
+  sage-card language; wide layouts use a main column and supporting aside,
+  narrow layouts one column. Probe rows, metrics and actions adapt without
+  changing the existing diagnostics callbacks or capture/export logic.
+- `app.slint`: Overview and Diagnostics wide breakpoints account for
+  `Theme.content-scale`.
+- The existing `types.slint` Overview models and `strings.slint` display strings
+  are reused; the Rust controller now fills and updates them.
+- `pages/add_device.slint`, `pages/equalizer.slint` and `pages/presets.slint`:
+  their remaining standard `LineEdit` controls now use the shared `TextField`,
+  including accessible labels and the existing edited/accepted behavior.
+- `components/settings.slint`: action and dual-connection row controls use layout
+  alignment instead of manual child `y` coordinates managed by the parent.
+- `pages/devices.slint`: the connected saved-device card adds a non-destructive
+  Disconnect ghost action beside Open; the card remains available for reconnect.
+- `UI_KIT.md`: records the reusable component, state, responsive, persistence
+  and future Compose mapping contracts.
+- `GUIDE.md`: adds the practical component/page workflow, local visual checks and
+  the Windows release checklist. The project agent workflow is in
+  `.agents/skills/use-soundcore-ui-kit/SKILL.md`.
+
+The old Overview layout serialization is intentionally retained. The UI-only
+Overview preferences and the separate desktop/tray preferences documents do not
+contain device state. The desktop controller restores tray choices before icon
+creation and performs serial read-only idle heartbeats without automatic
+reconnect. No hardware acceptance claim is implied by this source record.

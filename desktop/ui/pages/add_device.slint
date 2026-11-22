@@ -3,8 +3,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { AppState, Actions, ModelOption, PairedOption, FailureKind, SystemPage } from "../types.slint";
 import { FailureText } from "devices.slint";
-import { Icon, Button, ButtonKind, IconButton, Chip, Toggle, Banner } from "../components/basics.slint";
-import { LineEdit } from "std-widgets.slint";
+import { Icon, Button, ButtonKind, IconButton, Chip, Toggle, Banner, TextField } from "../components/basics.slint";
 import { ScrollArea } from "../components/scrollarea.slint";
 
 export component DialogFrame inherits Rectangle {
@@ -167,10 +166,11 @@ export component AddDeviceDialog inherits DialogFrame {
 
     if AppState.add-step == 0: VerticalLayout {
         spacing: 12px;
-        search := LineEdit {
-            placeholder-text: @tr("Model name or code, such as A3954");
+        search := TextField {
+            label: @tr("Search models");
+            placeholder: @tr("Model name or code, such as A3954");
             text <=> AppState.model-query;
-            edited(text) => { Actions.filter-models(text, AppState.model-kind); }
+            edited => { Actions.filter-models(self.text, AppState.model-kind); }
             init => { self.focus(); }
         }
         KindChips { }
