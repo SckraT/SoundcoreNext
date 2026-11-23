@@ -40,15 +40,33 @@ export global Theme {
     out property <color> hover: primary.transparentize(dark ? 92% : 93.5%);
     out property <color> scrim: dark ? #00000080 : #16121e65;
 
-    // shapes and type
+    // Spacing: use the semantic steps instead of inventing page-local gaps.
+    out property <length> space-1: 4px * content-scale;
+    out property <length> space-2: 8px * content-scale;
+    out property <length> space-3: 12px * content-scale;
+    out property <length> space-4: 16px * content-scale;
+    out property <length> space-5: 20px * content-scale;
+    out property <length> space-6: 24px * content-scale;
+    out property <length> space-7: 28px * content-scale;
+    out property <length> space-8: 32px * content-scale;
+
+    // Shapes, controls and type. Existing vendored values keep their names.
     out property <length> radius-panel: 24px * content-scale;
     out property <length> radius-card: 17px * content-scale;
     out property <length> radius-control: 12px * content-scale;
     out property <length> radius-chip: 10px * content-scale;
+    out property <length> radius-small: 8px * content-scale;
+    out property <length> control-height: 37px * content-scale;
+    out property <length> control-height-compact: 31px * content-scale;
+    out property <length> icon-small: 16px * content-scale;
+    out property <length> icon-medium: 20px * content-scale;
+    out property <length> icon-large: 26px * content-scale;
     out property <length> font-body: 13px * content-scale;
     out property <length> font-small: 12px * content-scale;
     out property <length> font-caption: 11px * content-scale;
     out property <length> font-title: 17px * content-scale;
     out property <length> font-section: 15px * content-scale;
+    out property <length> font-device: 24px * content-scale;
+    out property <length> font-metric: 20px * content-scale;
     out property <length> font-slogan: 30px * content-scale;
 }

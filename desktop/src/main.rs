@@ -1,11 +1,11 @@
 //! Desktop shell.
 //!
-//! The Slint interface is vendored from OpenSCL4 under GPL-3.0 (see
-//! `ui/SOURCE.md`) and is intentionally not redesigned. This binary opens the
-//! shell and hands it to [`controller::Controller`], which fills the Add Device
-//! dialog from the model catalog, wires the Windows Bluetooth session that shows
-//! the connected device's battery on the Overview page, and owns the
-//! notification-area icon from [`tray`].
+//! The Slint interface is based on the vendored OpenSCL4 UI under GPL-3.0;
+//! local design-system and page changes are recorded in `ui/SOURCE.md` and
+//! `ui/UI_KIT.md`. This binary opens the shell and hands it to
+//! [`controller::Controller`], which fills the Add Device dialog from the model
+//! catalog, wires the Windows Bluetooth session and configurable Overview, and
+//! owns the notification-area icon from [`tray`].
 //!
 //! The window goes into the notification area on close (the icon is created
 //! before the window's `run`), and only one copy of the app runs at a time: a
@@ -14,8 +14,21 @@
 
 slint::include_modules!();
 
+/// Writes one real application event to stderr, the rotating log file and the
+/// bounded history used by Settings → Copy logs.
+#[macro_export]
+macro_rules! app_log {
+    ($($argument:tt)*) => {
+        $crate::logs::line(format!($($argument)*))
+    };
+}
+
 mod catalog_adapter;
 mod controller;
+mod demo;
+mod logs;
+mod overview;
+mod settings;
 mod single_instance;
 #[cfg(test)]
 mod test_support;
@@ -28,6 +41,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // One copy at a time, before any window exists: the second start asks the
     // running one to show its window and leaves without a window of its own.
     let config_dir = controller::default_config_dir();
+    logs::open_file(&config_dir);
     let Some(instance) = single_instance::claim(&config_dir) else {
         return Ok(());
     };
@@ -40,7 +54,11 @@ fn main() -> Result<(), slint::PlatformError> {
     // The claim has to live for as long as the app runs, or a later start would
     // take this one for another copy.
     let _instance = instance;
-    ui.run()
+    ui.show()?;
+    // The native window now exists, so Follow system can listen for Windows
+    // switching between its light and dark app modes.
+    _controller.shown();
+    slint::run_event_loop()
 }
 
 /// The version the About section shows: the package version, which the spec

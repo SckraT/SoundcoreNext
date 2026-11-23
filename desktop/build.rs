@@ -1,4 +1,9 @@
 fn main() {
+    // The vendored translations use plain source strings as msgids. Bundle them
+    // in both generated units so App language and Follow system are real choices.
+    let config = slint_build::CompilerConfiguration::new()
+        .with_bundled_translations(concat!(env!("CARGO_MANIFEST_DIR"), "/translations"))
+        .with_default_translation_context(slint_build::DefaultTranslationContext::None);
     // The tray is compiled as its own Slint unit: it exports a `SystemTrayIcon`
     // component rather than a window, so Slint creates no window adapter for it
     // and it can be created before the event loop runs. `src/tray.rs` includes
@@ -11,7 +16,7 @@ fn main() {
     let tray_dependencies = slint_build::compile_with_output_path(
         concat!(env!("CARGO_MANIFEST_DIR"), "/ui/tray.slint"),
         tray_output,
-        slint_build::CompilerConfiguration::new(),
+        config.clone(),
     )
     .expect("compile the tray icon");
     // `compile_with_output_path` prints no cargo messages of its own, so the
@@ -20,5 +25,6 @@ fn main() {
     for path in tray_dependencies {
         println!("cargo:rerun-if-changed={}", path.display());
     }
-    slint_build::compile("ui/app.slint").expect("compile OpenSCL4 UI");
+    slint_build::compile_with_config("ui/app.slint", config).expect("compile OpenSCL4 UI");
+    println!("cargo:rerun-if-changed=translations");
 }

@@ -1,17 +1,20 @@
 # OpenSCL4 2.0 desktop shell
 
 The desktop app is the **OpenSCL4 2.0 desktop shell**: the product keeps the
-OpenSCL4 name, and the UI is **vendored from OpenSCL4** under GPL-3.0; it is not
-a new design. The Slint tree in `ui/` comes from
-`D:\Projects\OpenSCL4\desktop\ui` at commit `01276e08` and keeps the upstream
-layout, components, pages, icons, fonts and art; the shell adaptations are the
-two Connect/Disconnect ghost buttons the spec allows in the Connections list
-row and the Diagnostics page plumbing (the page itself is new), recorded in
-`ui/SOURCE.md`.
+OpenSCL4 name, and its Slint UI is based on **OpenSCL4** under GPL-3.0. The tree
+in `ui/` comes from `D:\Projects\OpenSCL4\desktop\ui` at commit `01276e08` and
+keeps the upstream palette, typography, icons, fonts and art. Local adaptations
+include the Connections row actions, the Diagnostics workflow, the restored
+configurable Overview and the internal UI kit documented in `ui/UI_KIT.md`;
+vendored-file changes are recorded in `ui/SOURCE.md`.
 
 ## Status
 
-- The shell compiles and opens; the window title still says OpenSCL4.
+- The Windows shell runs against the committed UI kit. With no Bluetooth
+  hardware at all, the app can still be exercised end to end through the
+  built-in **Demo mode** (see below): every page, Settings choice, Overview
+  preference and notification-area switch is reachable and persists, while all
+  device data stays simulated.
 - The app is built as crate version `2.0.0`, and `AppState.app-version` is
   filled from that crate version, so the About section says
   “OpenSCL4 2.0.0”.
@@ -31,8 +34,20 @@ row and the Diagnostics page plumbing (the page itself is new), recorded in
   service with the standard SPP fallback; the session
   (`core/crates/session`) writes the `01 01` state request and parses the
   answer, and writes the measured A3062 `06 81` sound-mode, `03 87` equalizer
-  and remaining-settings frames; **Overview** then shows the connected device's
-  name, code and battery tiles (`src/controller.rs`).
+  and remaining-settings frames. **Overview** then shows the connected device's
+  identity, battery tiles and the blocks supported by its actual state: Sound
+  mode and Equalizer panels plus Controls, Comfort, Sound and effects, Power,
+  and Connections shortcuts (`src/overview.rs`, `src/controller.rs`). The user
+  can reorder or hide supported blocks, choose Minimal/Standard/Full layouts and
+  select per-model quick toggles; the A3062 defaults to LDAC. Choosing which
+  toggles to display changes only UI preferences, while clicking a displayed
+  chip uses the normal device write-and-re-poll path. Quick presets and case are
+  not shown until the core supplies real data for them.
+- Overview layout and per-model quick-toggle selection persist in
+  `%APPDATA%\OpenSCL4\overview-preferences.json`, written atomically through a
+  temporary file and a rename. Its comma-separated block IDs and `!` visibility
+  markers retain the previous desktop/Android layout format; unknown and
+  duplicate IDs are ignored, and device state is never stored in the document.
 - Battery tiles are left/right for the TWS models. Single-battery models show
   one whole-device tile on their own step scale, e.g. a raw `2/10` reads `20 %`.
 - The **Sound mode** page is implemented for the models the core measures a mode
@@ -139,6 +154,25 @@ row and the Diagnostics page plumbing (the page itself is new), recorded in
   which is why the vendored note warns that forgetting this computer ends control
   of the earbuds. The list is A3062-only; the P20i (A3949) never reads or writes a
   `0B` frame and keeps the Connections page without the list.
+- **Demo mode** is available in the Add Device dialog's paired-device step: switching
+  it on replaces the Windows paired-device list with one simulated Space One Pro
+  (A3062, a neutral all-zero placeholder address, name “soundcore Space One Pro · Demo”).
+  Connecting to it needs no pairing, no Bluetooth/RFCOMM link, no device session
+  and no Windows device lookup: the state is parsed from the committed sanitized
+  A3062 capture (`core/data/a3062-state.json`), and an in-process demo worker
+  serves the same event and command channel a real device worker uses, handling
+  every command against that local state, so the UI wiring is the same and no
+  command leaves the process. Sound mode, equalizer presets, custom bands, the
+  settings rows and the dual-connections list update only the simulated state;
+  the app never writes a frame to a device, never looks up a Windows device for
+  it and never produces diagnostics from it. The Diagnostics page is marked
+  unavailable with a demo-mode explanation because there is no radio to probe. My Devices keeps the saved demo card —
+  marked “Demo device · Not connected” while disconnected — and Disconnect /
+  Connect work without hardware; each connect starts from the captured state
+  again, so demo writes do not persist (demo-only behaviour). Demo mode is offered
+  for the Space One Pro only, the one model with a committed demo capture;
+  choosing another model keeps the real paired-device list and says demo data is
+  not available.
 - The **notification-area tray** uses the vendored `ui/tray.slint` component and
   Slint's Windows `SystemTrayIcon`: the OpenSCL4 icon with a tooltip naming the
   device and, while connected, its battery (“OpenSCL4 · soundcore Space One Pro”
@@ -153,8 +187,36 @@ row and the Diagnostics page plumbing (the page itself is new), recorded in
   second start of the executable finds the running instance, asks it to show the
   window and exits, so there is only ever one window and one icon. The Settings
   page's **Desktop and quick access** panel hosts the switches (the icon, the four
-  menu sections, close-to-tray) and a **Quit** button; the choices live in memory
-  for the run and are not persisted.
+  menu sections, close-to-tray) and a **Quit** button. Choices persist in
+  `%APPDATA%\OpenSCL4\desktop-preferences.json`, separately from Overview and
+  profiles. They load before the icon is created; missing fields use defaults,
+  missing/malformed files start safely, and saves use a flushed temporary file
+  and rename.
+- The **Settings** page owns the app's own appearance, language and quick access.
+  **Theme** is Follow system, Light or Dark: Follow system resolves Windows' app
+  mode once the native window exists, keeps re-reading it while it is chosen and
+  follows a system light/dark switch without a restart. **Palette** chooses the
+  Purple, Sage or Rose accent, **Content scale** sets 100 %, 110 %, 125 % or
+  150 % (theme tokens already include it) and **Device color in pictures** draws
+  the current device, every saved card, the Add Device model list and the chosen
+  model as the theme's color, Silver or Black. **App language** offers Follow
+  system plus the 16 bundled languages by their own names; the choice is applied
+  to the running window immediately and a code Slint does not bundle falls back
+  to English instead of failing. **Copy logs** puts the recent application log
+  lines on the Windows clipboard (a clipboard failure is logged, not fatal).
+  Controls the connected device cannot use are not offered: the one-earbud badge
+  needs a TWS pair (the single-battery A3062 never shows it) and the sound-mode
+  view choice needs a device whose core reports the 1–11 scale (the A3062 has
+  only its three modes and no core model exposes that scale yet, so the choice
+  stays hidden). Every choice applies to the running window at once and
+  is saved through the same flushed temporary file and rename into
+  `%APPDATA%\OpenSCL4\desktop-preferences.json`, the one document that also
+  holds the notification-area choices. On the next start the saved theme,
+  palette, content scale, art color, language, badge and tray choices come back;
+  a missing or malformed document starts from the defaults. The bundled
+  translation documents predate the Diagnostics panel and the Demo-mode copy, so
+  those few newer strings are shown in English in every language; the language
+  choice itself is applied to the whole window.
 - The P20i (A3949) equalizer is deliberately deferred in this slice: the
   committed A3949 state carries an equalizer block at body 32..44, but no A3949
   `03 87` write body is verified, so the page stays hidden and no equalizer
@@ -163,30 +225,36 @@ row and the Diagnostics page plumbing (the page itself is new), recorded in
   pages or settings writes: it keeps only Overview and My devices as before.
 - Connecting shows “Connecting…”, and Bluetooth off, not found, timeout and
   unsupported-layout failures each show a readable message instead of a crash.
-  Cancel and Retry are wired. The vendored UI has no control that drops the app's
-  own connection (the dual-connections list disconnects remembered devices, not
-  the app's link); the controller's `disconnect` action, used by the tests,
-  clears the current device and returns to My Devices.
-- The only device writes are the `01 01` state request, the `06 81` sound-mode
-  frame, the `03 87` equalizer frames (a built-in preset, the custom bands, and
-  an applied saved profile's custom curve), the measured one-frame settings
-  writes behind the section pages, and the dual-connections writes (`0B 84` for
-  the setting, `0B 82`/`0B 81`/`0B 83` for a list row); its `0B 01` list request
-  is the only other read. The only app file the shell writes is the saved-profile
-  document above. Windows pairing stays in Windows settings and the app never
-  changes it; **Forget** asks the earbuds themselves to drop a remembered device,
-  which is the un-pairing the vendored note warns about.
+  Cancel and Retry are wired. The connected card in **My devices** has a visible
+  **Disconnect** action: it drops only the app's link, keeps the saved card and
+  returns to My Devices. This is distinct from the dual-connections list, whose
+  Disconnect operates on a device remembered by the earbuds.
+- The only device writes are the read-only `01 01` state request, the `06 81`
+  sound-mode frame, the `03 87` equalizer frames (a built-in preset, the custom
+  bands, and an applied saved profile's custom curve), the measured one-frame
+  settings writes behind the section pages, and the dual-connections writes
+  (`0B 84` for the setting, `0B 82`/`0B 81`/`0B 83` for a list row); its `0B 01`
+  list request is the only other read. In Demo mode these same requests and
+  commands are answered in-process by the demo worker against its simulated
+  state, so no frame is written to a device. The app's persisted files are the
+  saved profiles, Overview preferences and desktop/tray preferences. Windows
+  pairing stays in Windows settings and the app never changes it; **Forget**
+  asks the earbuds themselves to drop a remembered device, which is the
+  un-pairing the vendored note warns about.
 - ANC strength, wind noise, adaptive ANC and the 1-to-11 strength scale are not
-  part of this slice, so the Sound mode page shows only the three mode tiles.
+  part of this slice, so the Sound mode page shows only the three mode tiles. The
+  Settings **Sound modes** view choice is therefore deferred until a core model
+  exposes that 1–11 scale: it is still saved but stays hidden
+  (`app-mode-view-applies` is always false) rather than offering a fake view.
   Legacy migration and HearID are out of scope: their vendored controls keep
   their empty or hidden state, as described above.
 - Tray **Quick presets** stay out of scope: the app has no quick presets, so the
-  vendored panel's preset switch is kept in memory but the menu never shows a
-  preset section (and never says “No presets yet”). The tray does not change the
-  sound mode beyond the three modes the Sound mode page has. The tray choices are
-  not persisted, so a new run starts with the defaults (icon and close-to-tray on,
-  battery/modes/LDAC sections on, presets off), and this slice has no tray on
-  Linux or macOS.
+  vendored panel's preset switch is saved with the other choices but the menu
+  never shows a preset section (and never says “No presets yet”). The tray does
+  not change the sound mode beyond the three modes the Sound mode page has. A
+  new installation starts with icon and close-to-tray on, battery/modes/LDAC
+  sections on and presets off; later runs load the saved choices. This slice has
+  no tray on Linux or macOS.
 - Writing the dual-connections setting or LDAC makes the real A3062 reset its
   Bluetooth links: the write can be acknowledged and the following re-poll or
   list read then hits a closed link, so the page shows the readable “connection
@@ -195,27 +263,88 @@ row and the Diagnostics page plumbing (the page itself is new), recorded in
   **Disconnect** is used on this computer's own row: the earbuds drop the PC link
   the app talks over, the banner says the list could not be re-read, and
   **Retry** reconnects. That is device behaviour, not a crash: every reconnect
-  then read or wrote normally again.
-- The shell keeps the RFCOMM link open between writes rather than polling, so a
-  link that Windows or the device drops while the window sits idle is noticed on
-  the next write: the page shows the readable “connection lost” banner (after
-  the socket timeouts, up to about ten seconds) and **Retry** opens a fresh
-  connection. During the acceptance run this happened twice on the bench while
-  the window was idle between steps; every fresh connection then wrote and
-  re-polled normally.
+  then read or wrote normally again. One user-requested connection makes at most
+  four attempts with short pauses when Windows is still closing the previous
+  RFCOMM link; this is not an automatic reconnect after an idle-link failure.
+- For models with a persistent device worker, 15 seconds of command idle time
+  triggers a read-only `01 01` heartbeat on that same worker. A successful answer
+  changes no setting and emits no synthetic UI update. A failed heartbeat clears
+  the worker, shows **Connection lost** with **Connect again**, and leaves the
+  saved card available; there is deliberately no automatic reconnect. Commands
+  already queued run before the first heartbeat, and Disconnect drops the command
+  channel so no further heartbeat is scheduled.
 - The **Diagnostics** page runs the three read-only probes (`01 01`, `01 03`,
   `01 04`) on the connected device worker, shows each probe's answer as it
   arrives, builds a local ZIP with `manifest.json`, `frames.jsonl` and
   `README.txt`, saves it through the native dialog and opens a prefilled GitHub
   issue. The A3062 serial and Bluetooth addresses are redacted by the core
-  before the archive is written; nothing is uploaded by the app. The page also
-  opens without a device and shows an empty state.
+  before the archive is written, including the state serial inside the
+  manifest's probe responses (not only in `frames.jsonl`); nothing is uploaded
+  by the app. The page also
+  opens without a device and shows an empty state. Its device summary, panels,
+  progress, probe states and metric tiles use the internal UI kit; wide layouts
+  place supporting information in an aside, while narrow layouts stack content
+  and actions in one scrollable column.
 - Pages other than Overview, My Devices, Settings, Diagnostics, Sound mode,
   Equalizer, Sound and effects and the five A3062 device pages still open in
   their placeholder state, which is expected: the A3062 has no case, sleep,
   lights or alarms page and this shell does not implement them.
+- The finished client is **accepted on the real Space One Pro (A3062, firmware
+  04.39)** on Windows: the app connects through Add Device over real RFCOMM (no
+  Demo mode) and the run covered the Overview, every implemented sound and
+  device page, sound mode and equalizer preset/custom writes with their
+  `01 01` re-polls and restores, equalizer profile save/apply plus the import
+  and export roundtrip, one settings write per section page with re-poll and
+  restore, the Settings appearance/language/tray choices and their restart
+  persistence, **Copy logs**, the notification-area icon with its real battery
+  tooltip, close-to-tray and Quit, the three Diagnostics probes with a real
+  **Save ZIP** whose archive carries no serial or Bluetooth address and the
+  prefilled GitHub issue, and the idle heartbeat with the Lost/Retry path. The
+  device settings found on connect were restored and the app's preference
+  documents were put back. The acceptance also found and fixed a redaction
+  defect: a probe's `responseHex` in `manifest.json` still carried the A3062
+  serial; the diagnostics session now masks a state probe response before it is
+  stored/exported.
 
 ## Screenshots
+
+The real-device captures in this section were taken during the earlier RFCOMM
+acceptance slices. The three Demo-mode captures come from the demo-acceptance
+build (ticket 04) run on Windows with no Bluetooth hardware: their device values
+are simulated and the Settings capture predates the 150 % content-scale choice,
+so they document the interface only and are not a hardware-acceptance result. No
+Bluetooth address or serial number appears in any of them.
+
+![Demo mode Overview](demo-overview.png)
+
+The Overview of the **simulated** Space One Pro (A3062) in Demo mode, captured
+from the running app on Windows. The hero names the simulated device
+(“soundcore Space One Pro · Demo”) and shows the capture's battery (20 %), the
+Quick settings panel holds the saved LDAC chip, the Sound mode and Your sound
+panels follow the simulated state, and the four shortcut cards are the saved
+Standard layout. Every value is parsed from the sanitized committed A3062
+capture; no Bluetooth/RFCOMM link or device session is opened, and no command
+leaves the process — the in-process demo worker only serves the simulated state,
+so no frame is written to a device.
+
+![Demo mode Diagnostics](demo-diagnostics.png)
+
+The Diagnostics page after a Demo-mode connect. The banner says “Demo mode cannot
+collect diagnostics. No probes are run and no archive is written.”, **Start
+capture** is disabled, and no **Save ZIP** or **Open GitHub issue** action is
+offered, because a simulated device has no radio to probe. The page still shows
+the device summary it last read (A3062, firmware 04.39, battery 20 %); nothing
+was captured or written.
+
+![Settings](demo-settings.png)
+
+The **Settings** page from the running demo app. Every appearance choice has been
+applied and saved: Light theme (Follow system/Light/Dark works the same way),
+Purple palette, 100 % content scale, As the theme device color, English language,
+the notification-area icon and its sections, and Quick presets off. The
+one-earbud badge switch and the sound-mode view choice are absent because the
+connected A3062 is a single-battery, three-mode device. These choices live in
+`%APPDATA%\OpenSCL4\desktop-preferences.json` and come back after a restart.
 
 ![Tray menu with a connected Space One Pro](tray.png)
 
@@ -367,6 +496,44 @@ the diagnostics cards are one column and no content is clipped horizontally;
 **Start capture** stays reachable by scrolling. This is the adaptive check
 described below.
 
+### Live A3062 acceptance captures (ticket 05, 2026-11-23)
+
+These three captures are from the finished build during the **real-device**
+acceptance run on a paired soundcore Space One Pro (A3062, firmware 04.39,
+battery 30 % during the run), connected over Windows RFCOMM through Add Device
+with Demo mode off. They document the current build's real state; no Bluetooth
+address or serial number is visible. The run behind them is recorded in
+`.scratch/windows-complete/issues/05-live-acceptance.md`.
+
+![Overview with a connected Space One Pro](live-overview.png)
+
+The real **Overview**: the hero shows “SOUNDCORE · A3062”, the device name, the
+connected badge and the single-battery tile at the device's 30 %; Quick settings
+holds the saved LDAC chip; the Sound mode panel reports the device's current
+mode (Normal) and the Your sound panel its profile (Soundcore Signature, 8 bands,
+−12.0…+13.4 dB); the four shortcut cards are the Standard layout. This fills the
+gap of having no A3062 Overview capture from the current shell.
+
+![Equalizer with a connected Space One Pro](live-equalizer.png)
+
+The **Equalizer** page while that device is connected: the 22 catalog preset
+chips with Soundcore Signature selected, the eight editable bands and chart at
+the re-polled device curve, Reset, Save profile, and the **My profiles** panel.
+The acceptance changed presets, typed a custom band, reset, saved/applied a
+profile, and imported/exported the transfer JSON, restoring the preset found on
+connect afterwards.
+
+![Settings with a connected Space One Pro](live-settings.png)
+
+The **Settings** page from the same run, with the real device connected: Light
+theme, Purple palette, 100 % content scale (100/110/125/150 %), As the theme
+device color, English language, the notification-area icon and its sections, and
+Quick presets off. The one-earbud badge switch and the sound-mode view choice
+are absent because the A3062 is a single-battery, three-mode device. The run
+verified these choices apply immediately, survive a quit and relaunch, and that
+the tray icon's tooltip reads “OpenSCL4 · soundcore Space One Pro” over
+“Battery 30 %” while connected.
+
 ## Adaptive layout checks
 
 Every UI change is checked at the real window breakpoints, not only at the
@@ -398,9 +565,9 @@ icon is shown and **Close to notification area** is on; the tray's **Open** item
 (or a left click on the icon) brings the window back, and **Quit** in the tray or
 on the Settings page ends the program and removes the icon. Starting the
 executable again while it runs only asks the running copy to show its window.
-The tray and desktop switches are not persisted: they start at their defaults on
-every run. The app needs the earbuds paired in Windows (pairing itself is done in
-Windows settings) and never changes the pairing.
+The tray and desktop switches are restored from `desktop-preferences.json` on
+the next run. The app needs the earbuds paired in Windows (pairing itself is done
+in Windows settings) and never changes the pairing.
 
 ## License and attribution
 

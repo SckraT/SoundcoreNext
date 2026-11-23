@@ -45,12 +45,14 @@ component DeviceCard inherits Rectangle {
         VerticalLayout {
             alignment: center;
             spacing: 6px;
+            horizontal-stretch: 1;
             Text {
                 text: root.eyebrow;
                 color: Theme.on-sage;
                 font-size: 10px;
                 font-weight: 600;
                 letter-spacing: 1.4px;
+                overflow: elide;
             }
             Text {
                 text: root.title;
@@ -112,19 +114,27 @@ component Tip inherits HorizontalLayout {
     in property <image> icon;
     in property <string> title;
     in property <string> text;
-    spacing: 11px;
-    Icon {
-        source: root.icon;
-        tint: Theme.primary;
-        width: 17px;
-        height: 17px;
+    spacing: Theme.space-3;
+    cross-axis-alignment: start;
+    Rectangle {
+        width: Theme.icon-large;
+        height: Theme.icon-large;
+        Icon {
+            source: root.icon;
+            tint: Theme.primary;
+            width: Theme.icon-medium;
+            height: Theme.icon-medium;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
     }
     VerticalLayout {
         horizontal-stretch: 1;
+        spacing: Theme.space-1;
         Text {
             text: root.title;
             color: Theme.text;
-            font-size: Theme.font-caption;
+            font-size: Theme.font-small;
             font-weight: 600;
         }
         Text {

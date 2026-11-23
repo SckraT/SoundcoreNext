@@ -86,23 +86,25 @@ export component AppWindow inherits Window {
                         text: @tr("Reconnecting:") + " " + (AppState.connection-reason == "" ? @tr("changes are paused until the device is back.") : AppState.connection-reason);
                     }
                     if AppState.page == Page.overview && (AppState.connection == Connection.connected || AppState.connection == Connection.recovering): OverviewPage {
-                        wide: root.width - sidebar.width > 900px;
+                        wide: root.width - sidebar.width > 900px * Theme.content-scale;
                     }
                     if AppState.page == Page.equalizer && (AppState.connection == Connection.connected || AppState.connection == Connection.recovering): EqualizerPage {
-                        wide: root.width - sidebar.width > 900px;
+                        wide: root.width - sidebar.width > 900px * Theme.content-scale;
                     }
                     if AppState.page == Page.presets && (AppState.connection == Connection.connected || AppState.connection == Connection.recovering): PresetsPage {
-                        wide: root.width - sidebar.width > 900px;
+                        wide: root.width - sidebar.width > 900px * Theme.content-scale;
                     }
                     if root.device-page && (AppState.connection == Connection.connected || AppState.connection == Connection.recovering) && !root.own-page: SectionPage {
                         page: AppState.page;
-                        wide: root.width - sidebar.width > 860px;
+                        // The aside is a second column, so it needs the same scaled
+                        // room as the Overview: below this width the page stacks.
+                        wide: root.width - sidebar.width > 860px * Theme.content-scale;
                     }
                     if AppState.page == Page.settings: SettingsPage {
-                        wide: root.width - sidebar.width > 900px;
+                        wide: root.width - sidebar.width > 900px * Theme.content-scale;
                     }
                     if AppState.page == Page.diagnostics: DiagnosticsPage {
-                        wide: root.width - sidebar.width > 900px;
+                        wide: root.width - sidebar.width > 900px * Theme.content-scale;
                     }
                 }
             }

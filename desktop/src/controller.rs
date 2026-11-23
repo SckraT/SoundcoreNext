@@ -27,8 +27,9 @@ use soundcore_diagnostics::{
 };
 use soundcore_models::{
     A3062Settings, AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, ButtonAction,
-    DbLimit, DecibelReadingRefreshRate, DeviceModel, DeviceState, DualConnectionDevice,
-    EqualizerPreset, EqualizerState, SettingCommand, SoundMode, VISIBLE_EQ_BANDS,
+    CUSTOM_EQUALIZER_PRESET_ID, DbLimit, DecibelReadingRefreshRate, DeviceModel, DeviceState,
+    DualConnectionDevice, EqualizerPreset, EqualizerState, FIXED_EQ_BANDS, LimitHighVolume,
+    SettingCommand, SoundMode, VISIBLE_EQ_BANDS,
 };
 use soundcore_profiles::{
     EqualizerProfile, ImportPreview, ProfileSet, export_json, preview_import,
@@ -38,6 +39,11 @@ use soundcore_session::{DeviceSession, SessionError, Transport};
 use windows::core::GUID;
 
 use crate::catalog_adapter::{self, Chip};
+use crate::demo;
+use crate::overview::{self, OverviewBlock, OverviewLayout, OverviewPreferences, OverviewPreset};
+use crate::settings::{
+    self, Accent, AppTheme, ContentScale, DesktopSettings, DeviceColor, SoundModeView,
+};
 use crate::single_instance::ShowRequest;
 use crate::transport_windows::{
     BluetoothError, VENDOR_SERVICE_PREFIX, WindowsRfcommTransport, format_mac, installed_services,
@@ -46,8 +52,9 @@ use crate::transport_windows::{
 use crate::tray::{TrayActions, TrayContent, TraySettings, TrayShell};
 use crate::{
     Actions, AppState, AppWindow, Battery, Connection, DeviceCard, DiagnosticProbe, DiagnosticStep,
-    EqBand, EqLine, EqProfile, FailureKind, ImportItem, ModeOption, Page, PairedOption, PanelKind,
-    RowKind, SettingRow, SettingsPanel, SystemPage, ToastKind, TransferNote,
+    EqBand, EqLine, EqProfile, FailureKind, ImportItem, ModeOption, ModelOption, Page,
+    PairedOption, PaletteChoice, PanelKind, RowKind, SettingRow, SettingsPanel, Strings,
+    SystemPage, Theme, ToastKind, TransferNote,
 };
 
 /// The model chosen in the Add Device dialog: what the catalog card shows plus
@@ -256,6 +263,30 @@ pub fn app_data_profiles_path(app_data: &Path) -> PathBuf {
 /// roaming app-data directory the spec names.
 pub fn default_profiles_path() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|app_data| app_data_profiles_path(Path::new(&app_data)))
+}
+
+/// The Overview's UI-only layout and quick-toggle choices. Like profiles, the
+/// document is omitted when Windows provides no roaming app-data directory.
+pub const OVERVIEW_PREFERENCES_FILE_NAME: &str = "overview-preferences.json";
+
+pub fn default_overview_preferences_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|app_data| {
+        Path::new(&app_data)
+            .join(APP_DATA_DIR_NAME)
+            .join(OVERVIEW_PREFERENCES_FILE_NAME)
+    })
+}
+
+/// Notification-area and close-button choices. Kept separate from the Overview
+/// document so one UI subsystem cannot invalidate the other's preferences.
+pub const DESKTOP_PREFERENCES_FILE_NAME: &str = "desktop-preferences.json";
+
+pub fn default_desktop_preferences_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|app_data| {
+        Path::new(&app_data)
+            .join(APP_DATA_DIR_NAME)
+            .join(DESKTOP_PREFERENCES_FILE_NAME)
+    })
 }
 
 /// The app's own directory, `%APPDATA%\OpenSCL4`, which also names this app's
@@ -735,6 +766,8 @@ pub struct EqualizerDisplay {
     pub lines: Vec<EqLine>,
     pub chart_line: String,
     pub chart_area: String,
+    /// The same bands in the Overview curve's 600×100 path box.
+    pub overview_curve: String,
     /// The name of the current built-in preset, empty for custom bands.
     pub name: String,
 }
@@ -752,8 +785,9 @@ impl EqualizerDisplay {
             .is_some();
         let presets = preset_options(model);
         let bands = equalizer_bands(equalizer);
-        let (chart_line, chart_area) =
-            equalizer_chart(&equalizer_values(equalizer), EQ_MIN, EQ_MAX);
+        let values = equalizer_values(equalizer);
+        let (chart_line, chart_area) = equalizer_chart(&values, EQ_MIN, EQ_MAX);
+        let overview_curve = profile_curve(&values);
         let built_in = equalizer.preset();
         Self {
             available: true,
@@ -770,6 +804,7 @@ impl EqualizerDisplay {
             lines: equalizer_lines(),
             chart_line,
             chart_area,
+            overview_curve,
             name: built_in
                 .map(|preset| preset.name.to_owned())
                 .unwrap_or_default(),
@@ -833,6 +868,7 @@ impl EqPage for AppState<'_> {
         ))));
         self.set_eq_chart_line(chart_line.into());
         self.set_eq_chart_area(chart_area.into());
+        self.set_eq_curve(profile_curve(values).into());
     }
 
     fn show_reported_curve(&self, equalizer: &EqualizerState) {
@@ -1609,6 +1645,16 @@ pub fn selected_model(code: &str) -> Option<SelectedModel> {
 /// How often the UI thread drains the worker channel.
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+/// How often Follow system re-reads the Windows app mode. Two seconds is quick
+/// enough for a settings change to feel immediate and light enough to leave a
+/// hidden window idle.
+const SYSTEM_THEME_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// An idle connected worker asks for state this often. The read-only request
+/// detects a dropped link without waiting for the user's next setting change;
+/// it never reconnects automatically and never changes a device setting.
+const DEVICE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
 /// Everything a worker needs to connect: the address, the catalog code the
 /// vendor service derives from, and the state parser. It holds no Slint
 /// handles, so it can cross the thread boundary.
@@ -1676,6 +1722,11 @@ enum Event {
     Connected {
         attempt: u64,
         outcome: ConnectOutcome,
+    },
+    /// An idle heartbeat failed. The worker has ended; Retry opens a new link.
+    ConnectionLost {
+        attempt: u64,
+        failure: ConnectFailure,
     },
     /// A device worker finished a sound-mode change and re-read the state.
     ModeChanged {
@@ -1756,6 +1807,11 @@ struct Inner {
     enumeration: Cell<u64>,
     /// The newest connect attempt; results of older attempts are stale.
     connect: Cell<u64>,
+    /// Whether the current connection is the simulated demo device. A demo
+    /// connection has no transport, so the Diagnostics page stays unavailable
+    /// and no RFCOMM path may be reached; its in-process worker only serves the
+    /// local simulated state, so no command leaves the process.
+    demo: Cell<bool>,
     /// Cancels the in-flight connect attempt without waiting for it.
     cancel: RefCell<Option<Arc<AtomicBool>>>,
     /// The command channel of the connected device worker; dropping it stops the
@@ -1788,6 +1844,10 @@ struct Inner {
     /// The document the profiles are persisted to; `None` when Windows gives no
     /// app-data directory, in which case the profiles stay in memory only.
     profiles_path: Option<PathBuf>,
+    /// Overview block order and per-model quick-toggle choices. These are UI
+    /// preferences only; a chooser click never writes to the device.
+    overview_preferences: RefCell<OverviewPreferences>,
+    overview_preferences_path: Option<PathBuf>,
     /// The text of the import the dialog is previewing, kept so `eq-import` can
     /// re-validate it before anything is written; `None` when no preview is
     /// open. UI thread only.
@@ -1809,8 +1869,20 @@ struct Inner {
     /// The notification-area icon. `None` in tests, which never create a real
     /// icon; the desktop start fills it before the event loop runs.
     tray: RefCell<Option<TrayShell>>,
-    /// The Settings page's tray choices, in memory only.
-    tray_settings: RefCell<TraySettings>,
+    /// The Settings page's persisted appearance, language and tray choices. The
+    /// tray code reads [`DesktopSettings::tray`]; the other fields are applied to
+    /// the window and its device art.
+    settings: RefCell<DesktopSettings>,
+    /// The document `settings` is saved to; `None` in tests and when Windows
+    /// provides no roaming app-data directory.
+    settings_path: Option<PathBuf>,
+    /// The dark/light appearance last applied to the window. Follow system keeps
+    /// it so its poll repaints only when Windows actually changed mode.
+    system_dark: Cell<Option<bool>>,
+    /// The Follow-system poll, running only while the saved theme is
+    /// [`AppTheme::System`] and once the native window exists. Kept here so the
+    /// poll lives exactly as long as the controller does.
+    theme_poll: RefCell<Option<Timer>>,
     /// What the tray currently shows, kept on the UI thread so the icon can be
     /// created again with the last content and so the tests can read it.
     tray_content: RefCell<TrayContent>,
@@ -1850,6 +1922,37 @@ impl Inner {
             .borrow()
             .as_ref()
             .is_some_and(TrayShell::available)
+    }
+
+    /// Keeps the Follow-system appearance current. While the saved theme is
+    /// [`AppTheme::System`] a repeated timer re-reads the real Windows app mode
+    /// and repaints only when it changed; choosing Light or Dark stops the timer,
+    /// and a missing native window starts none at all. Safe to call repeatedly.
+    fn sync_theme_poll(self: &Rc<Self>) {
+        if self.settings.borrow().theme != AppTheme::System {
+            // Dropping the timer cancels it, so no poll outlives the choice.
+            self.theme_poll.borrow_mut().take();
+            return;
+        }
+        if self.theme_poll.borrow().is_some() || self.ui.upgrade().is_none() {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let timer = Timer::default();
+        timer.start(TimerMode::Repeated, SYSTEM_THEME_POLL_INTERVAL, move || {
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            if inner.settings.borrow().theme != AppTheme::System {
+                return;
+            }
+            let dark = settings::system_prefers_dark();
+            if inner.system_dark.get() == Some(dark) {
+                return;
+            }
+            apply_theme(&inner, dark);
+        });
+        *self.theme_poll.borrow_mut() = Some(timer);
     }
 
     /// Enumerates paired devices on a worker thread for a model, or for every
@@ -1902,6 +2005,37 @@ impl Inner {
                 attempt,
                 outcome: ConnectOutcome::Failed(ConnectFailure::Transport(
                     "could not start the Bluetooth worker".into(),
+                )),
+            });
+        }
+    }
+
+    /// Serves the simulated device on a worker thread: the same event channel,
+    /// command channel and attempt number a real connection uses, but with no
+    /// transport, no Windows worker and no device I/O. The worker owns the only
+    /// copy of the simulated state, so a later connect starts from the fixture
+    /// again.
+    fn request_demo(&self, model: DeviceModel, state: DeviceState) {
+        let attempt = self.connect.get() + 1;
+        self.connect.set(attempt);
+        self.mode_change.set(0);
+        self.preset_change.set(0);
+        self.curve_change.set(0);
+        self.setting_change.set(0);
+        *self.cancel.borrow_mut() = None;
+        let (commands, command_receiver) = mpsc::channel();
+        // Replacing the channel stops a worker of an older attempt.
+        *self.commands.borrow_mut() = Some(commands);
+        let sender = self.sender.clone();
+        let spawned = std::thread::Builder::new()
+            .name("demo-device".into())
+            .spawn(move || serve_demo_device(model, state, attempt, sender, command_receiver));
+        if spawned.is_err() {
+            self.stop_worker();
+            let _ = self.sender.send(Event::Connected {
+                attempt,
+                outcome: ConnectOutcome::Failed(ConnectFailure::Transport(
+                    "could not start the demo device worker".into(),
                 )),
             });
         }
@@ -1974,6 +2108,10 @@ impl Inner {
 pub struct Controller {
     /// The polling timer; dropping it stops the polling.
     _timer: Timer,
+    /// The state every action and the Follow-system poll work on. Retained so
+    /// [`Self::shown`] can apply the saved appearance after the native window
+    /// exists.
+    inner: Rc<Inner>,
 }
 
 impl Controller {
@@ -1996,6 +2134,18 @@ impl Controller {
                 ProfileSet::new()
             }
         };
+        let overview_preferences_path = default_overview_preferences_path();
+        let overview_preferences = overview_preferences_path
+            .as_deref()
+            .map(overview::load_preferences)
+            .unwrap_or_default();
+        let settings_path = default_desktop_preferences_path();
+        let desktop_settings = settings_path
+            .as_deref()
+            .map(settings::load_settings)
+            .unwrap_or_default();
+        // The tray shell only needs its own section, which is `Copy`.
+        let tray_settings = desktop_settings.tray;
         let (sender, receiver) = mpsc::channel();
         let inner = Rc::new(Inner {
             ui: ui.as_weak(),
@@ -2003,6 +2153,7 @@ impl Controller {
             receiver: RefCell::new(receiver),
             enumeration: Cell::new(0),
             connect: Cell::new(0),
+            demo: Cell::new(false),
             cancel: RefCell::new(None),
             commands: RefCell::new(None),
             mode_change: Cell::new(0),
@@ -2014,6 +2165,8 @@ impl Controller {
             dual_devices: RefCell::new(Vec::new()),
             profiles: RefCell::new(profiles),
             profiles_path,
+            overview_preferences: RefCell::new(overview_preferences),
+            overview_preferences_path,
             import_text: RefCell::new(None),
             transfer_io: Arc::new(NativeTransferIo),
             picking_import_file: Cell::new(false),
@@ -2021,7 +2174,10 @@ impl Controller {
             picking_export_file: Cell::new(false),
             show_request,
             tray: RefCell::new(None),
-            tray_settings: RefCell::new(TraySettings::default()),
+            settings: RefCell::new(desktop_settings),
+            settings_path,
+            system_dark: Cell::new(None),
+            theme_poll: RefCell::new(None),
             tray_content: RefCell::new(TrayContent::default()),
             diagnostic_probes: RefCell::new(Vec::new()),
             diagnostic_session: RefCell::new(None),
@@ -2030,12 +2186,11 @@ impl Controller {
             diagnostic_note: RefCell::new(String::new()),
             diagnostic_saving: Cell::new(false),
         });
-        initial_state(ui);
-        let shell = TrayShell::new(ui, tray_actions(&inner));
+        initial_state(ui, &inner);
+        let shell = TrayShell::new(ui, tray_actions(&inner), tray_settings);
         *inner.tray.borrow_mut() = Some(shell);
         let state = ui.global::<AppState>();
-        let tray_settings = *inner.tray_settings.borrow();
-        show_tray_settings(&state, &tray_settings, inner.tray_available());
+        render_settings(&state, &inner);
         refresh_tray(&inner, &state);
         inner.refresh_saved_profiles(&state);
         wire_actions(ui, &inner);
@@ -2044,13 +2199,154 @@ impl Controller {
         timer.start(TimerMode::Repeated, EVENT_POLL_INTERVAL, move || {
             drain_events(&polling);
         });
-        Self { _timer: timer }
+        Self {
+            _timer: timer,
+            inner,
+        }
     }
+
+    /// Called once the native window exists, which is when the saved appearance
+    /// and language are applied to the running window.
+    ///
+    /// The theme is resolved first, because Follow system reads the real Windows
+    /// app mode, and the language afterwards, because selecting a translation
+    /// re-renders the Settings fields. Only then does Follow system start its
+    /// poll; choosing Light or Dark later stops it again.
+    pub fn shown(&self) {
+        if self.inner.ui.upgrade().is_none() {
+            return;
+        }
+        apply_theme(&self.inner, saved_dark(&self.inner));
+        apply_language(&self.inner);
+        self.inner.sync_theme_poll();
+    }
+}
+
+fn clear_overview(state: &AppState<'_>) {
+    state.set_overview_rows(ModelRc::default());
+    state.set_layout_blocks(ModelRc::default());
+    state.set_layout_preset(-1);
+    state.set_quick_toggles(ModelRc::default());
+    state.set_all_toggles(ModelRc::default());
+    state.set_presets(ModelRc::default());
+    state.set_editing_layout(false);
+    state.set_choosing_toggles(false);
+}
+
+/// Rebuilds every Overview model from the last reported device state. The
+/// preset list stays empty until the core has a real quick-preset subsystem.
+fn show_overview(state: &AppState<'_>, inner: &Rc<Inner>) {
+    let model_code = state.get_device_code().to_string();
+    let (quick_toggles, all_toggles, rows, layout_blocks, preset) = {
+        let device_ref = inner.device.borrow();
+        let Some(device) = device_ref.as_deref() else {
+            drop(device_ref);
+            clear_overview(state);
+            return;
+        };
+        let preferences = inner.overview_preferences.borrow();
+        let layout = preferences.layout();
+        let stored = preferences
+            .quick_toggles
+            .get(&model_code)
+            .map(Vec::as_slice);
+        let (quick_toggles, all_toggles) = overview::quick_toggles(device, stored);
+        let rows = overview::rows(&layout, device);
+        let layout_blocks = overview::layout_blocks(&layout, device);
+        let preset = layout.preset_index();
+        (quick_toggles, all_toggles, rows, layout_blocks, preset)
+    };
+
+    state.set_quick_toggles(ModelRc::new(VecModel::from(quick_toggles)));
+    state.set_all_toggles(ModelRc::new(VecModel::from(all_toggles)));
+    state.set_overview_rows(ModelRc::new(VecModel::from(rows)));
+    state.set_layout_blocks(ModelRc::new(VecModel::from(layout_blocks)));
+    state.set_layout_preset(preset);
+    state.set_presets(ModelRc::default());
+}
+
+fn persist_overview_preferences(inner: &Rc<Inner>) {
+    let Some(path) = inner.overview_preferences_path.as_deref() else {
+        return;
+    };
+    let result = overview::save_preferences(path, &inner.overview_preferences.borrow());
+    if let Err(error) = result {
+        eprintln!(
+            "OpenSCL4: could not save overview preferences ({}): {error}",
+            path.display()
+        );
+    }
+}
+
+fn edit_overview_layout(window: &AppWindow, inner: &Rc<Inner>) {
+    if inner.device.borrow().is_none() {
+        return;
+    }
+    let state = window.global::<AppState>();
+    show_overview(&state, inner);
+    state.set_editing_layout(true);
+}
+
+/// Applies one editor action against the supported-only rows shown by the
+/// dialog, then persists the shared layout string and rerenders the page.
+fn change_overview_layout(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    change: impl FnOnce(&OverviewLayout, &[OverviewBlock]) -> Option<OverviewLayout>,
+) {
+    let changed = {
+        let device = inner.device.borrow();
+        let Some(device) = device.as_deref() else {
+            return;
+        };
+        let mut preferences = inner.overview_preferences.borrow_mut();
+        let layout = preferences.layout();
+        let listed = overview::listed_blocks(&layout, device);
+        if let Some(changed) = change(&layout, &listed) {
+            preferences.overview_layout = Some(changed.serialize());
+            true
+        } else {
+            false
+        }
+    };
+    if changed {
+        persist_overview_preferences(inner);
+    }
+    show_overview(&window.global::<AppState>(), inner);
+}
+
+/// Chooses a visible quick-toggle chip. This function deliberately has no
+/// device-command path: only a chip's own `set-toggle` click writes a setting.
+fn choose_overview_toggle(window: &AppWindow, inner: &Rc<Inner>, id: &str, selected: bool) {
+    {
+        let device = inner.device.borrow();
+        let Some(device) = device.as_deref() else {
+            return;
+        };
+        let available = overview::available_toggle_ids(device);
+        if !available.contains(&id) {
+            return;
+        }
+        let model_code = window.global::<AppState>().get_device_code().to_string();
+        let mut preferences = inner.overview_preferences.borrow_mut();
+        let stored = preferences
+            .quick_toggles
+            .get(&model_code)
+            .map(Vec::as_slice);
+        let mut ids = overview::quick_toggle_ids(stored, &available);
+        ids.retain(|candidate| candidate != id);
+        if selected {
+            ids.push(id.to_owned());
+        }
+        preferences.quick_toggles.insert(model_code, ids);
+    }
+    persist_overview_preferences(inner);
+    show_overview(&window.global::<AppState>(), inner);
 }
 
 /// The shell's never-changing state: version, Windows wording, and the pages
 /// this MVP deliberately leaves empty.
-fn initial_state(ui: &AppWindow) {
+fn initial_state(ui: &AppWindow, inner: &Rc<Inner>) {
     let state = ui.global::<AppState>();
     state.set_app_version(crate::app_version().into());
     // The vendored shell keeps its Windows wording; the deep links become
@@ -2063,12 +2359,10 @@ fn initial_state(ui: &AppWindow) {
     show_equalizer(&state, &EqualizerDisplay::default());
     reset_diagnostics(&state);
     clear_section_pages(&state);
-    state.set_overview_rows(ModelRc::default());
-    state.set_quick_toggles(ModelRc::default());
-    state.set_all_toggles(ModelRc::default());
+    clear_overview(&state);
     state.set_page(Page::Devices);
     state.set_connection(Connection::NoDevice);
-    reset_models(&state);
+    reset_models(&state, paint_black(inner));
 }
 
 /// Answers every action this MVP needs; the others stay unwired and disabled by
@@ -2093,6 +2387,7 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
                     &window.global::<AppState>(),
                     query.as_str(),
                     Chip::from_index(kind),
+                    paint_black(&inner),
                 );
             }
         }
@@ -2112,6 +2407,15 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         move || {
             if let Some(window) = inner.ui.upgrade() {
                 refresh_paired(&window, &inner);
+            }
+        }
+    });
+
+    actions.on_set_demo({
+        let inner = Rc::clone(inner);
+        move |on| {
+            if let Some(window) = inner.ui.upgrade() {
+                set_demo(&window, &inner, on);
             }
         }
     });
@@ -2175,6 +2479,60 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         move |setting_id, on| {
             if let Some(window) = inner.ui.upgrade() {
                 set_toggle(&window, &inner, setting_id.as_str(), on);
+            }
+        }
+    });
+
+    actions.on_choose_toggle({
+        let inner = Rc::clone(inner);
+        move |id, selected| {
+            if let Some(window) = inner.ui.upgrade() {
+                choose_overview_toggle(&window, &inner, id.as_str(), selected);
+            }
+        }
+    });
+
+    actions.on_edit_layout({
+        let inner = Rc::clone(inner);
+        move || {
+            if let Some(window) = inner.ui.upgrade() {
+                edit_overview_layout(&window, &inner);
+            }
+        }
+    });
+
+    actions.on_layout_visible({
+        let inner = Rc::clone(inner);
+        move |index, visible| {
+            if let Some(window) = inner.ui.upgrade() {
+                change_overview_layout(&window, &inner, |layout, listed| {
+                    let block = *listed.get(usize::try_from(index).ok()?)?;
+                    Some(layout.with_visibility(block, visible))
+                });
+            }
+        }
+    });
+
+    actions.on_layout_move({
+        let inner = Rc::clone(inner);
+        move |index, delta| {
+            if let Some(window) = inner.ui.upgrade() {
+                change_overview_layout(&window, &inner, |layout, listed| {
+                    let from = usize::try_from(index).ok()?;
+                    let to = usize::try_from(index.checked_add(delta)?).ok()?;
+                    layout.moved_listed(listed, from, to)
+                });
+            }
+        }
+    });
+
+    actions.on_layout_use({
+        let inner = Rc::clone(inner);
+        move |preset| {
+            if let Some(window) = inner.ui.upgrade() {
+                change_overview_layout(&window, &inner, |_, _| {
+                    OverviewPreset::from_index(preset).map(OverviewLayout::of)
+                });
             }
         }
     });
@@ -2377,6 +2735,110 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         }
     });
 
+    // The Settings page's appearance, language and Copy logs controls. Each
+    // handler validates the index first, so a stale or hand-written value changes
+    // nothing, then saves the whole document and applies the choice at once.
+    actions.on_set_app_theme({
+        let inner = Rc::clone(inner);
+        move |index| {
+            let Some(theme) = AppTheme::from_index(index) else {
+                return;
+            };
+            inner.settings.borrow_mut().theme = theme;
+            persist_settings(&inner);
+            apply_theme(&inner, saved_dark(&inner));
+            // Follow system runs its poll only while it is the chosen theme.
+            inner.sync_theme_poll();
+            rerender_settings(&inner);
+        }
+    });
+
+    actions.on_set_palette({
+        let inner = Rc::clone(inner);
+        move |index| {
+            let Some(accent) = Accent::from_index(index) else {
+                return;
+            };
+            inner.settings.borrow_mut().accent = accent;
+            persist_settings(&inner);
+            apply_theme(&inner, saved_dark(&inner));
+            rerender_settings(&inner);
+        }
+    });
+
+    actions.on_set_content_scale({
+        let inner = Rc::clone(inner);
+        move |index| {
+            let Some(content_scale) = ContentScale::from_index(index) else {
+                return;
+            };
+            inner.settings.borrow_mut().content_scale = content_scale;
+            persist_settings(&inner);
+            apply_theme(&inner, saved_dark(&inner));
+            rerender_settings(&inner);
+        }
+    });
+
+    actions.on_set_device_color({
+        let inner = Rc::clone(inner);
+        move |index| {
+            let Some(device_color) = DeviceColor::from_index(index) else {
+                return;
+            };
+            inner.settings.borrow_mut().device_color = device_color;
+            persist_settings(&inner);
+            apply_theme(&inner, saved_dark(&inner));
+            rerender_settings(&inner);
+        }
+    });
+
+    actions.on_set_mode_view({
+        let inner = Rc::clone(inner);
+        move |index| {
+            let Some(sound_mode_view) = SoundModeView::from_index(index) else {
+                return;
+            };
+            inner.settings.borrow_mut().sound_mode_view = sound_mode_view;
+            persist_settings(&inner);
+            rerender_settings(&inner);
+        }
+    });
+
+    actions.on_set_badge({
+        let inner = Rc::clone(inner);
+        move |on| {
+            inner.settings.borrow_mut().one_earbud_badge = on;
+            persist_settings(&inner);
+            rerender_settings(&inner);
+        }
+    });
+
+    actions.on_set_language({
+        let inner = Rc::clone(inner);
+        move |index| {
+            let Some(language) = settings::language_from_index(index) else {
+                return;
+            };
+            inner.settings.borrow_mut().language =
+                language.map(|language| language.code.to_owned());
+            persist_settings(&inner);
+            apply_language(&inner);
+        }
+    });
+
+    actions.on_copy_logs({
+        let inner = Rc::clone(inner);
+        move || {
+            let Some(window) = inner.ui.upgrade() else {
+                return;
+            };
+            let state = window.global::<AppState>();
+            if copy_logs(&state, inner.transfer_io.as_ref()) {
+                clear_transfer_toast_after_a_while(&window);
+            }
+        }
+    });
+
     actions.on_set_tray({
         let inner = Rc::clone(inner);
         move |on| {
@@ -2551,7 +3013,7 @@ fn show_tray_settings(state: &AppState<'_>, settings: &TraySettings, available: 
 /// read. Called on every change the menu reflects: the connect outcome and its
 /// re-polls, a sound-mode or settings write, and a tray setting toggle.
 fn refresh_tray(inner: &Rc<Inner>, state: &AppState<'_>) {
-    let settings = *inner.tray_settings.borrow();
+    let settings = inner.settings.borrow().tray;
     let device = inner.device.borrow();
     let content = TrayContent::from_state(state, device.as_deref(), &settings);
     *inner.tray_content.borrow_mut() = content.clone();
@@ -2564,14 +3026,234 @@ fn refresh_tray(inner: &Rc<Inner>, state: &AppState<'_>) {
 /// whether the icon is hosted on this platform.
 fn show_tray_choices(window: &AppWindow, inner: &Rc<Inner>) {
     let state = window.global::<AppState>();
-    let settings = *inner.tray_settings.borrow();
+    let settings = inner.settings.borrow().tray;
     show_tray_settings(&state, &settings, inner.tray_available());
 }
 
+/// Fills the Settings page from the saved choices: every control's index, the
+/// language names, the one-earbud badge switch, and the notification-area
+/// fields.
+///
+/// The sound-mode view is still mapped from the document, but
+/// `app-mode-view-applies` stays false: the clean core has no 1–11 modes-scale
+/// control, so no connected device can use that view.
+fn render_settings(state: &AppState<'_>, inner: &Rc<Inner>) {
+    let settings = inner.settings.borrow().clone();
+    state.set_app_theme(settings.theme.index());
+    state.set_app_palette(settings.accent.index());
+    state.set_app_content_scale(settings.content_scale.index());
+    state.set_app_device_color(settings.device_color.index());
+    state.set_app_mode_view(settings.sound_mode_view.index());
+    state.set_app_mode_view_applies(false);
+    state.set_one_earbud_badge_applies(one_earbud_badge_applies(inner));
+    state.set_app_language(settings::language_index(settings.language.as_deref()));
+    state.set_language_names(ModelRc::new(VecModel::from(language_names(
+        system_language_word(inner),
+    ))));
+    state.set_show_one_earbud_badge(settings.one_earbud_badge);
+    show_tray_settings(state, &settings.tray, inner.tray_available());
+}
+
+/// Re-renders the Settings page, when its window still exists. A settings
+/// callback can run while the window is being torn down, so this is the guarded
+/// form of a plain [`render_settings`] call.
+fn rerender_settings(inner: &Rc<Inner>) {
+    if let Some(window) = inner.ui.upgrade() {
+        render_settings(&window.global::<AppState>(), inner);
+    }
+}
+
+/// The translated "Follow system" label for the first language choice, in the
+/// language the window currently shows.
+fn system_language_word(inner: &Rc<Inner>) -> SharedString {
+    inner
+        .ui
+        .upgrade()
+        .map(|window| window.global::<Strings>().get_system_language())
+        .unwrap_or_default()
+}
+
+/// The App language Select's model: Follow system in the window's language,
+/// then every bundled language by its own name.
+fn language_names(system: SharedString) -> Vec<SharedString> {
+    let mut names = Vec::with_capacity(settings::LANGUAGES.len() + 1);
+    names.push(system);
+    names.extend(
+        settings::LANGUAGES
+            .iter()
+            .map(|language| SharedString::from(language.name)),
+    );
+    names
+}
+
+/// The Slint palette a saved accent names.
+fn palette_choice(accent: Accent) -> PaletteChoice {
+    match accent {
+        Accent::Purple => PaletteChoice::Purple,
+        Accent::Sage => PaletteChoice::Sage,
+        Accent::Rose => PaletteChoice::Rose,
+    }
+}
+
+/// Whether the one-earbud badge can be offered: only for a connected pair of
+/// earbuds, the only layout that can be down to one earbud. A single-battery
+/// model such as the A3062 has no separate earbuds to count.
+fn one_earbud_badge_applies(inner: &Rc<Inner>) -> bool {
+    inner
+        .device
+        .borrow()
+        .as_ref()
+        .is_some_and(|device| device.battery.is_some())
+}
+
+/// The dark/light appearance the saved settings ask for, reading the real
+/// Windows app mode for Follow system.
+fn saved_dark(inner: &Rc<Inner>) -> bool {
+    let theme = inner.settings.borrow().theme;
+    match theme {
+        AppTheme::System => settings::system_prefers_dark(),
+        AppTheme::Light | AppTheme::Dark => theme.is_dark(false),
+    }
+}
+
+/// Whether device pictures are currently black. The appearance applied last
+/// wins, so repainting after a filter click never reads the registry.
+fn paint_black(inner: &Rc<Inner>) -> bool {
+    let dark = inner.system_dark.get().unwrap_or_else(|| saved_dark(inner));
+    inner.settings.borrow().device_color.is_black(dark)
+}
+
+/// Applies a resolved light/dark appearance to the window: the theme colors, the
+/// chosen palette and content scale, and the device art in the selected color.
+///
+/// `dark` is already resolved, so Follow system is read once by the caller and
+/// every control that changes the appearance uses the same value.
+fn apply_theme(inner: &Rc<Inner>, dark: bool) {
+    inner.system_dark.set(Some(dark));
+    let Some(window) = inner.ui.upgrade() else {
+        return;
+    };
+    let settings = inner.settings.borrow().clone();
+    let theme = window.global::<Theme>();
+    theme.set_dark(dark);
+    theme.set_palette(palette_choice(settings.accent));
+    theme.set_content_scale(settings.content_scale.factor());
+    paint_device_art(
+        &window.global::<AppState>(),
+        settings.device_color.is_black(dark),
+    );
+}
+
+/// The embedded illustration of a catalog code in the chosen color, or `None`
+/// when the catalog lists no such model, in which case the existing picture is
+/// kept.
+fn art_for_code(code: &str, black: bool) -> Option<slint::Image> {
+    catalog_adapter::form_factor(code)
+        .map(|form_factor| catalog_adapter::art_in_color(form_factor, black))
+}
+
+/// A saved card with its device art in the chosen color; a card of a model the
+/// catalog does not know keeps the picture it has.
+fn repaint_card(card: DeviceCard, black: bool) -> DeviceCard {
+    match art_for_code(card.code.as_str(), black) {
+        Some(art) => DeviceCard { art, ..card },
+        None => card,
+    }
+}
+
+/// A model list row with its device art in the chosen color.
+fn repaint_model(model: ModelOption, black: bool) -> ModelOption {
+    match art_for_code(model.code.as_str(), black) {
+        Some(art) => ModelOption { art, ..model },
+        None => model,
+    }
+}
+
+/// Repaints every device picture the window shows: the current device, the saved
+/// cards, the Add Device model list and the chosen model's confirmation picture.
+/// With no model the default art stays.
+fn paint_device_art(state: &AppState<'_>, black: bool) {
+    if let Some(art) = art_for_code(state.get_device_code().as_str(), black) {
+        state.set_device_art(art);
+    }
+    let cards: Vec<DeviceCard> = state.get_devices().iter().collect();
+    if !cards.is_empty() {
+        let repainted: Vec<DeviceCard> = cards
+            .into_iter()
+            .map(|card| repaint_card(card, black))
+            .collect();
+        state.set_devices(ModelRc::new(VecModel::from(repainted)));
+    }
+    let models: Vec<ModelOption> = state.get_models().iter().collect();
+    if !models.is_empty() {
+        let repainted: Vec<ModelOption> = models
+            .into_iter()
+            .map(|model| repaint_model(model, black))
+            .collect();
+        state.set_models(ModelRc::new(VecModel::from(repainted)));
+    }
+    if let Some(art) = art_for_code(state.get_add_model_code().as_str(), black) {
+        state.set_add_model_art(art);
+    }
+}
+
+/// Selects the bundled translation for `code`, falling back to English when
+/// Slint does not bundle it, so a stale choice never leaves the window in the
+/// previous language. Returns the code now selected.
+fn select_bundled_language(code: &'static str) -> &'static str {
+    match slint::select_bundled_translation(code) {
+        Ok(()) => code,
+        Err(error) => {
+            crate::app_log!(
+                "OpenSCL4: could not select the {code} app language ({error}); using English"
+            );
+            let english = settings::LANGUAGES[0].code;
+            if let Err(fallback) = slint::select_bundled_translation(english) {
+                crate::app_log!("OpenSCL4: could not restore the English UI ({fallback})");
+            }
+            english
+        }
+    }
+}
+
+/// Applies the saved language, or the system's, to the running window: selects
+/// the bundled translation, re-evaluates every `@tr` string and refills the
+/// Settings page (the language names are themselves translated). Returns the
+/// code now selected.
+fn apply_language(inner: &Rc<Inner>) -> &'static str {
+    let code = settings::preferred_language(inner.settings.borrow().language.as_deref()).code;
+    let selected = select_bundled_language(code);
+    slint::update_all_translations();
+    if let Some(window) = inner.ui.upgrade() {
+        render_settings(&window.global::<AppState>(), inner);
+    }
+    selected
+}
+
+/// Persists the whole desktop settings document without blocking startup or
+/// turning a file error into a crash. The running window keeps the user's
+/// selected values.
+///
+/// The document holds the appearance, language and notification-area choices;
+/// saving the whole in-memory document is what keeps the tray choices and the
+/// Settings choices in one atomic file.
+fn persist_settings(inner: &Rc<Inner>) {
+    let Some(path) = inner.settings_path.as_deref() else {
+        return;
+    };
+    if let Err(error) = settings::save_settings(path, &inner.settings.borrow()) {
+        eprintln!(
+            "OpenSCL4: could not save desktop preferences ({}): {error}",
+            path.display()
+        );
+    }
+}
+
 /// Answers the Settings panel's "Notification area icon" switch: shows or takes
-/// away the icon and records the choice in memory.
+/// away the icon and saves the choice for the next run.
 fn set_tray(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
-    inner.tray_settings.borrow_mut().icon = on;
+    inner.settings.borrow_mut().tray.icon = on;
+    persist_settings(inner);
     if let Some(shell) = inner.tray.borrow().as_ref() {
         shell.set_icon(on);
     }
@@ -2580,9 +3262,10 @@ fn set_tray(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
 }
 
 /// Answers the Settings panel's "Close to notification area" switch; the
-/// window's close handler reads the same in-memory choice.
+/// window's close handler reads the same saved choice.
 fn set_close_to_tray(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
-    inner.tray_settings.borrow_mut().close_to_tray = on;
+    inner.settings.borrow_mut().tray.close_to_tray = on;
+    persist_settings(inner);
     if let Some(shell) = inner.tray.borrow().as_ref() {
         shell.set_close_to_tray(on);
     }
@@ -2590,20 +3273,21 @@ fn set_close_to_tray(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
 }
 
 /// Answers one of the Settings panel's tray section switches: 0 the battery
-/// line, 1 the Sound mode submenu, 2 quick presets, 3 LDAC. The quick-preset
-/// switch is kept in memory like the others; this app has no quick presets, so
-/// the menu has no such section to show either way.
+/// line, 1 the Sound mode submenu, 2 quick presets, 3 LDAC. This app has no
+/// quick presets, so its saved switch never makes a menu section appear.
 fn set_tray_item(window: &AppWindow, inner: &Rc<Inner>, index: i32, on: bool) {
     {
-        let mut settings = inner.tray_settings.borrow_mut();
+        let mut settings = inner.settings.borrow_mut();
+        let tray = &mut settings.tray;
         match index {
-            0 => settings.battery = on,
-            1 => settings.modes = on,
-            2 => settings.presets = on,
-            3 => settings.ldac = on,
+            0 => tray.battery = on,
+            1 => tray.modes = on,
+            2 => tray.presets = on,
+            3 => tray.ldac = on,
             _ => return,
         }
     }
+    persist_settings(inner);
     show_tray_choices(window, inner);
     refresh_tray(inner, &window.global::<AppState>());
 }
@@ -2677,6 +3361,12 @@ fn drain_events(inner: &Rc<Inner>) {
                 if attempt == inner.connect.get()
                     && let Some(window) = inner.ui.upgrade()
                 {
+                    // A demo connection has no session behind it: its state
+                    // still fills every page, but the Diagnostics probes have
+                    // no device to ask. The flag is read here because the event
+                    // itself is exactly what a real connect reports.
+                    let demo_connected =
+                        inner.demo.get() && matches!(&outcome, ConnectOutcome::Connected(..));
                     // Only a connected model with a measured mode, a supported
                     // equalizer or the settings block keeps its worker (and
                     // socket) for writes; everything else ends as in the MVP.
@@ -2694,9 +3384,25 @@ fn drain_events(inner: &Rc<Inner>) {
                     if !keeps_worker {
                         window.global::<AppState>().set_diagnostic_available(false);
                     }
+                    if demo_connected {
+                        // `apply_outcome` fills the Diagnostics card from the
+                        // connected state; demo mode must undo that availability
+                        // and say why, after the card was filled.
+                        let state = window.global::<AppState>();
+                        state.set_diagnostic_available(false);
+                        state.set_diagnostic_error(demo::DEMO_DIAGNOSTICS_UNAVAILABLE.into());
+                    }
                     // A connected A3062 shows the Saved profiles panel, so the
                     // loaded rows and their Applied tags are filled here.
                     inner.refresh_saved_profiles(&window.global::<AppState>());
+                }
+            }
+            Ok(Event::ConnectionLost { attempt, failure }) => {
+                if attempt == inner.connect.get() {
+                    inner.stop_worker();
+                    if let Some(window) = inner.ui.upgrade() {
+                        apply_connection_lost(inner, &window.global::<AppState>(), failure);
+                    }
                 }
             }
             Ok(Event::ModeChanged {
@@ -2860,6 +3566,20 @@ enum OpenOutcome {
     Failed(ConnectFailure),
 }
 
+// A user-requested reconnect can catch the radio still closing the previous
+// RFCOMM link. These short retries belong to that request; a lost idle link is
+// never reconnected automatically.
+const TRANSIENT_CONNECT_ATTEMPTS: usize = 4;
+const TRANSIENT_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(400);
+
+fn should_retry_connect(error: &BluetoothError, retries: usize) -> bool {
+    retries + 1 < TRANSIENT_CONNECT_ATTEMPTS
+        && matches!(
+            error,
+            BluetoothError::NotFound | BluetoothError::ConnectionFailed
+        )
+}
+
 /// Opens the RFCOMM connection and picks the model's vendor service. Blocking.
 fn open_session(request: &ConnectRequest, cancel: &AtomicBool) -> OpenOutcome {
     let cancelled = || cancel.load(Ordering::Relaxed);
@@ -2871,7 +3591,10 @@ fn open_session(request: &ConnectRequest, cancel: &AtomicBool) -> OpenOutcome {
     }
     let services = match installed_services(request.address) {
         Ok(services) => services,
-        Err(error) => return OpenOutcome::Failed(ConnectFailure::from_bluetooth(error)),
+        Err(error) => {
+            eprintln!("OpenSCL4: could not read paired-device services: {error}");
+            return OpenOutcome::Failed(ConnectFailure::from_bluetooth(error));
+        }
     };
     if cancelled() {
         return OpenOutcome::Cancelled;
@@ -2879,9 +3602,22 @@ fn open_session(request: &ConnectRequest, cancel: &AtomicBool) -> OpenOutcome {
     let Some(service) = pick_service(&services, &request.model_code) else {
         return OpenOutcome::Failed(ConnectFailure::NoService);
     };
-    let transport = match WindowsRfcommTransport::connect(request.address, service) {
-        Ok(transport) => transport,
-        Err(error) => return OpenOutcome::Failed(ConnectFailure::from_bluetooth(error)),
+    let mut retries = 0;
+    let transport = loop {
+        if cancelled() {
+            return OpenOutcome::Cancelled;
+        }
+        match WindowsRfcommTransport::connect(request.address, service) {
+            Ok(transport) => break transport,
+            Err(error) if should_retry_connect(&error, retries) => {
+                retries += 1;
+                std::thread::sleep(TRANSIENT_CONNECT_RETRY_DELAY);
+            }
+            Err(error) => {
+                eprintln!("OpenSCL4: could not open the RFCOMM link: {error}");
+                return OpenOutcome::Failed(ConnectFailure::from_bluetooth(error));
+            }
+        }
     };
     if cancelled() {
         // Dropping the transport closes the socket.
@@ -2961,11 +3697,13 @@ fn run_diagnostics<T: Transport>(
             status,
             elapsed_ms,
         };
-        diagnostic.record_probe(result.clone());
+        // The session redacts a state response before storing it, so the page
+        // shows exactly what the exported manifest will carry.
+        let stored = diagnostic.record_probe(result);
         let _ = events.send(Event::DiagnosticProbe {
             attempt,
             request: request_id,
-            result,
+            result: stored,
         });
     }
     diagnostic
@@ -2979,12 +3717,31 @@ fn run_diagnostics<T: Transport>(
 ///
 /// Generic over the transport so the tests can drive it with a scripted one.
 fn serve_device<T: Transport>(
-    mut session: DeviceSession<T>,
+    session: DeviceSession<T>,
     attempt: u64,
     events: Sender<Event>,
     commands: Receiver<DeviceCommand>,
 ) {
-    // `poll_state` here is the MVP's one initial `01 01` request.
+    serve_device_with_heartbeat(
+        session,
+        attempt,
+        events,
+        commands,
+        DEVICE_HEARTBEAT_INTERVAL,
+    );
+}
+
+/// The configurable idle interval keeps heartbeat tests fast while production
+/// uses [`DEVICE_HEARTBEAT_INTERVAL`]. Commands always take priority over an
+/// idle poll, and all session operations remain serial on this one worker.
+fn serve_device_with_heartbeat<T: Transport>(
+    mut session: DeviceSession<T>,
+    attempt: u64,
+    events: Sender<Event>,
+    commands: Receiver<DeviceCommand>,
+    heartbeat_interval: Duration,
+) {
+    // `poll_state` here is the initial `01 01` request.
     let state = match session.poll_state() {
         Ok(state) => state,
         Err(error) => {
@@ -3027,7 +3784,23 @@ fn serve_device<T: Transport>(
     if !has_sound_mode && !has_equalizer && !has_settings {
         return;
     }
-    while let Ok(command) = commands.recv() {
+    loop {
+        let command = match commands.recv_timeout(heartbeat_interval) {
+            Ok(command) => command,
+            Err(mpsc::RecvTimeoutError::Timeout) => match session.poll_state() {
+                // A heartbeat refreshes no UI model and writes no setting. Its
+                // only job is to prove that the existing link still answers.
+                Ok(_) => continue,
+                Err(error) => {
+                    let _ = events.send(Event::ConnectionLost {
+                        attempt,
+                        failure: ConnectFailure::from_session(error),
+                    });
+                    return;
+                }
+            },
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         match command {
             DeviceCommand::ChangeSoundMode { request, mode } => {
                 let outcome = change_sound_mode(&mut session, mode);
@@ -3171,17 +3944,303 @@ fn serve_device<T: Transport>(
     }
 }
 
+/// Serves one simulated device connection on the demo worker.
+///
+/// It reports the same events as [`serve_device`], so the controller's event
+/// handling, page filling and request superseding are exercised unchanged, but
+/// it writes no frame anywhere: every command mutates the worker's copy of the
+/// state and answers with the value a device would have reported. The demo
+/// worker performs no connects, no session and no context; dropping the command
+/// channel (a disconnect, a reconnect or closing the app) ends it.
+fn serve_demo_device(
+    model: DeviceModel,
+    mut state: DeviceState,
+    attempt: u64,
+    events: Sender<Event>,
+    commands: Receiver<DeviceCommand>,
+) {
+    if events
+        .send(Event::Connected {
+            attempt,
+            outcome: ConnectOutcome::Connected(model, Box::new(state.clone())),
+        })
+        .is_err()
+    {
+        return;
+    }
+    // The Connections page's remembered-device list is part of the simulated
+    // device, so it arrives right after the state, like a real A3062 with dual
+    // connections on.
+    let mut dual_devices = demo::demo_dual_devices();
+    if events
+        .send(Event::DualConnectionsRead {
+            attempt,
+            outcome: Ok(dual_devices.clone()),
+        })
+        .is_err()
+    {
+        return;
+    }
+    while let Ok(command) = commands.recv() {
+        match command {
+            DeviceCommand::ChangeSoundMode { request, mode } => {
+                state.sound_mode = Some(mode);
+                if events
+                    .send(Event::ModeChanged {
+                        attempt,
+                        request,
+                        outcome: Ok(mode),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            DeviceCommand::ChangeEqualizerPreset { request, preset_id } => {
+                // Only a preset of the model's catalog can be selected, exactly
+                // as the real worker treats an unknown id.
+                let preset = model
+                    .equalizer_presets()
+                    .iter()
+                    .find(|preset| preset.id == preset_id);
+                let outcome = match (preset, state.equalizer) {
+                    (Some(preset), Some(mut equalizer)) => {
+                        equalizer.preset_id = preset.id;
+                        equalizer.bands = preset.bands;
+                        state.equalizer = Some(equalizer);
+                        Ok(equalizer)
+                    }
+                    _ => Err(EqFailure::Unreadable),
+                };
+                let failed = outcome.is_err();
+                if events
+                    .send(Event::PresetChanged {
+                        attempt,
+                        request,
+                        outcome,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                if failed {
+                    // Same rule as the real worker: a session that cannot
+                    // answer a change is not written to again.
+                    return;
+                }
+            }
+            DeviceCommand::WriteCustomCurve { request, bands } => {
+                let outcome = match state.equalizer {
+                    Some(mut equalizer) => {
+                        equalizer.preset_id = CUSTOM_EQUALIZER_PRESET_ID;
+                        equalizer.bands[..VISIBLE_EQ_BANDS].copy_from_slice(&bands);
+                        equalizer.bands[VISIBLE_EQ_BANDS..].copy_from_slice(&FIXED_EQ_BANDS);
+                        state.equalizer = Some(equalizer);
+                        Ok(equalizer)
+                    }
+                    None => Err(EqFailure::Unreadable),
+                };
+                let failed = outcome.is_err();
+                if events
+                    .send(Event::CurveChanged {
+                        attempt,
+                        request,
+                        outcome,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                if failed {
+                    return;
+                }
+            }
+            DeviceCommand::SetSetting { request, setting } => {
+                let dual_turned_on = matches!(setting, SettingCommand::DualConnections(true));
+                let has_settings = match state.settings.as_mut() {
+                    Some(settings) => {
+                        apply_demo_setting(settings, setting);
+                        true
+                    }
+                    None => false,
+                };
+                let outcome = if has_settings {
+                    Ok(Box::new(state.clone()))
+                } else {
+                    Err(SettingFailure::Unreadable)
+                };
+                let failed = outcome.is_err();
+                if events
+                    .send(Event::SettingChanged {
+                        attempt,
+                        request,
+                        setting,
+                        outcome,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                if failed {
+                    return;
+                }
+                if dual_turned_on {
+                    // Turning dual connections on makes the Connections page
+                    // show its list; a real worker reads it straight away.
+                    if events
+                        .send(Event::DualConnectionsRead {
+                            attempt,
+                            outcome: Ok(dual_devices.clone()),
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            DeviceCommand::ReadDualConnections => {
+                if events
+                    .send(Event::DualConnectionsRead {
+                        attempt,
+                        outcome: Ok(dual_devices.clone()),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            DeviceCommand::DualConnectionWrite(action) => {
+                match action {
+                    DualAction::Connect(mac) => {
+                        if let Some(device) =
+                            dual_devices.iter_mut().find(|device| device.mac == mac)
+                        {
+                            device.connected = true;
+                        }
+                    }
+                    DualAction::Disconnect(mac) => {
+                        if let Some(device) =
+                            dual_devices.iter_mut().find(|device| device.mac == mac)
+                        {
+                            device.connected = false;
+                        }
+                    }
+                    DualAction::Forget(mac) => {
+                        dual_devices.retain(|device| device.mac != mac);
+                    }
+                }
+                if events
+                    .send(Event::DualConnectionsWritten {
+                        attempt,
+                        action,
+                        outcome: Ok(dual_devices.clone()),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // The probes are read-only reads of a real radio link, which a
+            // simulated device does not have. The Diagnostics page is marked
+            // unavailable after a demo connect and never queues this command;
+            // ignoring it here keeps the demo worker from inventing a capture.
+            DeviceCommand::RunDiagnostics { .. } => {}
+        }
+    }
+}
+
+/// Applies one settings write to the simulated state, exactly as the device
+/// would report it on the following state poll. Every measured setting is
+/// covered; the payload types are the same validated ones the real bodies use.
+fn apply_demo_setting(settings: &mut A3062Settings, setting: SettingCommand) {
+    match setting {
+        SettingCommand::ButtonDoublePress(action) => settings.button_double_press = action,
+        SettingCommand::AmbientSoundModeCycle(cycle) => settings.ambient_sound_mode_cycle = cycle,
+        SettingCommand::LowBatteryPrompt(on) => settings.low_battery_prompt = on,
+        SettingCommand::DolbyAudio(on) => settings.dolby_audio = on,
+        SettingCommand::Ldac(on) => settings.ldac = on,
+        SettingCommand::DualConnections(on) => settings.dual_connections = on,
+        SettingCommand::AutoPowerOff(auto_power_off) => settings.auto_power_off = auto_power_off,
+        SettingCommand::LimitHighVolume { enabled, db_limit } => {
+            settings.limit_high_volume = LimitHighVolume {
+                enabled,
+                db_limit,
+                refresh_rate: settings.limit_high_volume.refresh_rate,
+            };
+        }
+        SettingCommand::LimitHighVolumeRefreshRate(refresh_rate) => {
+            settings.limit_high_volume.refresh_rate = refresh_rate;
+        }
+        SettingCommand::SideTone(on) => settings.side_tone = on,
+        SettingCommand::VoicePrompt(on) => settings.voice_prompt = on,
+    }
+}
+
+/// Answers the Add Device dialog's Demo mode switch. Turning it on replaces the
+/// Windows paired-device list with the one simulated A3062, which is the only
+/// model the committed demo capture describes; a different chosen model is
+/// refused with the dialog's own error line. Turning it off clears the
+/// simulated row and asks the real enumeration again.
+fn set_demo(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
+    let state = window.global::<AppState>();
+    state.set_add_demo(on);
+    state.set_add_failure_kind(FailureKind::None);
+    state.set_add_error("".into());
+    state.set_add_bluetooth_off(false);
+    if !on {
+        state.set_paired_options(ModelRc::default());
+        state.set_add_loading(true);
+        request_paired_for_selection(&state, inner);
+        return;
+    }
+    match chosen_model(&state) {
+        Some(model) => {
+            show_demo_options(&state, &model);
+        }
+        None => {
+            state.set_paired_options(ModelRc::default());
+            state.set_add_loading(false);
+        }
+    }
+}
+
+/// Fills the paired-device step with the single simulated A3062, or shows the
+/// dialog's error line when the chosen model has no committed demo capture.
+/// Returns whether the simulated device was listed.
+fn show_demo_options(state: &AppState<'_>, model: &SelectedModel) -> bool {
+    if model.code != demo::demo_model().code {
+        state.set_paired_options(ModelRc::default());
+        state.set_add_loading(false);
+        state.set_add_failure_kind(FailureKind::Other);
+        state.set_add_error(demo::DEMO_UNAVAILABLE.into());
+        return false;
+    }
+    state.set_paired_options(ModelRc::new(VecModel::from(vec![PairedOption {
+        mac: demo::DEMO_MAC.into(),
+        name: demo::DEMO_NAME.into(),
+        suggested: true,
+    }])));
+    state.set_add_loading(false);
+    state.set_add_bluetooth_off(false);
+    state.set_add_failure_kind(FailureKind::None);
+    state.set_add_error("".into());
+    true
+}
+
 /// Resets the dialog to its model step and starts the paired enumeration.
 fn open_add_device(window: &AppWindow, inner: &Rc<Inner>) {
     let state = window.global::<AppState>();
     state.set_adding(true);
     state.set_add_step(0);
     state.set_add_loading(true);
+    // Demo mode belongs to one dialog visit: opening the dialog again starts
+    // from the real paired-device list.
+    state.set_add_demo(false);
     state.set_add_bluetooth_off(false);
     state.set_add_failure_kind(FailureKind::None);
     state.set_add_error("".into());
     state.set_paired_options(ModelRc::default());
-    reset_models(&state);
+    reset_models(&state, paint_black(inner));
     request_paired_for_selection(&state, inner);
 }
 
@@ -3194,7 +4253,7 @@ fn choose_model(window: &AppWindow, inner: &Rc<Inner>, code: &str) {
     let state = window.global::<AppState>();
     state.set_add_model_name(model.name.into());
     state.set_add_model_code(model.code.into());
-    state.set_add_model_art(model.art);
+    state.set_add_model_art(model.art.clone());
     state.set_add_model_is_speaker(model.is_speaker);
     state.set_add_step(1);
     state.set_add_bluetooth_off(false);
@@ -3202,15 +4261,37 @@ fn choose_model(window: &AppWindow, inner: &Rc<Inner>, code: &str) {
     state.set_add_error("".into());
     state.set_paired_options(ModelRc::default());
     state.set_add_loading(true);
+    // The confirmation card already carries the chosen color; a filter or a
+    // theme change before the next step must not reset it to silver.
+    paint_device_art(&state, paint_black(inner));
+    if state.get_add_demo() {
+        // Demo mode lists only the simulated model, so switching models while
+        // it is on refills the row or explains that there is no demo data.
+        show_demo_options(&state, &model);
+        return;
+    }
     inner.request_paired(Some((model.code.to_owned(), model.name.to_owned())));
 }
 
-/// Repeats the enumeration for the current selection.
+/// Repeats the enumeration for the current selection, or refills the simulated
+/// row while Demo mode is on.
 fn refresh_paired(window: &AppWindow, inner: &Rc<Inner>) {
     let state = window.global::<AppState>();
     state.set_add_failure_kind(FailureKind::None);
     state.set_add_error("".into());
     state.set_add_bluetooth_off(false);
+    if state.get_add_demo() {
+        match chosen_model(&state) {
+            Some(model) => {
+                show_demo_options(&state, &model);
+            }
+            None => {
+                state.set_paired_options(ModelRc::default());
+                state.set_add_loading(false);
+            }
+        }
+        return;
+    }
     request_paired_for_selection(&state, inner);
 }
 
@@ -3227,7 +4308,9 @@ fn chosen_model(state: &AppState<'_>) -> Option<SelectedModel> {
 }
 
 /// Pairs the picked Windows device with the chosen catalog model and starts the
-/// connection attempt.
+/// connection attempt. In demo mode the picked row is the simulated device, so
+/// the demo connection starts before the address is parsed: no real address is
+/// required and nothing is opened.
 fn pair(window: &AppWindow, inner: &Rc<Inner>, mac: &str, name: &str) {
     let state = window.global::<AppState>();
     let Some(model) = chosen_model(&state) else {
@@ -3235,6 +4318,10 @@ fn pair(window: &AppWindow, inner: &Rc<Inner>, mac: &str, name: &str) {
         state.set_add_error("Choose a model before picking a paired device.".into());
         return;
     };
+    if state.get_add_demo() {
+        begin_demo_connect(window, inner, model);
+        return;
+    }
     let Some(address) = parse_mac(mac) else {
         state.set_add_failure_kind(FailureKind::Other);
         state.set_add_error(
@@ -3259,6 +4346,8 @@ fn pair(window: &AppWindow, inner: &Rc<Inner>, mac: &str, name: &str) {
     state.set_adding(false);
     state.set_add_step(0);
     state.set_page(Page::Overview);
+    // The card and the Overview device picture use the chosen silver/black art.
+    paint_device_art(&state, paint_black(inner));
     begin_connecting(
         &state,
         inner,
@@ -3296,8 +4385,14 @@ fn retry(window: &AppWindow, inner: &Rc<Inner>) {
     begin_card_connect(window, inner, card);
 }
 
-/// Starts the connection of a saved card.
+/// Starts the connection of a saved card. A demo card reconnects to the
+/// simulated device; its stored address is never parsed and no radio is opened.
 fn begin_card_connect(window: &AppWindow, inner: &Rc<Inner>, card: DeviceCard) {
+    if card.demo {
+        let model = selected_model(card.code.as_str()).unwrap_or_else(demo_selection);
+        begin_demo_connect(window, inner, model);
+        return;
+    }
     let state = window.global::<AppState>();
     show_current_card(
         &state,
@@ -3313,6 +4408,7 @@ fn begin_card_connect(window: &AppWindow, inner: &Rc<Inner>, card: DeviceCard) {
         selected_model(card.code.as_str()).is_some_and(|model| model.is_speaker),
     );
     state.set_one_earbud(false);
+    paint_device_art(&state, paint_black(inner));
     let Some(address) = parse_mac(card.mac.as_str()) else {
         apply_failure(
             inner,
@@ -3337,6 +4433,9 @@ fn begin_card_connect(window: &AppWindow, inner: &Rc<Inner>, card: DeviceCard) {
 /// Puts the window into "connecting" and starts the worker; the timer applies
 /// the result later.
 fn begin_connecting(state: &AppState<'_>, inner: &Rc<Inner>, request: ConnectRequest) {
+    // A real connection replaces any simulated one: from here on the attempt
+    // reaches the Windows worker, so the demo-only rules must not apply.
+    inner.demo.set(false);
     state.set_connection(Connection::Connecting);
     state.set_connection_reason("".into());
     state.set_failure_kind(FailureKind::None);
@@ -3349,8 +4448,68 @@ fn begin_connecting(state: &AppState<'_>, inner: &Rc<Inner>, request: ConnectReq
     show_equalizer(state, &EqualizerDisplay::default());
     reset_diagnostics(state);
     clear_section_pages(state);
+    render_settings(state, inner);
     refresh_tray(inner, state);
     inner.request_connect(request);
+}
+
+/// The catalog selection of the simulated model, for a saved demo card whose
+/// code the catalog no longer lists.
+fn demo_selection() -> SelectedModel {
+    selected_model(demo::demo_model().code).expect("the demo model is a catalog model")
+}
+
+/// Starts the simulated A3062 connection: the same connecting and connected
+/// event path a real device uses, but the device state comes from the committed
+/// capture and the worker has no transport. The saved card carries `demo: true`
+/// so My Devices and later reconnects stay on the demo path.
+fn begin_demo_connect(window: &AppWindow, inner: &Rc<Inner>, model: SelectedModel) {
+    let state = window.global::<AppState>();
+    let demo_model = demo::demo_model();
+    if model.code != demo_model.code {
+        state.set_add_failure_kind(FailureKind::Other);
+        state.set_add_error(demo::DEMO_UNAVAILABLE.into());
+        return;
+    }
+    let device_state = demo::demo_state();
+    show_current_card(
+        &state,
+        DeviceCard {
+            mac: demo::DEMO_MAC.into(),
+            name: demo::DEMO_NAME.into(),
+            code: demo_model.code.into(),
+            art: model.art.clone(),
+            current: true,
+            demo: true,
+        },
+    );
+    state.set_device_name(demo::DEMO_NAME.into());
+    state.set_device_code(demo_model.code.into());
+    state.set_device_art(model.art);
+    state.set_device_is_speaker(model.is_speaker);
+    state.set_one_earbud(false);
+    state.set_adding(false);
+    state.set_add_step(0);
+    state.set_add_failure_kind(FailureKind::None);
+    state.set_add_error("".into());
+    state.set_page(Page::Overview);
+    state.set_connection(Connection::Connecting);
+    state.set_connection_reason("".into());
+    state.set_failure_kind(FailureKind::None);
+    state.set_failure_text("".into());
+    state.set_error_label("".into());
+    state.set_batteries(ModelRc::default());
+    inner.device.borrow_mut().take();
+    inner.clear_dual_devices();
+    show_sound_mode(&state, None, false, false);
+    show_equalizer(&state, &EqualizerDisplay::default());
+    reset_diagnostics(&state);
+    clear_section_pages(&state);
+    render_settings(&state, inner);
+    paint_device_art(&state, paint_black(inner));
+    refresh_tray(inner, &state);
+    inner.demo.set(true);
+    inner.request_demo(demo_model, device_state);
 }
 
 /// Stops a pending attempt; its worker result no longer matches the attempt the
@@ -3374,6 +4533,8 @@ fn cancel_connect(window: &AppWindow, inner: &Rc<Inner>) {
     show_equalizer(&state, &EqualizerDisplay::default());
     reset_diagnostics(&state);
     clear_section_pages(&state);
+    clear_overview(&state);
+    render_settings(&state, inner);
     refresh_tray(inner, &state);
 }
 
@@ -3407,7 +4568,9 @@ fn disconnect(window: &AppWindow, inner: &Rc<Inner>) {
     show_equalizer(&state, &EqualizerDisplay::default());
     reset_diagnostics(&state);
     clear_section_pages(&state);
+    clear_overview(&state);
     state.set_page(Page::Devices);
+    render_settings(&state, inner);
     refresh_tray(inner, &state);
 }
 
@@ -3460,6 +4623,7 @@ fn apply_outcome(window: &AppWindow, inner: &Rc<Inner>, outcome: ConnectOutcome)
             let equalizer = EqualizerDisplay::new(Some(model), device_state.equalizer.as_ref());
             let has_settings = device_state.settings.is_some();
             state.set_batteries(ModelRc::new(VecModel::from(batteries(&device_state))));
+            state.set_one_earbud(device_state.battery.is_some() && !device_state.tws_connected);
             show_sound_mode(
                 &state,
                 device_state.sound_mode,
@@ -3475,7 +4639,11 @@ fn apply_outcome(window: &AppWindow, inner: &Rc<Inner>, outcome: ConnectOutcome)
             state.set_failure_text("".into());
             state.set_error_label("".into());
             *inner.device.borrow_mut() = Some(device_state);
+            show_overview(&state, inner);
             show_section_pages(&state, inner);
+            // The one-earbud badge is offered only for a pair of earbuds, so its
+            // availability is part of the page a connection refills.
+            render_settings(&state, inner);
         }
         ConnectOutcome::Failed(failure) => apply_failure(inner, &state, failure),
     }
@@ -3492,11 +4660,24 @@ fn apply_failure(inner: &Rc<Inner>, state: &AppState<'_>, failure: ConnectFailur
     show_equalizer(state, &EqualizerDisplay::default());
     reset_diagnostics(state);
     clear_section_pages(state);
+    clear_overview(state);
     state.set_connection(failure.connection());
     state.set_connection_reason("".into());
     state.set_failure_kind(failure.kind());
     state.set_failure_text(failure.text().into());
     state.set_error_label("".into());
+    render_settings(state, inner);
+    refresh_tray(inner, state);
+}
+
+/// Shows an established link that stopped answering while idle. Keep the saved
+/// card and use the existing Lost/Connect again presentation; do not retry in a
+/// loop behind the user's back.
+fn apply_connection_lost(inner: &Rc<Inner>, state: &AppState<'_>, failure: ConnectFailure) {
+    let reason = failure.text();
+    apply_failure(inner, state, failure);
+    state.set_connection(Connection::Lost);
+    state.set_connection_reason(reason.into());
     refresh_tray(inner, state);
 }
 
@@ -4360,6 +5541,7 @@ fn show_equalizer(state: &AppState<'_>, display: &EqualizerDisplay) {
     state.set_eq_lines(ModelRc::new(VecModel::from(display.lines.clone())));
     state.set_eq_chart_line(display.chart_line.as_str().into());
     state.set_eq_chart_area(display.chart_area.as_str().into());
+    state.set_eq_curve(display.overview_curve.as_str().into());
     state.set_eq_name(display.name.as_str().into());
     state.set_has_saved_profiles(display.editable);
     // The rows and the export count are filled by
@@ -4414,6 +5596,7 @@ fn apply_setting_outcome(
             if dual_off {
                 inner.clear_dual_devices();
             }
+            show_overview(&state, inner);
             show_section_pages(&state, inner);
             state.set_error_label("".into());
         }
@@ -4499,12 +5682,14 @@ fn apply_preset_outcome(
 /// by a write.
 fn show_equalizer_state(state: &AppState<'_>, equalizer: &EqualizerState) {
     let bands = equalizer_bands(equalizer);
-    let (chart_line, chart_area) = equalizer_chart(&equalizer_values(equalizer), EQ_MIN, EQ_MAX);
+    let values = equalizer_values(equalizer);
+    let (chart_line, chart_area) = equalizer_chart(&values, EQ_MIN, EQ_MAX);
     state.set_eq_preset(equalizer.preset_id.to_string().into());
     state.set_eq_bands(ModelRc::new(VecModel::from(bands)));
     state.set_eq_lines(ModelRc::new(VecModel::from(equalizer_lines())));
     state.set_eq_chart_line(chart_line.into());
     state.set_eq_chart_area(chart_area.into());
+    state.set_eq_curve(profile_curve(&values).into());
     state.set_eq_name(
         equalizer
             .preset()
@@ -5577,6 +6762,23 @@ fn copy_export_profiles(
     }
 }
 
+/// Answers `Actions.copy-logs`: puts the real recent application log (the same
+/// bounded history the log file keeps) on the clipboard and shows the Copied
+/// toast. A clipboard failure is only logged, never fatal. Returns whether the
+/// toast is showing.
+fn copy_logs(page: &impl ExportPage, io: &dyn TransferIo) -> bool {
+    match io.set_clipboard_text(&crate::logs::recent()) {
+        Ok(()) => {
+            page.show_export_toast(ToastKind::Copied, 0);
+            true
+        }
+        Err(error) => {
+            eprintln!("OpenSCL4: could not copy the logs to the clipboard: {error}");
+            false
+        }
+    }
+}
+
 /// Answers `Actions.eq-export-choose(name, checked)` on the window: the choice
 /// is applied to the controller's selection and the rows and export count are
 /// refilled.
@@ -5676,27 +6878,33 @@ fn answer_export_file(inner: &Rc<Inner>, result: Option<Result<(), ExportFileErr
 }
 
 /// Replaces the dialog's model list with the models for a query and chip; an
-/// index that is not one of the vendored chips lists nothing.
-fn show_models(state: &AppState<'_>, query: &str, chip: Option<Chip>) {
+/// index that is not one of the vendored chips lists nothing. The cards carry
+/// the device art of the chosen color, so a re-filter never resets a dark
+/// appearance to the silver pictures.
+fn show_models(state: &AppState<'_>, query: &str, chip: Option<Chip>, black: bool) {
     let models = match chip {
-        Some(chip) => catalog_adapter::filter_models(query, chip),
+        Some(chip) => catalog_adapter::filter_models(query, chip)
+            .into_iter()
+            .map(|model| repaint_model(model, black))
+            .collect(),
         None => Vec::new(),
     };
     state.set_models(ModelRc::new(VecModel::from(models)));
 }
 
 /// Resets the dialog's search and chip to All, then lists the whole catalog.
-fn reset_models(state: &AppState<'_>) {
+fn reset_models(state: &AppState<'_>, black: bool) {
     state.set_model_query("".into());
     state.set_model_kind(Chip::All.index());
-    show_models(state, "", Some(Chip::All));
+    show_models(state, "", Some(Chip::All), black);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_ui_window;
+    use crate::test_support::{with_slint_thread, with_ui_window};
     use soundcore_diagnostics::ProbeId;
+    use soundcore_models::catalog::FormFactor;
     use soundcore_models::{
         BatteryScale, BatteryState, FirmwareVersions, HostDevice, Layout, SoundMode,
     };
@@ -6332,6 +7540,8 @@ mod tests {
         clipboard: RefCell<Option<String>>,
         /// What the last copy put on the clipboard.
         copied: RefCell<Option<String>>,
+        /// Whether writing to the clipboard fails, for the never-fatal paths.
+        fail_copy: Cell<bool>,
         picked: RefCell<Option<PathBuf>>,
         read: RefCell<Option<Result<String, ImportFileError>>>,
         /// The path the save dialog returns; `None` is a cancelled dialog.
@@ -6385,6 +7595,9 @@ mod tests {
         }
 
         fn set_clipboard_text(&self, text: &str) -> io::Result<()> {
+            if self.fail_copy.get() {
+                return Err(io::Error::other("the test clipboard is unavailable"));
+            }
             *self.copied.borrow_mut() = Some(text.to_owned());
             Ok(())
         }
@@ -7387,6 +8600,26 @@ mod tests {
         assert_eq!(failure.kind(), FailureKind::Other);
         assert_eq!(failure.connection(), Connection::Failed);
         assert!(readable(&failure.text()).contains("bluetooth connection"));
+    }
+
+    #[test]
+    fn only_transient_connect_failures_get_bounded_retries() {
+        for error in [BluetoothError::NotFound, BluetoothError::ConnectionFailed] {
+            assert!(should_retry_connect(&error, 0));
+            assert!(should_retry_connect(&error, TRANSIENT_CONNECT_ATTEMPTS - 2));
+            assert!(!should_retry_connect(
+                &error,
+                TRANSIENT_CONNECT_ATTEMPTS - 1
+            ));
+        }
+        for error in [
+            BluetoothError::NotPaired,
+            BluetoothError::Timeout,
+            BluetoothError::BluetoothOff,
+            BluetoothError::Other("fatal".into()),
+        ] {
+            assert!(!should_retry_connect(&error, 0));
+        }
     }
 
     #[test]
@@ -8532,6 +9765,121 @@ mod tests {
             received.try_recv().is_err(),
             "no dual-connections event is reported"
         );
+    }
+
+    #[test]
+    fn idle_heartbeats_are_read_only_until_a_failure_ends_the_worker() {
+        // Initial state, one successful idle answer, then a silent link. A
+        // successful heartbeat emits no state/write event of its own.
+        let transport =
+            FakeTransport::scripted([a3062_frame_with(&[(79, 0)]), a3062_frame_with(&[(79, 0)])]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+
+        serve_device_with_heartbeat(
+            session,
+            9,
+            events,
+            command_receiver,
+            Duration::from_millis(1),
+        );
+
+        assert_eq!(
+            transport.writes(),
+            vec![state_request(), state_request(), state_request()],
+            "the initial read and two heartbeat attempts contain no settings writes"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the initial state report"),
+            Event::Connected {
+                attempt: 9,
+                outcome: ConnectOutcome::Connected(..)
+            }
+        ));
+        assert!(matches!(
+            received.try_recv().expect("the failed idle heartbeat"),
+            Event::ConnectionLost {
+                attempt: 9,
+                failure: ConnectFailure::TimedOut
+            }
+        ));
+        assert!(
+            received.try_recv().is_err(),
+            "a successful heartbeat emits no synthetic device change"
+        );
+        drop(commands);
+    }
+
+    #[test]
+    fn a_dropped_command_channel_stops_the_worker_before_its_heartbeat() {
+        let transport = FakeTransport::scripted([a3062_frame_with(&[(79, 0)])]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        drop(commands);
+
+        serve_device_with_heartbeat(
+            session,
+            9,
+            events,
+            command_receiver,
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(
+            transport.writes(),
+            vec![state_request()],
+            "Disconnect drops the channel, so no idle request follows"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the initial state report"),
+            Event::Connected { .. }
+        ));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_pending_setting_command_precedes_the_first_idle_heartbeat() {
+        let transport =
+            FakeTransport::scripted([a3062_frame_with(&[(79, 0)]), a3062_frame_with(&[(85, 0)])]);
+        let session = session_with("A3062", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::SetSetting {
+                request: 1,
+                setting: SettingCommand::SideTone(false),
+            })
+            .expect("the setting is queued before the worker starts");
+        drop(commands);
+
+        serve_device_with_heartbeat(
+            session,
+            9,
+            events,
+            command_receiver,
+            Duration::from_millis(1),
+        );
+
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                hex("08 EE 00 00 00 01 84 0B 00 00 86"),
+                state_request(),
+            ],
+            "the queued command and its re-poll finish without an extra heartbeat"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the initial state report"),
+            Event::Connected { .. }
+        ));
+        assert!(matches!(
+            received.try_recv().expect("the settings result"),
+            Event::SettingChanged { outcome: Ok(_), .. }
+        ));
+        assert!(received.try_recv().is_err());
     }
 
     #[test]
@@ -10580,8 +11928,8 @@ mod tests {
     /// cargo test -p soundcore-desktop manual_disconnect_and_retry -- --ignored --nocapture
     /// ```
     ///
-    /// The vendored UI has no disconnect control, so this drives the same
-    /// callbacks the window's actions call, against a real paired device:
+    /// This drives the same callbacks as the My Devices card against a real
+    /// paired device:
     /// connect the suggested A3062, disconnect back to My Devices, then retry
     /// the saved card and wait for the second real connection. Addresses are
     /// masked, so the output is safe to paste into a report.
@@ -10622,7 +11970,7 @@ mod tests {
         println!("  connected: {tiles:?}");
         assert!(!tiles.is_empty(), "the connection shows battery tiles");
 
-        // Disconnect returns to My Devices and forgets the current card.
+        // Disconnect returns to My Devices and keeps the saved card for Retry.
         disconnect(&ui, &inner);
         assert_eq!(state.get_page(), Page::Devices);
         assert_eq!(state.get_connection(), Connection::Off);
@@ -10634,14 +11982,23 @@ mod tests {
             state.get_page(),
             state.get_connection()
         );
+        match installed_services(candidate.address) {
+            Ok(services) => println!("  services after disconnect: {}", services.len()),
+            Err(error) => println!("  services after disconnect failed: {error}"),
+        }
 
         // Retry reconnects the saved card on the real device.
         retry(&ui, &inner);
         assert_eq!(state.get_connection(), Connection::Connecting);
-        assert!(
-            wait_for_connection(&inner, &ui, Connection::Connected, Duration::from_secs(20)),
-            "the retried connection succeeds"
+        let reconnected =
+            wait_for_connection(&inner, &ui, Connection::Connected, Duration::from_secs(20));
+        println!(
+            "  retry result: {:?} ({:?}): {}",
+            state.get_connection(),
+            state.get_failure_kind(),
+            state.get_failure_text()
         );
+        assert!(reconnected, "the retried connection succeeds");
         let tiles = shown_batteries(&state);
         println!("  retry connected: {tiles:?}");
         assert!(!tiles.is_empty(), "the retry shows battery tiles");
@@ -10658,6 +12015,36 @@ mod tests {
     /// [`test_inner`], using `path` as the saved-profile document instead of a
     /// temporary one.
     fn test_inner_with_profiles(ui: &AppWindow, path: PathBuf) -> Rc<Inner> {
+        test_inner_with_documents(ui, path, DesktopSettings::default(), None)
+    }
+
+    /// A controller state under a saved settings document: `settings` is what
+    /// `Controller::new` would have loaded from `settings_path`, and the actions
+    /// save it back there like the real app.
+    fn test_inner_with_settings(
+        ui: &AppWindow,
+        settings: DesktopSettings,
+        settings_path: PathBuf,
+    ) -> Rc<Inner> {
+        test_inner_with_documents(
+            ui,
+            temp_profiles_path("settings"),
+            settings,
+            Some(settings_path),
+        )
+    }
+
+    /// The controller state of a manual or unit test: the same fields
+    /// `Controller::new` fills, with the worker channel drained by hand instead
+    /// of by the timer. The profile document is a unique temporary one, and
+    /// `settings_path` is `None` unless the test names a document, so no test
+    /// touches the app-data directory of the running app.
+    fn test_inner_with_documents(
+        ui: &AppWindow,
+        profiles_path: PathBuf,
+        settings: DesktopSettings,
+        settings_path: Option<PathBuf>,
+    ) -> Rc<Inner> {
         let (sender, receiver) = mpsc::channel();
         Rc::new(Inner {
             ui: ui.as_weak(),
@@ -10665,6 +12052,7 @@ mod tests {
             receiver: RefCell::new(receiver),
             enumeration: Cell::new(0),
             connect: Cell::new(0),
+            demo: Cell::new(false),
             cancel: RefCell::new(None),
             commands: RefCell::new(None),
             mode_change: Cell::new(0),
@@ -10674,8 +12062,10 @@ mod tests {
             diagnostic_request: Cell::new(0),
             device: RefCell::new(None),
             dual_devices: RefCell::new(Vec::new()),
-            profiles: RefCell::new(load_profiles(&path)),
-            profiles_path: Some(path),
+            profiles: RefCell::new(load_profiles(&profiles_path)),
+            profiles_path: Some(profiles_path),
+            overview_preferences: RefCell::new(OverviewPreferences::default()),
+            overview_preferences_path: None,
             import_text: RefCell::new(None),
             transfer_io: Arc::new(NativeTransferIo),
             picking_import_file: Cell::new(false),
@@ -10683,7 +12073,10 @@ mod tests {
             picking_export_file: Cell::new(false),
             show_request: None,
             tray: RefCell::new(None),
-            tray_settings: RefCell::new(TraySettings::default()),
+            settings: RefCell::new(settings),
+            settings_path,
+            system_dark: Cell::new(None),
+            theme_poll: RefCell::new(None),
             tray_content: RefCell::new(TrayContent::default()),
             diagnostic_probes: RefCell::new(Vec::new()),
             diagnostic_session: RefCell::new(None),
@@ -12805,6 +14198,7 @@ mod tests {
     fn show_connected_tray(ui: &AppWindow, inner: &Rc<Inner>) -> DeviceState {
         let state = ui.global::<AppState>();
         show_saved_card(&state);
+        state.set_device_code("A3062".into());
         let device = a3062_state();
         let model = soundcore_models::model_by_code("A3062").expect("A3062 is a state model");
         apply_outcome(
@@ -12813,6 +14207,162 @@ mod tests {
             ConnectOutcome::Connected(model, Box::new(device.clone())),
         );
         device
+    }
+
+    #[test]
+    fn the_connected_a3062_fills_the_standard_overview() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            show_connected_tray(ui, &inner);
+            let state = ui.global::<AppState>();
+
+            let rows: Vec<_> = state.get_overview_rows().iter().collect();
+            assert_eq!(2, rows.len());
+            assert!(!rows[0].shortcuts);
+            let panels: Vec<_> = rows[0].blocks.iter().collect();
+            assert_eq!(
+                vec![crate::BlockKind::SoundMode, crate::BlockKind::Equalizer],
+                panels.iter().map(|block| block.kind).collect::<Vec<_>>()
+            );
+            assert!(rows[1].shortcuts);
+            let shortcuts: Vec<_> = rows[1].blocks.iter().collect();
+            assert_eq!(
+                vec![
+                    crate::BlockKind::Controls,
+                    crate::BlockKind::Comfort,
+                    crate::BlockKind::Spatial,
+                    crate::BlockKind::Connections,
+                ],
+                shortcuts.iter().map(|block| block.kind).collect::<Vec<_>>()
+            );
+            assert_eq!(7, state.get_layout_blocks().row_count());
+            assert_eq!(1, state.get_layout_preset());
+            assert_eq!(10, state.get_all_toggles().row_count());
+            let quick: Vec<_> = state.get_quick_toggles().iter().collect();
+            assert_eq!(1, quick.len());
+            assert_eq!("ldac", quick[0].id.as_str());
+            assert!(!state.get_eq_curve().is_empty());
+            assert_eq!(0, state.get_presets().row_count());
+        });
+    }
+
+    #[test]
+    fn the_deferred_a3949_does_not_gain_unsupported_overview_blocks() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            state.set_device_name("P20i".into());
+            state.set_device_code("A3949".into());
+            let model = soundcore_models::model_by_code("A3949").expect("A3949 is a state model");
+            apply_outcome(
+                ui,
+                &inner,
+                ConnectOutcome::Connected(model, Box::new(a3949_state())),
+            );
+
+            assert_eq!(0, state.get_overview_rows().row_count());
+            assert_eq!(0, state.get_layout_blocks().row_count());
+            assert_eq!(0, state.get_quick_toggles().row_count());
+            assert_eq!(0, state.get_all_toggles().row_count());
+            assert!(state.get_eq_curve().is_empty());
+            assert!(state.get_batteries().row_count() > 0);
+        });
+    }
+
+    #[test]
+    fn overview_editor_and_chooser_change_preferences_without_device_writes() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            show_connected_tray(ui, &inner);
+            wire_actions(ui, &inner);
+            let state = ui.global::<AppState>();
+            let actions = ui.global::<crate::Actions>();
+            let (commands, queued) = mpsc::channel();
+            *inner.commands.borrow_mut() = Some(commands);
+
+            actions.invoke_choose_toggle("sideTone".into(), true);
+            let quick: Vec<_> = state.get_quick_toggles().iter().collect();
+            assert_eq!(2, quick.len());
+            assert!(quick.iter().any(|toggle| toggle.id == "sideTone"));
+            assert!(queued.try_recv().is_err(), "choosing a chip writes nothing");
+
+            actions.invoke_edit_layout();
+            assert!(state.get_editing_layout());
+            actions.invoke_layout_use(0);
+            assert_eq!(0, state.get_layout_preset());
+            assert_eq!(1, state.get_overview_rows().row_count());
+            actions.invoke_layout_visible(1, false);
+            let rows: Vec<_> = state.get_overview_rows().iter().collect();
+            let panels: Vec<_> = rows[0].blocks.iter().collect();
+            assert_eq!(
+                vec![crate::BlockKind::SoundMode],
+                panels.iter().map(|block| block.kind).collect::<Vec<_>>()
+            );
+            assert_eq!(-1, state.get_layout_preset());
+            let saved = inner.overview_preferences.borrow().overview_layout.clone();
+            actions.invoke_layout_move(0, 99);
+            assert_eq!(
+                saved,
+                inner.overview_preferences.borrow().overview_layout.clone()
+            );
+            actions.invoke_layout_use(2);
+            assert_eq!(2, state.get_layout_preset());
+            assert!(queued.try_recv().is_err(), "layout edits write nothing");
+
+            // A chip's actual click remains the existing settings-write path.
+            actions.invoke_set_toggle("ldac".into(), false);
+            assert_eq!(
+                queued
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("the toggle queues its write"),
+                DeviceCommand::SetSetting {
+                    request: 1,
+                    setting: SettingCommand::Ldac(false),
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn a_reported_setting_refreshes_overview_summaries_and_quick_toggles() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let mut device = show_connected_tray(ui, &inner);
+            device.settings.as_mut().expect("A3062 settings").ldac = false;
+            apply_setting_outcome(
+                ui,
+                &inner,
+                SettingCommand::Ldac(false),
+                Ok(Box::new(device)),
+            );
+            let state = ui.global::<AppState>();
+            let quick: Vec<_> = state.get_quick_toggles().iter().collect();
+            assert!(!quick[0].on);
+            let rows: Vec<_> = state.get_overview_rows().iter().collect();
+            let shortcuts: Vec<_> = rows[1].blocks.iter().collect();
+            let spatial = shortcuts
+                .iter()
+                .find(|block| block.kind == crate::BlockKind::Spatial)
+                .unwrap();
+            assert!(!spatial.on);
+        });
+    }
+
+    #[test]
+    fn disconnect_clears_overview_models_and_dialogs() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            show_connected_tray(ui, &inner);
+            let state = ui.global::<AppState>();
+            state.set_editing_layout(true);
+            state.set_choosing_toggles(true);
+            disconnect(ui, &inner);
+            assert_eq!(0, state.get_overview_rows().row_count());
+            assert_eq!(0, state.get_layout_blocks().row_count());
+            assert_eq!(0, state.get_quick_toggles().row_count());
+            assert!(!state.get_editing_layout());
+            assert!(!state.get_choosing_toggles());
+        });
     }
 
     #[test]
@@ -12903,6 +14453,42 @@ mod tests {
     }
 
     #[test]
+    fn a_heartbeat_failure_shows_lost_and_keeps_retry_available() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            show_connected_tray(ui, &inner);
+            let (commands, worker_closed) = mpsc::channel();
+            *inner.commands.borrow_mut() = Some(commands);
+            inner
+                .sender
+                .send(Event::ConnectionLost {
+                    attempt: inner.connect.get(),
+                    failure: ConnectFailure::TimedOut,
+                })
+                .expect("the heartbeat event is queued");
+
+            drain_events(&inner);
+
+            let state = ui.global::<AppState>();
+            assert_eq!(state.get_connection(), Connection::Lost);
+            assert!(!state.get_connection_reason().is_empty());
+            assert_eq!(state.get_devices().row_count(), 1);
+            assert!(state.get_devices().row_data(0).expect("saved card").current);
+            assert!(inner.commands.borrow().is_none());
+            assert_eq!(
+                worker_closed.try_recv(),
+                Err(mpsc::TryRecvError::Disconnected),
+                "the failed worker is forgotten and no automatic reconnect starts"
+            );
+            assert!(
+                crate::tray::menu_lines(&inner.tray_content.borrow())
+                    .contains(&"Connect".to_string()),
+                "the tray offers the same explicit retry"
+            );
+        });
+    }
+
+    #[test]
     fn a_mode_change_updates_the_trays_current_mode() {
         with_ui_window(|ui| {
             let inner = test_inner(ui);
@@ -12943,9 +14529,18 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_panel_tray_choices_are_kept_in_memory() {
+    fn the_settings_panel_tray_choices_are_saved_and_reload() {
         with_ui_window(|ui| {
-            let inner = test_inner(ui);
+            let temp = TempDir::new("tray-settings");
+            let mut inner = test_inner(ui);
+            let path = temp.path().join(DESKTOP_PREFERENCES_FILE_NAME);
+            Rc::get_mut(&mut inner)
+                .expect("the new test controller has no other owners")
+                .settings_path = Some(path.clone());
+            // Appearance and language are ticket 02's wiring; a tray write must
+            // still keep whatever document already holds them.
+            inner.settings.borrow_mut().theme = settings::AppTheme::Dark;
+            inner.settings.borrow_mut().language = Some("ru".into());
             let state = ui.global::<AppState>();
             show_tray_settings(&state, &TraySettings::default(), inner.tray_available());
             assert!(state.get_app_tray());
@@ -12958,13 +14553,13 @@ mod tests {
 
             set_tray(ui, &inner, false);
             assert!(!state.get_app_tray());
-            assert!(!inner.tray_settings.borrow().icon);
+            assert!(!inner.settings.borrow().tray.icon);
             set_tray(ui, &inner, true);
             assert!(state.get_app_tray());
 
             set_close_to_tray(ui, &inner, false);
             assert!(!state.get_app_close_to_tray());
-            assert!(!inner.tray_settings.borrow().close_to_tray);
+            assert!(!inner.settings.borrow().tray.close_to_tray);
 
             set_tray_item(ui, &inner, 0, false);
             assert!(!state.get_tray_battery());
@@ -12974,10 +14569,35 @@ mod tests {
             assert!(!state.get_tray_ldac());
             set_tray_item(ui, &inner, 2, true);
             assert!(state.get_tray_presets());
+            let expected = DesktopSettings {
+                tray: TraySettings {
+                    close_to_tray: false,
+                    battery: false,
+                    modes: false,
+                    presets: true,
+                    ldac: false,
+                    ..TraySettings::default()
+                },
+                theme: settings::AppTheme::Dark,
+                language: Some("ru".into()),
+                ..DesktopSettings::default()
+            };
+            assert_eq!(
+                settings::load_settings(&path),
+                expected,
+                "the tray switches are saved and the other preferences preserved"
+            );
+
+            let before_unknown = fs::read(&path).expect("the saved document exists");
             set_tray_item(ui, &inner, 9, false);
             assert!(
                 state.get_tray_presets(),
                 "an unknown switch changes nothing"
+            );
+            assert_eq!(
+                fs::read(&path).expect("the saved document remains"),
+                before_unknown,
+                "an unknown switch does not rewrite the document"
             );
         });
     }
@@ -13316,6 +14936,497 @@ mod tests {
             other => panic!("unexpected done event: {other:?}"),
         }
     }
+    // ---- Settings wiring (ticket 02) ---------------------------------------
+
+    /// A unique temporary settings-document path; the file itself is written by
+    /// the action under test and removed by the test.
+    fn temp_settings_path(label: &str) -> PathBuf {
+        temp_profiles_path(label)
+    }
+
+    #[test]
+    fn every_saved_accent_maps_to_its_palette() {
+        assert_eq!(palette_choice(Accent::Purple), PaletteChoice::Purple);
+        assert_eq!(palette_choice(Accent::Sage), PaletteChoice::Sage);
+        assert_eq!(palette_choice(Accent::Rose), PaletteChoice::Rose);
+    }
+
+    #[test]
+    fn language_names_are_follow_system_then_every_bundled_language() {
+        let names = language_names(SharedString::from("Follow system"));
+        assert_eq!(names.len(), settings::LANGUAGES.len() + 1);
+        assert_eq!(names[0].as_str(), "Follow system");
+        assert_eq!(names[1].as_str(), "English");
+        assert_eq!(names[14].as_str(), "Русский");
+        assert_eq!(
+            names.last().expect("the model is not empty").as_str(),
+            "Українська"
+        );
+        for (name, language) in names.iter().skip(1).zip(settings::LANGUAGES.iter()) {
+            assert_eq!(name.as_str(), language.name);
+        }
+    }
+
+    #[test]
+    fn render_settings_maps_every_saved_choice_to_the_page() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            {
+                let mut settings = inner.settings.borrow_mut();
+                settings.theme = AppTheme::Dark;
+                settings.accent = Accent::Rose;
+                settings.content_scale = ContentScale::Percent150;
+                settings.device_color = DeviceColor::Black;
+                settings.sound_mode_view = SoundModeView::Scale;
+                settings.one_earbud_badge = false;
+                settings.language = Some("ru".into());
+                settings.tray.icon = false;
+                settings.tray.battery = false;
+                settings.tray.modes = false;
+                settings.tray.presets = true;
+                settings.tray.ldac = false;
+            }
+            let state = ui.global::<AppState>();
+            render_settings(&state, &inner);
+
+            assert_eq!(state.get_app_theme(), 2);
+            assert_eq!(state.get_app_palette(), 2);
+            assert_eq!(state.get_app_content_scale(), 3);
+            assert_eq!(state.get_app_device_color(), 2);
+            assert_eq!(state.get_app_mode_view(), 1);
+            assert!(
+                !state.get_app_mode_view_applies(),
+                "the clean core has no 1-11 sound-mode scale"
+            );
+            assert!(
+                !state.get_one_earbud_badge_applies(),
+                "no device is connected"
+            );
+            assert_eq!(state.get_app_language(), 14, "Russian is the 14th choice");
+            assert!(!state.get_show_one_earbud_badge());
+            assert!(!state.get_app_tray());
+            assert!(
+                !state.get_app_tray_available(),
+                "a test window hosts no notification-area icon"
+            );
+            assert!(state.get_app_close_to_tray());
+            assert!(!state.get_tray_battery());
+            assert!(!state.get_tray_modes());
+            assert!(state.get_tray_presets());
+            assert!(!state.get_tray_ldac());
+
+            let names: Vec<String> = state
+                .get_language_names()
+                .iter()
+                .map(|name| name.to_string())
+                .collect();
+            assert_eq!(names.len(), settings::LANGUAGES.len() + 1);
+            assert_eq!(
+                names[0],
+                ui.global::<Strings>().get_system_language().to_string()
+            );
+            assert_eq!(names[1], "English");
+            assert_eq!(names[14], "Русский");
+        });
+    }
+
+    #[test]
+    fn one_earbud_badge_applies_only_for_a_pair_of_earbuds() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            render_settings(&state, &inner);
+            assert!(!state.get_one_earbud_badge_applies(), "no device");
+
+            *inner.device.borrow_mut() = Some(Box::new(state_of(5, 4, BatteryScale::Five)));
+            render_settings(&state, &inner);
+            assert!(
+                state.get_one_earbud_badge_applies(),
+                "a pair of earbuds can be down to one earbud"
+            );
+
+            *inner.device.borrow_mut() = Some(Box::new(single_state_of(5)));
+            render_settings(&state, &inner);
+            assert!(
+                !state.get_one_earbud_badge_applies(),
+                "a single-battery device has no second earbud"
+            );
+        });
+    }
+
+    #[test]
+    fn apply_theme_resolves_colors_scale_and_recolors_every_device_picture() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            {
+                let mut settings = inner.settings.borrow_mut();
+                settings.accent = Accent::Sage;
+                settings.content_scale = ContentScale::Percent110;
+                settings.device_color = DeviceColor::AsTheme;
+            }
+            let state = ui.global::<AppState>();
+            state.set_device_code("A3062".into());
+            state.set_devices(ModelRc::new(VecModel::from(vec![
+                DeviceCard {
+                    mac: "AA".into(),
+                    name: "Space One Pro".into(),
+                    code: "A3062".into(),
+                    art: catalog_adapter::art(FormFactor::Headphones),
+                    current: true,
+                    demo: false,
+                },
+                DeviceCard {
+                    mac: "BB".into(),
+                    name: "P20i".into(),
+                    code: "A3949".into(),
+                    art: catalog_adapter::art(FormFactor::TwsEarbuds),
+                    current: false,
+                    demo: false,
+                },
+            ])));
+            show_models(&state, "", Some(Chip::All), false);
+            state.set_add_model_code("A3954".into());
+            state.set_add_model_art(catalog_adapter::art(FormFactor::TwsEarbuds));
+
+            apply_theme(&inner, true);
+            let theme = ui.global::<Theme>();
+            assert!(theme.get_dark());
+            assert_eq!(theme.get_palette(), PaletteChoice::Sage);
+            assert!((theme.get_content_scale() - 1.1).abs() < 1e-6);
+            assert_eq!(
+                state.get_device_art(),
+                catalog_adapter::art_in_color(FormFactor::Headphones, true),
+                "the current device is drawn black"
+            );
+            let cards: Vec<DeviceCard> = state.get_devices().iter().collect();
+            assert_eq!(
+                cards[0].art,
+                catalog_adapter::art_in_color(FormFactor::Headphones, true)
+            );
+            assert_eq!(
+                cards[1].art,
+                catalog_adapter::art_in_color(FormFactor::TwsEarbuds, true)
+            );
+            let models: Vec<ModelOption> = state.get_models().iter().collect();
+            assert!(!models.is_empty(), "the model list is filled");
+            for model in &models {
+                let form_factor = catalog_adapter::form_factor(model.code.as_str())
+                    .expect("a listed model is in the catalog");
+                assert_eq!(
+                    model.art,
+                    catalog_adapter::art_in_color(form_factor, true),
+                    "{} is drawn black",
+                    model.code
+                );
+            }
+            assert_eq!(
+                state.get_add_model_art(),
+                catalog_adapter::art_in_color(FormFactor::TwsEarbuds, true)
+            );
+
+            // The explicit Black choice keeps black pictures in a light window.
+            inner.settings.borrow_mut().device_color = DeviceColor::Black;
+            apply_theme(&inner, false);
+            assert!(!theme.get_dark());
+            assert_eq!(
+                state.get_device_art(),
+                catalog_adapter::art_in_color(FormFactor::Headphones, true)
+            );
+
+            // Silver overrides both the theme and the explicit Black choice.
+            inner.settings.borrow_mut().device_color = DeviceColor::Silver;
+            apply_theme(&inner, true);
+            assert_eq!(
+                state.get_device_art(),
+                catalog_adapter::art_in_color(FormFactor::Headphones, false)
+            );
+            assert_eq!(
+                state.get_add_model_art(),
+                catalog_adapter::art_in_color(FormFactor::TwsEarbuds, false)
+            );
+        });
+    }
+
+    #[test]
+    fn apply_theme_keeps_the_default_art_when_no_model_is_chosen() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            inner.settings.borrow_mut().device_color = DeviceColor::Black;
+            let state = ui.global::<AppState>();
+            apply_theme(&inner, true);
+            assert_eq!(state.get_device_art(), slint::Image::default());
+            assert_eq!(state.get_add_model_art(), slint::Image::default());
+        });
+    }
+
+    #[test]
+    fn a_model_outside_the_catalog_keeps_the_device_art_it_has() {
+        let art = catalog_adapter::art(FormFactor::TwsEarbuds);
+        let card = DeviceCard {
+            mac: "AA".into(),
+            name: "Unknown".into(),
+            code: "NOT-A-MODEL".into(),
+            art: art.clone(),
+            current: false,
+            demo: false,
+        };
+        let repainted = repaint_card(card.clone(), true);
+        assert_eq!(repainted.art, art);
+        assert_eq!(repainted.code, card.code);
+        let model = ModelOption {
+            code: "NOT-A-MODEL".into(),
+            name: "Unknown".into(),
+            art: art.clone(),
+        };
+        assert_eq!(repaint_model(model, true).art, art);
+    }
+
+    #[test]
+    fn black_pictures_follow_the_device_color_and_the_resolved_theme() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            inner.settings.borrow_mut().device_color = DeviceColor::AsTheme;
+            inner.system_dark.set(Some(false));
+            assert!(!paint_black(&inner));
+            inner.system_dark.set(Some(true));
+            assert!(paint_black(&inner));
+            inner.settings.borrow_mut().device_color = DeviceColor::Silver;
+            assert!(!paint_black(&inner));
+            inner.settings.borrow_mut().device_color = DeviceColor::Black;
+            inner.system_dark.set(Some(false));
+            assert!(paint_black(&inner));
+        });
+    }
+
+    #[test]
+    fn apply_language_selects_the_saved_language_and_falls_back_to_english() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            inner.settings.borrow_mut().language = Some("ru".into());
+            assert_eq!(apply_language(&inner), "ru");
+            assert_eq!(ui.global::<AppState>().get_app_language(), 14);
+
+            // A language Slint does not bundle cannot leave the previous
+            // translation in place: it falls back to the source language.
+            assert_eq!(
+                select_bundled_language("zz"),
+                settings::LANGUAGES[0].code,
+                "an unbundled choice falls back to English"
+            );
+
+            // Leave the shared test thread in the source language for the other
+            // window tests.
+            inner.settings.borrow_mut().language = Some("en".into());
+            assert_eq!(apply_language(&inner), "en");
+            assert_eq!(ui.global::<AppState>().get_app_language(), 1);
+        });
+    }
+
+    #[test]
+    fn the_follow_system_poll_runs_only_for_follow_system() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            inner.settings.borrow_mut().theme = AppTheme::System;
+            inner.sync_theme_poll();
+            assert!(
+                inner.theme_poll.borrow().is_some(),
+                "Follow system starts the poll"
+            );
+            inner.settings.borrow_mut().theme = AppTheme::Dark;
+            inner.sync_theme_poll();
+            assert!(
+                inner.theme_poll.borrow().is_none(),
+                "a fixed theme stops the poll"
+            );
+            inner.settings.borrow_mut().theme = AppTheme::Light;
+            inner.sync_theme_poll();
+            assert!(inner.theme_poll.borrow().is_none());
+        });
+    }
+
+    #[test]
+    fn applying_settings_without_a_window_does_not_panic() {
+        with_slint_thread(|| {
+            let ui = AppWindow::new().expect("the shell window builds");
+            let inner = test_inner(&ui);
+            drop(ui);
+
+            apply_theme(&inner, true);
+            assert_eq!(
+                inner.system_dark.get(),
+                Some(true),
+                "the resolved appearance is remembered without a window"
+            );
+            let selected = apply_language(&inner);
+            assert!(
+                settings::find_language(selected).is_some(),
+                "{selected} is a bundled language"
+            );
+            inner.sync_theme_poll();
+            assert!(
+                inner.theme_poll.borrow().is_none(),
+                "no window, no Follow-system poll"
+            );
+            // Leave the shared test thread in the source language.
+            select_bundled_language("en");
+        });
+    }
+
+    #[test]
+    fn settings_actions_apply_the_change_to_the_running_window() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            wire_actions(ui, &inner);
+            let actions = ui.global::<Actions>();
+            let state = ui.global::<AppState>();
+            let theme = ui.global::<Theme>();
+
+            actions.invoke_set_app_theme(2);
+            assert!(theme.get_dark(), "the chosen dark theme is applied");
+            assert_eq!(state.get_app_theme(), 2);
+
+            actions.invoke_set_palette(2);
+            assert_eq!(theme.get_palette(), PaletteChoice::Rose);
+            assert_eq!(state.get_app_palette(), 2);
+
+            actions.invoke_set_content_scale(2);
+            assert!((theme.get_content_scale() - 1.25).abs() < 1e-6);
+            assert_eq!(state.get_app_content_scale(), 2);
+
+            actions.invoke_set_content_scale(3);
+            assert!((theme.get_content_scale() - 1.5).abs() < 1e-6);
+            assert_eq!(state.get_app_content_scale(), 3);
+
+            actions.invoke_set_device_color(2);
+            assert_eq!(state.get_app_device_color(), 2);
+
+            actions.invoke_set_badge(false);
+            assert!(!state.get_show_one_earbud_badge());
+
+            actions.invoke_set_mode_view(1);
+            assert_eq!(state.get_app_mode_view(), 1);
+
+            assert_eq!(
+                *inner.settings.borrow(),
+                DesktopSettings {
+                    theme: AppTheme::Dark,
+                    accent: Accent::Rose,
+                    content_scale: ContentScale::Percent150,
+                    device_color: DeviceColor::Black,
+                    sound_mode_view: SoundModeView::Scale,
+                    one_earbud_badge: false,
+                    language: None,
+                    tray: TraySettings::default(),
+                },
+                "every action changed exactly its own field"
+            );
+        });
+    }
+
+    #[test]
+    fn settings_actions_save_to_the_document_and_keep_the_tray_choices() {
+        with_ui_window(|ui| {
+            let path = temp_settings_path("wired-document");
+            let _ = fs::remove_file(&path);
+            let mut initial = DesktopSettings::default();
+            initial.tray.icon = false;
+            initial.tray.battery = false;
+            let inner = test_inner_with_settings(ui, initial.clone(), path.clone());
+            wire_actions(ui, &inner);
+            let actions = ui.global::<Actions>();
+
+            actions.invoke_set_app_theme(2);
+            actions.invoke_set_palette(1);
+            actions.invoke_set_content_scale(3);
+            actions.invoke_set_device_color(2);
+            actions.invoke_set_mode_view(1);
+            actions.invoke_set_badge(false);
+            actions.invoke_set_language(14);
+
+            let saved = settings::load_settings(&path);
+            assert_eq!(saved.theme, AppTheme::Dark);
+            assert_eq!(saved.accent, Accent::Sage);
+            assert_eq!(saved.content_scale, ContentScale::Percent150);
+            assert_eq!(saved.device_color, DeviceColor::Black);
+            assert_eq!(saved.sound_mode_view, SoundModeView::Scale);
+            assert!(!saved.one_earbud_badge);
+            assert_eq!(saved.language.as_deref(), Some("ru"));
+            assert_eq!(
+                saved.tray, initial.tray,
+                "the tray and Settings choices share one document"
+            );
+            // A restarted app loads exactly what the last run saved.
+            assert_eq!(settings::load_settings(&path), saved);
+            assert!(
+                !PathBuf::from(format!("{}.tmp", path.display())).exists(),
+                "the save is atomic"
+            );
+
+            // Leave the shared test thread in the source language and remove the
+            // test document.
+            actions.invoke_set_language(1);
+            let _ = fs::remove_file(&path);
+        });
+    }
+
+    #[test]
+    fn invalid_settings_indexes_change_nothing() {
+        with_ui_window(|ui| {
+            let path = temp_settings_path("invalid-indexes");
+            let _ = fs::remove_file(&path);
+            let inner = test_inner_with_settings(ui, DesktopSettings::default(), path.clone());
+            wire_actions(ui, &inner);
+            let before = inner.settings.borrow().clone();
+            let actions = ui.global::<Actions>();
+            for index in [-1, 3, 99] {
+                actions.invoke_set_app_theme(index);
+                actions.invoke_set_palette(index);
+                actions.invoke_set_device_color(index);
+            }
+            for index in [-1, 4, 99] {
+                actions.invoke_set_content_scale(index);
+            }
+            for index in [-1, 2, 99] {
+                actions.invoke_set_mode_view(index);
+            }
+            for index in [-1, 17, 99] {
+                actions.invoke_set_language(index);
+            }
+            assert_eq!(*inner.settings.borrow(), before);
+            assert!(!path.exists(), "an invalid index saves nothing");
+        });
+    }
+
+    #[test]
+    fn copy_logs_puts_the_recent_log_on_the_clipboard() {
+        crate::logs::line("settings wiring copy-logs marker".to_owned());
+        let page = RecordedExportPanel::default();
+        let io = RecordedTransferIo::default();
+        assert!(copy_logs(&page, &io));
+        let copied = io
+            .copied
+            .borrow()
+            .clone()
+            .expect("the clipboard was written");
+        assert!(copied.starts_with("OpenSCL4 "), "the log header is copied");
+        assert!(
+            copied.contains("settings wiring copy-logs marker"),
+            "the real recent history is copied"
+        );
+        assert_eq!(page.last_toast(), Some((ToastKind::Copied, 0)));
+    }
+
+    #[test]
+    fn a_failed_copy_logs_is_logged_without_a_toast() {
+        let page = RecordedExportPanel::default();
+        let io = RecordedTransferIo {
+            fail_copy: Cell::new(true),
+            ..RecordedTransferIo::default()
+        };
+        assert!(!copy_logs(&page, &io));
+        assert_eq!(page.last_toast(), None);
+    }
+
     /// Manual hardware check, not part of the automated suite:
     ///
     /// ```text
@@ -13359,5 +15470,568 @@ mod tests {
             }
         }
         panic!("no paired A3062 answered");
+    }
+
+    /// Drains the worker channel until `done` holds, or the timeout expires.
+    fn pump_until(inner: &Rc<Inner>, done: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            drain_events(inner);
+            if done() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Starts the demo connection through the wired Add Device callbacks, as
+    /// the dialog's Demo mode switch and simulated row do, and returns the
+    /// controller state once the Overview shows the simulated device.
+    fn connect_demo(ui: &AppWindow) -> Rc<Inner> {
+        let inner = test_inner(ui);
+        wire_actions(ui, &inner);
+        let state = ui.global::<AppState>();
+        state.set_add_model_code(demo::DEMO_MODEL_CODE.into());
+        state.set_add_model_name("Space One Pro".into());
+        ui.global::<Actions>().invoke_set_demo(true);
+        let option: PairedOption = state
+            .get_paired_options()
+            .iter()
+            .next()
+            .expect("Demo mode lists the simulated device");
+        ui.global::<Actions>().invoke_pair(option.mac, option.name);
+        assert!(
+            wait_for_connection(&inner, ui, Connection::Connected, Duration::from_secs(5)),
+            "the simulated device connects without any hardware"
+        );
+        inner
+    }
+
+    #[test]
+    fn demo_mode_lists_the_simulated_device_and_refuses_other_models() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            wire_actions(ui, &inner);
+            let actions = ui.global::<Actions>();
+            let state = ui.global::<AppState>();
+
+            // A model the committed capture does not describe is refused with
+            // the dialog's own error line and no simulated row.
+            state.set_add_model_code("A3949".into());
+            actions.invoke_set_demo(true);
+            assert!(state.get_add_demo());
+            assert_eq!(0, state.get_paired_options().row_count());
+            assert_eq!(FailureKind::Other, state.get_add_failure_kind());
+            assert_eq!(demo::DEMO_UNAVAILABLE, state.get_add_error().as_str());
+
+            // The Space One Pro lists exactly one suggested simulated device,
+            // and the list is not a loading state.
+            state.set_add_model_code(demo::DEMO_MODEL_CODE.into());
+            actions.invoke_set_demo(true);
+            assert_eq!(1, state.get_paired_options().row_count());
+            let option: PairedOption = state.get_paired_options().iter().next().unwrap();
+            assert_eq!(demo::DEMO_MAC, option.mac.as_str());
+            assert_eq!(demo::DEMO_NAME, option.name.as_str());
+            assert!(option.suggested);
+            assert!(!state.get_add_loading());
+            assert_eq!(FailureKind::None, state.get_add_failure_kind());
+            assert_eq!("", state.get_add_error().as_str());
+
+            // Choosing another model while Demo mode is on repeats the refusal
+            // instead of listing the Windows paired devices.
+            actions.invoke_choose_model("A3949".into());
+            assert_eq!(demo::DEMO_UNAVAILABLE, state.get_add_error().as_str());
+            assert_eq!(0, state.get_paired_options().row_count());
+            actions.invoke_choose_model(demo::DEMO_MODEL_CODE.into());
+            assert_eq!(1, state.get_paired_options().row_count());
+
+            // Turning Demo mode off clears the simulated row and asks the real
+            // paired-device enumeration again.
+            let enumeration = inner.enumeration.get();
+            actions.invoke_set_demo(false);
+            assert!(!state.get_add_demo());
+            assert_eq!(0, state.get_paired_options().row_count());
+            assert!(state.get_add_loading());
+            assert_eq!(enumeration + 1, inner.enumeration.get());
+        });
+    }
+
+    #[test]
+    fn the_demo_connection_fills_every_implemented_page() {
+        with_ui_window(|ui| {
+            let inner = connect_demo(ui);
+            let state = ui.global::<AppState>();
+
+            // The saved card is the simulated device and is current; the demo
+            // flag is what My Devices and later reconnects read.
+            assert!(inner.demo.get());
+            let cards: Vec<DeviceCard> = state.get_devices().iter().collect();
+            assert_eq!(1, cards.len());
+            assert!(cards[0].demo);
+            assert!(cards[0].current);
+            assert_eq!(demo::DEMO_MAC, cards[0].mac.as_str());
+            assert_eq!(demo::DEMO_NAME, cards[0].name.as_str());
+            assert_eq!(demo::DEMO_MODEL_CODE, cards[0].code.as_str());
+            assert_eq!(demo::DEMO_NAME, state.get_device_name().as_str());
+            assert_eq!(demo::DEMO_MODEL_CODE, state.get_device_code().as_str());
+            assert_eq!(Page::Overview, state.get_page());
+            assert_eq!(Connection::Connected, state.get_connection());
+            assert!(state.get_batteries().row_count() > 0);
+            assert_eq!(2, state.get_mode_index(), "the capture reports Normal");
+            assert!(state.get_eq_available());
+
+            // The fixture state, not an invented one, is what the controller
+            // keeps and what every page is filled from.
+            {
+                let device = inner.device.borrow();
+                let device = device.as_deref().expect("the demo state is kept");
+                assert_eq!(Some(SoundMode::Normal), device.sound_mode);
+                assert_eq!(
+                    device
+                        .single_battery
+                        .as_ref()
+                        .and_then(|single| single.firmware.as_deref()),
+                    Some("04.39")
+                );
+                assert_eq!(None, device.serial);
+            }
+            let sound_pages: Vec<Page> = state.get_sound_pages().iter().collect();
+            assert_eq!(
+                vec![Page::SoundModes, Page::Equalizer, Page::Effects],
+                sound_pages
+            );
+            let device_pages: Vec<Page> = state.get_device_pages().iter().collect();
+            assert_eq!(
+                vec![
+                    Page::Controls,
+                    Page::Comfort,
+                    Page::Power,
+                    Page::Connections,
+                    Page::About,
+                ],
+                device_pages
+            );
+            assert!(state.get_eq_presets().row_count() > 1);
+            assert!(state.get_overview_rows().row_count() > 0);
+
+            // The Connections page's remembered-device list arrives on connect
+            // and is made of neutral names and addresses.
+            assert_eq!(*inner.dual_devices.borrow(), demo::demo_dual_devices());
+            for page in [
+                Page::Controls,
+                Page::Comfort,
+                Page::Power,
+                Page::Effects,
+                Page::About,
+            ] {
+                ui.global::<Actions>().invoke_navigate(page);
+                drain_events(&inner);
+                assert!(
+                    state.get_panels().row_count() > 0,
+                    "{page:?} is filled from the demo state"
+                );
+            }
+            ui.global::<Actions>().invoke_navigate(Page::Connections);
+            assert!(
+                pump_until(&inner, || {
+                    state
+                        .get_panels()
+                        .iter()
+                        .any(|panel| panel.kind == PanelKind::DualDevices)
+                }),
+                "the Connections page shows the simulated remembered devices"
+            );
+
+            // A demo connection has no session to probe: Diagnostics says so
+            // and its capture button stays disabled.
+            assert!(!state.get_diagnostic_available());
+            assert_eq!(
+                demo::DEMO_DIAGNOSTICS_UNAVAILABLE,
+                state.get_diagnostic_error().as_str()
+            );
+            assert!(
+                inner.commands.borrow().is_some(),
+                "the demo command channel stays open for writes"
+            );
+        });
+    }
+
+    #[test]
+    fn demo_writes_update_only_the_simulated_state() {
+        with_ui_window(|ui| {
+            let inner = connect_demo(ui);
+            let state = ui.global::<AppState>();
+            let actions = ui.global::<Actions>();
+
+            // Sound mode tile: the reported mode follows the click.
+            click_mode(ui, 1);
+            assert_eq!(Some(1), wait_for_mode(ui, &inner, 1));
+
+            // Equalizer preset: the page shows the preset the simulated device
+            // reports, from the model's own catalog.
+            actions.invoke_eq_preset("3".into());
+            assert!(
+                pump_until(&inner, || state.get_eq_preset().as_str() == "3"),
+                "the simulated device reports the chosen preset"
+            );
+            assert_eq!("Bass Reducer", state.get_eq_name().as_str());
+
+            // Custom curve: the visible bands are the written ones, and the two
+            // invisible bands keep their measured fixed values.
+            let custom_preset = CUSTOM_EQUALIZER_PRESET_ID.to_string();
+            actions.invoke_eq_commit(0, 30);
+            assert!(
+                pump_until(&inner, || state.get_eq_preset().as_str()
+                    == custom_preset.as_str()),
+                "the simulated device reports custom bands"
+            );
+            let bands: Vec<EqBand> = state.get_eq_bands().iter().collect();
+            assert_eq!(30, bands[0].value);
+
+            // A settings page toggle: the re-polled state and the page follow.
+            // LDAC is off in the capture, so toggling it on must come from the
+            // simulated write's re-poll, not from the page's own click.
+            actions.invoke_navigate(Page::Effects);
+            drain_events(&inner);
+            click_toggle(ui, "ldac", true);
+            assert!(
+                wait_for_settings(ui, &inner, |settings| settings.ldac, "LDAC on").is_some(),
+                "the simulated settings change"
+            );
+            assert_eq!("", state.get_error_label().as_str());
+            // The re-polled state carries the simulated equalizer too.
+            {
+                let device = inner.device.borrow();
+                let equalizer = device
+                    .as_deref()
+                    .and_then(|device| device.equalizer)
+                    .expect("the demo state keeps an equalizer");
+                assert_eq!(CUSTOM_EQUALIZER_PRESET_ID, equalizer.preset_id);
+                assert_eq!(30, equalizer.bands[0]);
+                assert_eq!(
+                    FIXED_EQ_BANDS,
+                    [
+                        equalizer.bands[VISIBLE_EQ_BANDS],
+                        equalizer.bands[VISIBLE_EQ_BANDS + 1]
+                    ]
+                );
+            }
+
+            // The Connections page's list actions run against the simulated
+            // list: connect the remembered phone, then forget the desktop.
+            actions.invoke_navigate(Page::Connections);
+            assert!(pump_until(&inner, || {
+                state
+                    .get_panels()
+                    .iter()
+                    .any(|panel| panel.kind == PanelKind::DualDevices)
+            }));
+            actions.invoke_connect_item(DUAL_DEVICES_ROW_ID.into(), 1);
+            assert!(
+                pump_until(&inner, || {
+                    inner
+                        .dual_devices
+                        .borrow()
+                        .get(1)
+                        .is_some_and(|device| device.connected)
+                }),
+                "the simulated phone connects"
+            );
+            actions.invoke_remove_item(DUAL_DEVICES_ROW_ID.into(), 0);
+            assert!(
+                pump_until(&inner, || inner.dual_devices.borrow().len() == 1),
+                "the simulated desktop is forgotten"
+            );
+
+            // The writes went through the demo worker only: the connection is
+            // still established, its channel is still open and nothing can
+            // have reached a radio.
+            assert_eq!(Connection::Connected, state.get_connection());
+            assert!(inner.demo.get());
+            assert!(inner.commands.borrow().is_some());
+            assert!(!state.get_diagnostic_available());
+        });
+    }
+
+    #[test]
+    fn the_demo_worker_answers_every_command_locally() {
+        let model = demo::demo_model();
+        let state = demo::demo_state();
+        let preset = model.equalizer_presets()[1];
+        let curve = [30, -30, 60, 0, -60, 20, 0, -20];
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::ChangeSoundMode {
+                request: 1,
+                mode: SoundMode::Transparency,
+            })
+            .expect("the mode click is queued");
+        commands
+            .send(DeviceCommand::ChangeEqualizerPreset {
+                request: 2,
+                preset_id: preset.id,
+            })
+            .expect("the preset click is queued");
+        commands
+            .send(DeviceCommand::WriteCustomCurve {
+                request: 3,
+                bands: curve,
+            })
+            .expect("the curve release is queued");
+        commands
+            .send(DeviceCommand::SetSetting {
+                request: 4,
+                setting: SettingCommand::Ldac(false),
+            })
+            .expect("the settings toggle is queued");
+        commands
+            .send(DeviceCommand::ReadDualConnections)
+            .expect("the Connections refresh is queued");
+        commands
+            .send(DeviceCommand::DualConnectionWrite(DualAction::Disconnect(
+                demo::DEMO_DESKTOP_MAC,
+            )))
+            .expect("the disconnect row action is queued");
+        commands
+            .send(DeviceCommand::DualConnectionWrite(DualAction::Forget(
+                demo::DEMO_PHONE_MAC,
+            )))
+            .expect("the forget row action is queued");
+        commands
+            .send(DeviceCommand::RunDiagnostics { request: 9 })
+            .expect("a stray diagnostics request is queued");
+        drop(commands);
+
+        serve_demo_device(model, state, 7, events, command_receiver);
+
+        // The connect report and the remembered-device list arrive first, in
+        // the same order a real A3062 worker sends them.
+        match received.try_recv().expect("the connect report") {
+            Event::Connected {
+                attempt: 7,
+                outcome: ConnectOutcome::Connected(reported_model, reported),
+            } => {
+                assert_eq!("A3062", reported_model.code);
+                assert_eq!(Some(SoundMode::Normal), reported.sound_mode);
+                assert_eq!(None, reported.serial);
+            }
+            other => panic!("unexpected connect report: {other:?}"),
+        }
+        match received.try_recv().expect("the dual list") {
+            Event::DualConnectionsRead {
+                attempt: 7,
+                outcome: Ok(devices),
+            } => assert_eq!(demo::demo_dual_devices(), devices),
+            other => panic!("unexpected dual list: {other:?}"),
+        }
+        match received.try_recv().expect("the mode change") {
+            Event::ModeChanged {
+                attempt: 7,
+                request: 1,
+                outcome: Ok(mode),
+            } => assert_eq!(SoundMode::Transparency, mode),
+            other => panic!("unexpected mode event: {other:?}"),
+        }
+        match received.try_recv().expect("the preset change") {
+            Event::PresetChanged {
+                attempt: 7,
+                request: 2,
+                outcome: Ok(equalizer),
+            } => {
+                assert_eq!(preset.id, equalizer.preset_id);
+                assert_eq!(preset.bands, equalizer.bands);
+            }
+            other => panic!("unexpected preset event: {other:?}"),
+        }
+        match received.try_recv().expect("the curve change") {
+            Event::CurveChanged {
+                attempt: 7,
+                request: 3,
+                outcome: Ok(equalizer),
+            } => {
+                assert_eq!(CUSTOM_EQUALIZER_PRESET_ID, equalizer.preset_id);
+                assert_eq!(curve, equalizer.visible_bands());
+                assert_eq!(
+                    FIXED_EQ_BANDS,
+                    [
+                        equalizer.bands[VISIBLE_EQ_BANDS],
+                        equalizer.bands[VISIBLE_EQ_BANDS + 1]
+                    ]
+                );
+            }
+            other => panic!("unexpected curve event: {other:?}"),
+        }
+        match received.try_recv().expect("the setting change") {
+            Event::SettingChanged {
+                attempt: 7,
+                request: 4,
+                setting: SettingCommand::Ldac(false),
+                outcome: Ok(reported),
+            } => {
+                assert_eq!(Some(false), reported.settings.map(|settings| settings.ldac));
+            }
+            other => panic!("unexpected setting event: {other:?}"),
+        }
+        match received.try_recv().expect("the list refresh") {
+            Event::DualConnectionsRead {
+                attempt: 7,
+                outcome: Ok(devices),
+            } => assert_eq!(demo::demo_dual_devices(), devices),
+            other => panic!("unexpected list refresh: {other:?}"),
+        }
+        match received.try_recv().expect("the disconnect write") {
+            Event::DualConnectionsWritten {
+                attempt: 7,
+                action: DualAction::Disconnect(mac),
+                outcome: Ok(devices),
+            } => {
+                assert_eq!(demo::DEMO_DESKTOP_MAC, mac);
+                assert!(
+                    devices
+                        .iter()
+                        .all(|device| device.mac != demo::DEMO_DESKTOP_MAC || !device.connected)
+                );
+            }
+            other => panic!("unexpected disconnect event: {other:?}"),
+        }
+        match received.try_recv().expect("the forget write") {
+            Event::DualConnectionsWritten {
+                attempt: 7,
+                action: DualAction::Forget(mac),
+                outcome: Ok(devices),
+            } => {
+                assert_eq!(demo::DEMO_PHONE_MAC, mac);
+                assert_eq!(1, devices.len());
+            }
+            other => panic!("unexpected forget event: {other:?}"),
+        }
+        // The stray diagnostics request was ignored: no capture is invented.
+        assert!(
+            received.try_recv().is_err(),
+            "demo diagnostics are never run"
+        );
+    }
+
+    #[test]
+    fn every_demo_setting_write_changes_its_field() {
+        let mut settings = demo::demo_state()
+            .settings
+            .expect("the demo capture reports settings");
+        apply_demo_setting(
+            &mut settings,
+            SettingCommand::ButtonDoublePress(Some(ButtonAction::BassUp)),
+        );
+        assert_eq!(Some(ButtonAction::BassUp), settings.button_double_press);
+        apply_demo_setting(
+            &mut settings,
+            SettingCommand::AmbientSoundModeCycle(AmbientSoundModeCycle {
+                noise_canceling: false,
+                transparency: true,
+                normal: false,
+            }),
+        );
+        assert!(!settings.ambient_sound_mode_cycle.noise_canceling);
+        assert!(settings.ambient_sound_mode_cycle.transparency);
+        apply_demo_setting(&mut settings, SettingCommand::LowBatteryPrompt(false));
+        assert!(!settings.low_battery_prompt);
+        apply_demo_setting(&mut settings, SettingCommand::DolbyAudio(true));
+        assert!(settings.dolby_audio);
+        apply_demo_setting(&mut settings, SettingCommand::Ldac(false));
+        assert!(!settings.ldac);
+        apply_demo_setting(&mut settings, SettingCommand::DualConnections(false));
+        assert!(!settings.dual_connections);
+        apply_demo_setting(
+            &mut settings,
+            SettingCommand::AutoPowerOff(AutoPowerOff {
+                enabled: false,
+                duration: AutoPowerOffDuration::NinetyMinutes,
+            }),
+        );
+        assert!(!settings.auto_power_off.enabled);
+        assert_eq!(
+            AutoPowerOffDuration::NinetyMinutes,
+            settings.auto_power_off.duration
+        );
+        let refresh_rate = settings.limit_high_volume.refresh_rate;
+        apply_demo_setting(
+            &mut settings,
+            SettingCommand::LimitHighVolume {
+                enabled: true,
+                db_limit: DbLimit::new(85).expect("85 is a measured dB limit"),
+            },
+        );
+        assert!(settings.limit_high_volume.enabled);
+        assert_eq!(85, settings.limit_high_volume.db_limit.value());
+        assert_eq!(
+            refresh_rate, settings.limit_high_volume.refresh_rate,
+            "the dB limit keeps the chosen refresh rate"
+        );
+        apply_demo_setting(
+            &mut settings,
+            SettingCommand::LimitHighVolumeRefreshRate(DecibelReadingRefreshRate::OneMinute),
+        );
+        assert_eq!(
+            DecibelReadingRefreshRate::OneMinute,
+            settings.limit_high_volume.refresh_rate
+        );
+        apply_demo_setting(&mut settings, SettingCommand::SideTone(false));
+        assert!(!settings.side_tone);
+        apply_demo_setting(&mut settings, SettingCommand::VoicePrompt(false));
+        assert!(!settings.voice_prompt);
+    }
+
+    #[test]
+    fn a_demo_disconnect_keeps_the_card_and_reconnects_without_windows_pairing() {
+        with_ui_window(|ui| {
+            let inner = connect_demo(ui);
+            let state = ui.global::<AppState>();
+            let actions = ui.global::<Actions>();
+
+            // Change something so the fresh demo state after a reconnect is
+            // observable.
+            click_mode(ui, 1);
+            assert_eq!(Some(1), wait_for_mode(ui, &inner, 1));
+            let attempt = inner.connect.get();
+            let enumeration = inner.enumeration.get();
+
+            // Disconnect returns to My Devices, keeps the saved demo card and
+            // stops the demo worker.
+            actions.invoke_disconnect();
+            assert_eq!(Page::Devices, state.get_page());
+            assert_eq!(Connection::Off, state.get_connection());
+            let cards: Vec<DeviceCard> = state.get_devices().iter().collect();
+            assert_eq!(1, cards.len());
+            assert!(cards[0].demo);
+            assert!(!cards[0].current);
+            assert!(inner.commands.borrow().is_none());
+
+            // Retry reconnects the demo card: no Windows paired device is
+            // looked up and no address is parsed, yet the connection succeeds.
+            actions.invoke_retry();
+            assert_eq!(Connection::Connecting, state.get_connection());
+            assert!(
+                wait_for_connection(&inner, ui, Connection::Connected, Duration::from_secs(5)),
+                "the saved demo card reconnects without hardware"
+            );
+            assert_eq!(
+                enumeration,
+                inner.enumeration.get(),
+                "no Windows enumeration"
+            );
+            assert!(inner.connect.get() > attempt);
+            assert!(inner.demo.get());
+            // Each demo connect starts from the committed capture again, so
+            // the previous mode click is gone; this demo-only behaviour is
+            // documented on the demo module.
+            assert_eq!(2, state.get_mode_index());
+            assert_eq!(Page::Overview, state.get_page());
+            assert_eq!(1, state.get_devices().row_count());
+            assert!(state.get_devices().iter().next().unwrap().demo);
+            assert!(!state.get_diagnostic_available());
+        });
     }
 }

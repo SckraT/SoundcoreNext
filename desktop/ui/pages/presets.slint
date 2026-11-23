@@ -1,11 +1,10 @@
 // Quick presets: a card for each, creating one from the current settings, and choosing which of its settings it
 // applies. Rust (src/presets.rs) puts the cards and the editor's rows together.
-import { LineEdit } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { AppState, Actions, Page, PresetCard, PresetFieldRow } from "../types.slint";
 import { Strings } from "../strings.slint";
-import { Icon, IconButton, Button, ButtonKind, Note, ProfileCurve, MenuItem } from "../components/basics.slint";
+import { Icon, IconButton, Button, ButtonKind, Note, ProfileCurve, MenuItem, TextField } from "../components/basics.slint";
 import { ScrollArea } from "../components/scrollarea.slint";
 import { PageHeading } from "../shell.slint";
 import { DialogFrame } from "add_device.slint";
@@ -234,8 +233,9 @@ export component CreatePresetDialog inherits DialogFrame {
         color: Theme.muted;
         font-size: Theme.font-small;
     }
-    name := LineEdit {
-        placeholder-text: @tr("For example, for work");
+    name := TextField {
+        label: @tr("Preset name");
+        placeholder: @tr("For example, for work");
         edited => { AppState.preset-create-problem = 0; }
         accepted => { Actions.preset-create(self.text, AppState.preset-create-problem == 2); }
         init => { self.focus(); }
@@ -276,6 +276,7 @@ component FieldRowView inherits Rectangle {
     background: touch.has-hover ? Theme.hover : transparent;
     accessible-role: checkbox;
     accessible-label: field.label;
+    accessible-checkable: true;
     accessible-checked: field.enabled;
     accessible-action-default => { Actions.preset-toggle(AppState.editing-preset, field.id, !field.enabled); }
     touch := TouchArea {

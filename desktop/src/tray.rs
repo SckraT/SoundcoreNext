@@ -32,6 +32,7 @@ pub use generated::Tray;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use serde::{Deserialize, Serialize};
 use slint::{CloseRequestResponse, ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use soundcore_models::DeviceState;
 
@@ -40,9 +41,13 @@ use crate::{AppState, AppWindow, Battery, Connection};
 /// The product name the tray shows in its tooltip, its title and its "Open" item.
 const APP_NAME: &str = "OpenSCL4";
 
-/// What the Settings page's "Desktop and quick access" panel chooses. Every
-/// choice lives in memory only: this slice persists nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the Settings page's "Desktop and quick access" panel chooses.
+///
+/// The controller stores this small document separately from device state and
+/// Overview preferences. Missing fields use the defaults so newer versions can
+/// add choices without invalidating an existing document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TraySettings {
     /// `app-tray`: whether the notification-area icon is shown at all.
     pub icon: bool,
@@ -364,14 +369,13 @@ pub struct TrayShell {
 }
 
 impl TrayShell {
-    /// Creates and shows the icon, fills in the empty menu, and wires the menu's
-    /// Open and Quit items and the window's close button.
+    /// Creates the shell from the already-loaded settings, shows the icon when
+    /// requested, fills in the empty menu, and wires Open, Quit and close.
     ///
     /// A platform without a notification area gets a warning and the program
     /// keeps working with no icon; closing the window then quits as usual.
-    pub fn new(ui: &AppWindow, actions: TrayActions) -> Self {
+    pub fn new(ui: &AppWindow, actions: TrayActions, settings: TraySettings) -> Self {
         let window = ui.as_weak();
-        let settings = TraySettings::default();
         let close_to_tray = Rc::new(Cell::new(settings.close_to_tray));
         let icon_hosted = Rc::new(Cell::new(false));
         let shell = Self {

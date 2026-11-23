@@ -4186,6 +4186,7 @@ dependencies = [
  "const-field-offset",
  "i-slint-backend-linuxkms",
  "i-slint-backend-selector",
+ "i-slint-backend-winit",
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",
@@ -4377,6 +4378,8 @@ version = "2.0.0"
 dependencies = [
  "arboard",
  "rfd",
+ "serde",
+ "serde_json",
  "slint",
  "slint-build",
  "soundcore-diagnostics",
@@ -4384,6 +4387,7 @@ dependencies = [
  "soundcore-profiles",
  "soundcore-protocol",
  "soundcore-session",
+ "sys-locale",
  "windows",
 ]
 

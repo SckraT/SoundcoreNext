@@ -1,11 +1,10 @@
 // The equalizer: the device's profiles, the bands on a chart with sliders and fields, the saved profiles, and moving
 // profiles in and out. Rust (src/equalizer.rs) works out the chart; the points, sliders and fields sit in the same
 // columns, one per band.
-import { LineEdit } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { AppState, Actions, Page, EqBand, EqProfile, ImportItem, TransferNote } from "../types.slint";
-import { Icon, IconButton, Button, ButtonKind, Chip, TextLink, Panel, PanelHeading, Note, Banner, Tag, ProfileCurve, MenuItem, CheckRow } from "../components/basics.slint";
+import { Icon, IconButton, Button, ButtonKind, Chip, TextLink, Panel, PanelHeading, Note, Banner, Tag, ProfileCurve, MenuItem, CheckRow, TextField } from "../components/basics.slint";
 import { PageHeading } from "../shell.slint";
 import { DialogFrame } from "add_device.slint";
 
@@ -722,8 +721,9 @@ export component SaveProfileDialog inherits DialogFrame {
         color: Theme.muted;
         font-size: Theme.font-small;
     }
-    name := LineEdit {
-        placeholder-text: @tr("My sound");
+    name := TextField {
+        label: @tr("Profile name");
+        placeholder: @tr("My sound");
         edited => { AppState.eq-save-problem = 0; }
         accepted => { Actions.eq-save(self.text, AppState.eq-save-problem == 2); }
         init => { self.focus(); }
