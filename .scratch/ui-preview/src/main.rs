@@ -66,7 +66,17 @@ fn toggle(id: &str, label: &str, on: bool) -> QuickToggle {
         label: label.into(),
         on,
         enabled: true,
-        reason: "".into(),
+        reason: message("", "", ""),
+    }
+}
+
+// A Rust model message, as `desktop/src/messages.rs` builds it: the UI resolves
+// the key through `Messages.text`; the English sentence lives in messages.slint.
+fn message(key: &str, arg0: &str, arg1: &str) -> UiMessage {
+    UiMessage {
+        key: key.into(),
+        arg0: arg0.into(),
+        arg1: arg1.into(),
     }
 }
 
@@ -78,7 +88,7 @@ fn setting_row(id: &str, kind: RowKind, label: &str) -> SettingRow {
         kind,
         label: label.into(),
         enabled: true,
-        reason: "".into(),
+        reason: message("", "", ""),
         checked: false,
         options: ModelRc::default(),
         index: -1,
@@ -129,12 +139,11 @@ fn panel(kind: PanelKind, rows: Vec<SettingRow>) -> SettingsPanel {
 // a list row after a normal one. A capture of this state must show every row
 // growing and pushing its own divider down; text drawn over a divider is the
 // regression the fixture catches. Preview-only data: the controller never sends
-// these strings.
+// this `preview.long-reason` key.
 fn long_panels() -> ModelRc<SettingsPanel> {
-    const REASON: &str = "This setting is unavailable while the earbuds are in the charging case. Take them out and keep them connected to change it.";
     const LABEL: &str = "An unusually long setting name that has to wrap inside the row";
     let with_reason = |mut row: SettingRow| {
-        row.reason = REASON.into();
+        row.reason = message("preview.long-reason", "", "");
         row
     };
     let toggle = with_reason(toggle_row("longToggle", LABEL, true));

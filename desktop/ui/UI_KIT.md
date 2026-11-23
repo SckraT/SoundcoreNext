@@ -169,10 +169,12 @@ actually supports and produces `AppState.overview-rows`, `quick-toggles`,
   the Sound mode page and Overview block are hidden; the equalizer and the
   device pages stay available instead of the connection failing. Do not invent
   a scale position or send a `06 81` frame without a measured block.
-- A disabled row's device reason is English data from the controller and is
-  localized by the UI through `LocalizedText.setting-reason` when it is one the
-  kit knows (for example `Turn on spatial audio first`); unknown reasons pass
-  through unchanged.
+- A disabled row's or quick toggle's reason is a `UiMessage` from the
+  controller: a catalog key plus up to two arguments. The UI resolves it through
+  `Messages.text` (`messages.slint`), which holds the English `@tr` source and
+  therefore the translated copy; Rust carries no sentence for it. An available
+  row sends the empty message, so `reason.key == ""` means "nothing to explain"
+  and no reason line is drawn.
 - Quick presets and the Overview's case shortcut stay unsupported until the core
   supplies real data and working behavior. Do not create decorative
   substitutes. The A3954's case settings are a real Case page, not an Overview
@@ -225,11 +227,25 @@ restore controls; Retry remains an explicit user action.
 
 ### Runtime labels
 
-Static UI copy uses `@tr`. Names and values that come from the device model are
+Static UI copy uses `@tr`. Sentences that the Rust model composes are not
+carried as English text: the model field holds a `UiMessage` (`key`, `arg0`,
+`arg1`), and `Messages.text` in `messages.slint` resolves the key through `@tr`
+and the translation documents. `desktop/src/messages.rs` owns the typed key
+constants and constructors; a key is an internal identifier such as
+`quick-toggle.one-earbud`, never UI copy, and the English source lives in
+`messages.slint` with the rest of the translatable strings. `arg0`/`arg1` fill
+that source's `{}` placeholders in order; an empty key is the empty message.
+Adding a runtime sentence means three changes: a constant and constructor in
+`messages.rs`, a matching `if message.key == ...` branch with its `@tr` source in
+`messages.slint`, and the source string in every required `.po` document. A
+branch that uses placeholders passes `message.arg0`/`message.arg1`.
+
+Names and values that come from the device model are
 English data at the protocol/controller boundary; the UI translates the ones it
 knows through `components/localized.slint` (`LocalizedText.setting-label`,
 `setting-text`, `option`, `mode-label`), keyed by the stable setting id or
-protocol value. Add a mapping there when a new row, option or mode label is
+protocol value. `LocalizedText` stays for those labels and option values; it does
+not carry sentences. Add a mapping there when a new row, option or mode label is
 introduced, and add the `@tr` strings to the locale documents. This includes the
 A3954 rows (`windNoiseSuppression`, `wearingDetection`, `easyChat`,
 `easyChatWaitTime`, `soundLeakCompensation`, `spatialAudio`,

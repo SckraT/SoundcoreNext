@@ -157,9 +157,10 @@ reconnect. No hardware acceptance claim is implied by this source record.
   suppression`, `Spatial audio`, the easy-chat/limit-high-volume rows, the
   left/right/case battery and firmware About ids, and the `5/10/15 seconds`,
   `10/20/30/60 minutes` and spatial-audio mode values). The disabled spatial
-  select rows' device reason (`Turn on spatial audio first`) is translated the
-  same way through `LocalizedText.setting-reason`, because it is English data
-  from the controller. `desktop/translations/ru/...po` gained their Russian
+  select rows' device reason (`Turn on spatial audio first`) was translated the
+  same way through `LocalizedText.setting-reason` at the time; UI-polish ticket
+  03 moved disabled reasons to `UiMessage` + `Messages` (see the message catalog
+  entry below). `desktop/translations/ru/...po` gained their Russian
   translations. The controller fills the rows and owns every device write; the
   view still renders state only. The A3954's sound-mode block is optional: when
   the device reports an unmeasured value for it, the controller hides the scale
@@ -230,3 +231,40 @@ reconnect. No hardware acceptance claim is implied by this source record.
   - `UI_KIT.md` records the flow-divider/auto-height rule; `GUIDE.md` records the
     same rule as the way to change row layout and points at the long-string
     preview fixture; `README.md` no longer places Copy logs on Settings.
+- UI-polish ticket 03 (runtime message catalog):
+  - `types.slint`: new `UiMessage { key, arg0, arg1 }`. `SettingRow.reason` and
+    `QuickToggle.reason` are now a `UiMessage` instead of a `string`, so the Rust
+    model can no longer send an English sentence for those fields; the empty key
+    is the empty message and draws no reason line.
+  - `messages.slint` (new): global `Messages.text(UiMessage) -> string`. Each
+    branch matches an internal key and returns its English source through `@tr`,
+    passing `message.arg0`/`message.arg1` where the source has `{}` placeholders;
+    an unknown or empty key returns `""`. The English sentence therefore lives in
+    the Slint translation catalog, not in Rust.
+  - `src/messages.rs` (new): typed key constants (`QUICK_TOGGLE_ONE_EARBUD`,
+    `SETTING_TURN_ON_SPATIAL_AUDIO`), `with_args`, `empty` and one constructor per
+    migrated reason; a test asserts the key, the empty arguments and that the
+    English sources exist only in `messages.slint` and the Russian `.po`.
+  - `components/settings.slint`: `SettingRowView` renders a reason through
+    `Messages.text(root.setting.reason)` when the reason key is non-empty.
+    `components/localized.slint` drops `LocalizedText.setting-reason`; the
+    runtime-label mapping stays for device-id labels and option values.
+    `pages/overview.slint` renders a disabled quick toggle's reason through
+    `Messages.text` too.
+  - `src/overview.rs`: the LDAC one-earbud toggle reason is the
+    `quick-toggle.one-earbud` key. `src/controller.rs`: the two disabled
+    spatial-audio rows use `setting.turn-on-spatial-audio`; the shared row
+    constructors start with the empty message. Visible behavior and the A3062 /
+    A3954 capability rules are unchanged; the English source of the LDAC reason
+    is the same sentence as before and the spatial reason is the existing msgid.
+  - `translations/ru/...po`: the new `Changing is available when both earbuds are
+    connected` msgid (the spatial reason reuses the existing `Turn on spatial
+    audio first` msgid). The preview fixture's wrapped reason is a preview-only
+    `preview.long-reason` branch, so its long-string coverage keeps working
+    through the same `Messages` path; the ru document carries its source too.
+  - `.scratch/ui-preview`: sends `UiMessage` keys (`message(...)`), including
+    `preview.long-reason` for the wrapped-row fixture, instead of raw strings.
+  - `UI_KIT.md`/`GUIDE.md` record the contract: UI-facing sentences from Rust are
+    `UiMessage` + `Messages`; `LocalizedText` remains for device-id labels and
+    option values; keys are identifiers, not UI copy. Errors, failure text and
+    diagnostics copy stay as they are for ticket 04.

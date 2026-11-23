@@ -590,9 +590,10 @@ The **Sound and effects** page: LDAC, Spatial audio with the music-mode and
 effect-mode selects disabled with the device reason “Turn on spatial audio
 first”, sound leak compensation, and the page note that changing the equalizer
 turns spatial audio off. The acceptance toggled LDAC and spatial audio (enable,
-music mode, effect mode) and restored each. The English reason is controller
-data and is localized by the view (`LocalizedText.setting-reason`); the Russian
-UI shows “Сначала включите пространственный звук”.
+music mode, effect mode) and restored each. The reason is a message key from the
+controller, resolved by the view through `Messages.text` (`ui/messages.slint`,
+the runtime message catalog); the Russian UI shows “Сначала включите
+пространственный звук”.
 
 ![About with a connected Liberty 4 Pro](live-a3954-about.png)
 

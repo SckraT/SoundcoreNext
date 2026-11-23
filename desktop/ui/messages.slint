@@ -1,0 +1,30 @@
+// The sentences the Rust model supplies. Rust sends a message key and up to two
+// arguments as a `UiMessage`; this catalog turns the key back into its English
+// source through `@tr`, so the `.po` documents translate it like static UI copy.
+// Keys are internal identifiers, never UI text: keep every English sentence in
+// the `@tr` branch below (or in the page/component that shows it), not in Rust.
+import { UiMessage } from "types.slint";
+
+export global Messages {
+    public pure function text(message: UiMessage) -> string {
+        // The empty message: the model has nothing to explain.
+        if message.key == "" { return ""; }
+        // The LDAC quick toggle while only one of a pair is connected. A branch's
+        // source string takes the message arguments in order where it has `{}`
+        // placeholders, e.g. `@tr("{} of {}", message.arg0, message.arg1)`.
+        if message.key == "quick-toggle.one-earbud" {
+            return @tr("Changing is available when both earbuds are connected");
+        }
+        // The two spatial-audio choices while spatial audio itself is off.
+        if message.key == "setting.turn-on-spatial-audio" {
+            return @tr("Turn on spatial audio first");
+        }
+        // Preview-only: the wrapped-row fixture in `.scratch/ui-preview` renders a
+        // long device reason, which no controller message sends. It stays a key so
+        // the fixture tests the same Messages path as real reasons.
+        if message.key == "preview.long-reason" {
+            return @tr("This setting is unavailable while the earbuds are in the charging case. Take them out and keep them connected to change it.");
+        }
+        return "";
+    }
+}

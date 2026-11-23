@@ -7,6 +7,7 @@ import { ModeTiles, ModeScale, ModeRow } from "../components/modes.slint";
 import { PageHeading } from "../shell.slint";
 import { DialogFrame } from "add_device.slint";
 import { ScrollArea } from "../components/scrollarea.slint";
+import { Messages } from "../messages.slint";
 
 export global BlockText {
     public pure function title(kind: BlockKind) -> string {
@@ -233,8 +234,8 @@ component QuickSettingsPanel inherits Panel {
     for toggle in AppState.quick-toggles: VerticalLayout {
         padding-top: toggle.enabled ? 0px : Theme.space-2;
         spacing: 0px;
-        if !toggle.enabled: Text {
-            text: toggle.label + ": " + toggle.reason;
+        if !toggle.enabled && toggle.reason.key != "": Text {
+            text: toggle.label + ": " + Messages.text(toggle.reason);
             color: Theme.muted;
             font-size: Theme.font-caption;
             wrap: word-wrap;
