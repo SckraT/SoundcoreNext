@@ -1152,14 +1152,15 @@ fn builds_the_exact_a3954_setting_frames() {
             "08 EE 00 00 00 07 87 0E 00 00 00 00 00 92",
         ),
         (
-            // The real fixture's flags: only find device is on.
+            // The real fixture's flags: only find device is on. The `07 87`
+            // body is in the app's order, so find device is the second byte.
             A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
                 atmospheric: false,
                 remote_camera: false,
                 find_device: true,
                 case_spatial_audio: false,
             }),
-            "08 EE 00 00 00 07 87 0E 00 00 00 01 00 93",
+            "08 EE 00 00 00 07 87 0E 00 00 01 00 00 93",
         ),
         (
             A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
@@ -1584,6 +1585,8 @@ fn keeps_unknown_a3954_button_action_bytes() {
 
 #[test]
 fn a3954_case_commands_follow_the_measured_order() {
+    // The command order is the app's, not the state's: remote camera, find
+    // device, case spatial audio, atmospheric.
     let features = A3954CaseFeatures {
         atmospheric: true,
         remote_camera: false,
@@ -1592,12 +1595,12 @@ fn a3954_case_commands_follow_the_measured_order() {
     };
     assert_eq!(
         features.command_body(),
-        [1, 0, 1, 0],
-        "the body is atmospheric, remote camera, find device, case spatial audio"
+        [0, 1, 0, 1],
+        "the body is remote camera, find device, case spatial audio, atmospheric"
     );
     let setting = A3954SettingCommand::CaseFeatures(features);
     assert_eq!(setting.command(), Command::new(0x07, 0x87));
-    assert_eq!(setting.body(), vec![1, 0, 1, 0]);
+    assert_eq!(setting.body(), vec![0, 1, 0, 1]);
 
     for language in A3954CaseLanguage::ALL {
         let setting = A3954SettingCommand::CaseLanguage(language);
@@ -1606,11 +1609,12 @@ fn a3954_case_commands_follow_the_measured_order() {
         assert_eq!(language.command_body(), [language.value()]);
     }
 
-    // The parsed state's own flags and language write back as the same bytes.
+    // The parsed state's own flags write back in the command order: the fixture
+    // has only find device on, which is body byte 1.
     let a3954 = parsed_state(&a3954_captured_body());
     assert_eq!(
         A3954SettingCommand::CaseFeatures(a3954.case_features).body(),
-        vec![0, 0, 1, 0]
+        vec![0, 1, 0, 0]
     );
     assert_eq!(
         A3954SettingCommand::CaseLanguage(a3954.case_language).body(),

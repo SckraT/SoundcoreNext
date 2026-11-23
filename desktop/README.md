@@ -595,6 +595,39 @@ The **About the device** page: left/right/case battery (69/69/80 %), both earbud
 firmwares 04.29 and the case firmware 01.58. The serial row is deliberately
 absent; the capture carries no address or serial.
 
+### Live A3954 buttons/case acceptance captures (ticket 03, 2026-11-23)
+
+These three captures are from the finished build during the **real-device**
+acceptance run on the paired soundcore Liberty 4 Pro (A3954, firmware 04.29,
+case firmware 01.58; case battery 60 % during the run), connected over Windows
+RFCOMM through Add Device with Demo mode off. They show the buttons/case pages;
+no Bluetooth address or serial number appears on any page or capture. The
+protocol run behind them (the ignored `manual_a3954_buttons_and_case` test)
+changed and restored all twelve gesture action bytes, toggled each case-screen
+feature and walked the case language, re-polling after every write to a
+byte-for-byte match; the run is recorded in
+`.scratch/a3954-buttons-case/issues/03-live-acceptance.md`. The device reported
+its TWS link down during the run (only the left earbud active), so the Controls
+page shows the disconnected-state actions the device actually applies.
+
+![Controls with a connected Liberty 4 Pro](live-a3954-controls.png)
+
+The real **Controls** page: the Presses panel with all eight press rows and the
+device-reported actions (singles Play/pause, doubles Next song, triples None,
+longs Ambient sound mode).
+
+![Slides and ambient cycle with a connected Liberty 4 Pro](live-a3954-controls-slides.png)
+
+The same page scrolled to the **Slides** panel (left/right slide up Volume up,
+left/right slide down Volume down) and the **Switching modes** panel with the
+device's ambient cycle (Noise canceling and Transparency on, Normal off).
+
+![Case with a connected Liberty 4 Pro](live-a3954-case.png)
+
+The real **Case** page: the four measured case-screen feature toggles (all off),
+the case language (English) and the read-only Status panel with case battery
+60 % and case firmware 01.58. The case serial never reaches the page.
+
 ## Adaptive layout checks
 
 Every UI change is checked at the real window breakpoints, not only at the

@@ -6067,8 +6067,14 @@ fn a3954_panels_for_page(
 ) -> Vec<SettingsPanel> {
     let panels: Vec<Option<SettingsPanel>> = match page {
         Page::Controls => vec![
-            settings_panel(PanelKind::Presses, a3954_press_rows(a3954)),
-            settings_panel(PanelKind::Gestures, a3954_slide_rows(a3954)),
+            settings_panel(
+                PanelKind::Presses,
+                a3954_press_rows(a3954, device_state.tws_connected),
+            ),
+            settings_panel(
+                PanelKind::Gestures,
+                a3954_slide_rows(a3954, device_state.tws_connected),
+            ),
             settings_panel(PanelKind::Cycle, cycle_rows(a3954.ambient_sound_mode_cycle)),
         ],
         Page::Comfort => vec![
@@ -6419,29 +6425,40 @@ pub fn a3954_button_action_for_index(
 }
 
 /// The eight press gesture rows of the Controls page, in measured state order,
-/// each showing the action the device reports for its TWS nibble.
-fn a3954_press_rows(a3954: &A3954State) -> Vec<SettingRow> {
+/// each showing the action the device reports for the live connection slot.
+fn a3954_press_rows(a3954: &A3954State, tws_connected: bool) -> Vec<SettingRow> {
     A3954Button::ALL
         .into_iter()
         .filter(|button| !button.is_slide())
-        .map(|button| a3954_gesture_row(button, a3954))
+        .map(|button| a3954_gesture_row(button, a3954, tws_connected))
         .collect()
 }
 
 /// The four slide gesture rows of the Controls page, in measured state order.
-fn a3954_slide_rows(a3954: &A3954State) -> Vec<SettingRow> {
+fn a3954_slide_rows(a3954: &A3954State, tws_connected: bool) -> Vec<SettingRow> {
     A3954Button::ALL
         .into_iter()
         .filter(|button| button.is_slide())
-        .map(|button| a3954_gesture_row(button, a3954))
+        .map(|button| a3954_gesture_row(button, a3954, tws_connected))
         .collect()
 }
 
 /// One gesture row: its id, its name and the action the device currently reports
 /// for it. The row writes the whole measured action byte, preserving the nibble
 /// the page is not editing (see [`answer_a3954_button`]).
-fn a3954_gesture_row(button: A3954Button, a3954: &A3954State) -> SettingRow {
-    let current = a3954.button_action_byte(button).tws();
+///
+/// The two nibbles are the action while the earbuds are TWS-connected and while
+/// they are not; the `01 01` state's TWS flag names the live one. The device
+/// only applies a remap to that slot (measured on the real device: with the link
+/// down, only the high nibble changed), so the row shows the slot the write
+/// edits.
+fn a3954_gesture_row(button: A3954Button, a3954: &A3954State, tws_connected: bool) -> SettingRow {
+    let byte = a3954.button_action_byte(button);
+    let current = if tws_connected {
+        byte.tws()
+    } else {
+        byte.non_tws()
+    };
     select_row(
         a3954_button_row_id(button),
         a3954_button_label(button),
@@ -7452,7 +7469,7 @@ fn answer_a3954_setting(
 }
 
 /// Queues one A3954 `04 81` gesture write on the device worker, keeping the
-/// action byte's disconnected-state nibble. Nothing is sent when the connection
+/// nibble of the state the device is not in. Nothing is sent when the connection
 /// cannot write, the device is not an A3954 or the chosen index is outside the
 /// row's measured choices, so an unknown row id or option never writes a frame
 /// the device did not offer.
@@ -7463,19 +7480,25 @@ fn answer_a3954_button(window: &AppWindow, inner: &Rc<Inner>, button: A3954Butto
     }
     let action = {
         let device = inner.device.borrow();
-        let Some(a3954) = device
-            .as_ref()
-            .and_then(|device_state| device_state.a3954.as_ref())
-        else {
+        let Some(device_state) = device.as_ref() else {
+            return;
+        };
+        let Some(a3954) = device_state.a3954.as_ref() else {
             return;
         };
         let Some(value) = a3954_button_action_for_index(button, index) else {
             return;
         };
-        // Only the earbuds-connected action changes; the byte the device
-        // reported keeps the disconnected-state nibble, exactly as the core's
-        // `with_tws` does.
-        a3954.button_action_byte(button).with_tws(value)
+        // Only the live action slot changes: the `01 01` TWS flag says whether
+        // that is the connected (low) or disconnected (high) nibble, and the
+        // device only applies the write to that slot. The byte keeps the other
+        // nibble exactly as the device reported it.
+        let byte = a3954.button_action_byte(button);
+        if device_state.tws_connected {
+            byte.with_tws(value)
+        } else {
+            byte.with_non_tws(value)
+        }
     };
     let sent = inner.send_queued(&inner.setting_change, |request| {
         DeviceCommand::SetA3954Button {
@@ -8625,8 +8648,8 @@ mod tests {
     use soundcore_diagnostics::ProbeId;
     use soundcore_models::catalog::FormFactor;
     use soundcore_models::{
-        A3954AmbientSoundMode, BatteryScale, BatteryState, FirmwareVersions, HostDevice, Layout,
-        SoundMode,
+        A3954AmbientSoundMode, A3954ButtonAction, BatteryScale, BatteryState, FirmwareVersions,
+        HostDevice, Layout, SoundMode,
     };
     use soundcore_protocol::{Command, encode};
     use std::sync::atomic::AtomicU64;
@@ -14432,6 +14455,273 @@ mod tests {
         println!("  disconnected: the RFCOMM socket is closed");
     }
 
+    /// Manual hardware check of the Liberty 4 Pro buttons and case slice on the
+    /// real A3954:
+    ///
+    /// ```text
+    /// cargo test -p soundcore-desktop manual_a3954_buttons_and_case -- --ignored --nocapture
+    /// ```
+    ///
+    /// Connects the paired Liberty 4 Pro through the same RFCOMM path as
+    /// [`manual_a3954_settings`] and drives a real [`DeviceSession`]. It prints
+    /// the twelve gesture actions and the case features/language by label only,
+    /// changes every one of the twelve gestures to another measured action (so
+    /// both sides of each press/slide class are exercised), toggles each of the
+    /// four case-screen features one at a time, walks the two other case
+    /// languages, polls the device after every write, then restores each whole
+    /// `04 81` action byte and the connect case state. The two nibbles of an
+    /// action byte are the TWS-connected and disconnected-state actions; the
+    /// `01 01` TWS flag names the live one and the device only applies a remap to
+    /// that slot, so the test edits that nibble and keeps the other. Every write
+    /// is spaced and retried until the re-poll confirms it; a write that drops
+    /// the link is reconnected and retried. The final poll is compared field by
+    /// field with the connect state, so the device is left as found. The address
+    /// is masked, the serial is never read for output, and no frame bytes are
+    /// printed.
+    #[test]
+    #[ignore = "manual hardware check: needs the paired Liberty 4 Pro (A3954)"]
+    fn manual_a3954_buttons_and_case() {
+        let model = selected_model("A3954").expect("the catalog lists the A3954");
+        let protocol = model.protocol.expect("the A3954 has a state parser");
+        let found = enumerate_candidates(Some((model.code, model.name)))
+            .expect("the paired Bluetooth devices enumerate");
+        let candidate = found
+            .iter()
+            .find(|candidate| candidate.suggested)
+            .or_else(|| found.first())
+            .expect("a paired A3954");
+        println!(
+            "== A3954 {} {} ==",
+            model.name,
+            masked_mac(&format_mac(candidate.address))
+        );
+        let request = ConnectRequest {
+            address: candidate.address,
+            model_code: model.code.to_owned(),
+            protocol: Some(protocol),
+        };
+        let mut live = LiveA3954::connect(request);
+        let initial_state = live.poll();
+        let initial = a3954_of(&initial_state).clone();
+        let initial_firmware = initial_state.firmware.clone();
+        let initial_buttons = initial.button_action_bytes();
+        let initial_features = initial.case_features;
+        let initial_language = initial.case_language;
+        println!("  connected over RFCOMM; parsed buttons and case:");
+        print_a3954_buttons_and_case(&initial_state);
+
+        // --- Every one of the twelve gestures: another measured action for the
+        // live connection slot, then the whole connect byte back. The TWS flag
+        // of the connect state names that slot; writing the whole byte keeps the
+        // other nibble and makes the restore exact.
+        let tws_connected = initial_state.tws_connected;
+        for (index, button) in A3954Button::ALL.into_iter().enumerate() {
+            let label = a3954_button_label(button);
+            let original = initial_buttons[index];
+            let current = if tws_connected {
+                original.tws()
+            } else {
+                original.non_tws()
+            };
+            let target = button
+                .available_actions()
+                .iter()
+                .copied()
+                .find(|action| current.action() != Some(*action))
+                .expect("the gesture class offers another measured action");
+            let written = if tws_connected {
+                original.with_tws(target.into())
+            } else {
+                original.with_non_tws(target.into())
+            };
+            let after = live.set_button_until(label, button, written, |byte| byte == written);
+            let after_byte = a3954_of(&after).button_action_byte(button);
+            let restored =
+                live.set_button_until(&format!("{label} restore"), button, original, |byte| {
+                    byte == original
+                });
+            let restored_byte = a3954_of(&restored).button_action_byte(button);
+            let after_value = if tws_connected {
+                after_byte.tws()
+            } else {
+                after_byte.non_tws()
+            };
+            let restored_value = if tws_connected {
+                restored_byte.tws()
+            } else {
+                restored_byte.non_tws()
+            };
+            println!(
+                "  {label}: {} -> {}, restored {}",
+                a3954_action_label(current),
+                a3954_action_label(after_value),
+                a3954_action_label(restored_value)
+            );
+            assert_eq!(
+                after_byte, written,
+                "{label}: the written action byte is re-polled and the other connection-state nibble is kept"
+            );
+            assert_eq!(
+                restored_byte, original,
+                "{label}: the whole connect action byte is restored"
+            );
+        }
+
+        // --- The four case-screen features, one at a time: the opposite of the
+        // connect flag with the other three kept, then the whole connect block
+        // back. The restore is attempted before the assertions, so a write the
+        // device did not apply still ends with the connect block written.
+        // One case: its label, its flag reader and the block with that flag set.
+        type FeatureCase = (
+            &'static str,
+            fn(A3954CaseFeatures) -> bool,
+            fn(A3954CaseFeatures, bool) -> A3954CaseFeatures,
+        );
+        let feature_cases: [FeatureCase; 4] = [
+            (
+                "atmospheric",
+                |features| features.atmospheric,
+                |features, on| A3954CaseFeatures {
+                    atmospheric: on,
+                    ..features
+                },
+            ),
+            (
+                "remote camera",
+                |features| features.remote_camera,
+                |features, on| A3954CaseFeatures {
+                    remote_camera: on,
+                    ..features
+                },
+            ),
+            (
+                "find device",
+                |features| features.find_device,
+                |features, on| A3954CaseFeatures {
+                    find_device: on,
+                    ..features
+                },
+            ),
+            (
+                "case spatial audio",
+                |features| features.case_spatial_audio,
+                |features, on| A3954CaseFeatures {
+                    case_spatial_audio: on,
+                    ..features
+                },
+            ),
+        ];
+        for (label, read, with) in feature_cases {
+            let before = read(initial_features);
+            let changed = with(initial_features, !before);
+            let after = live.set_setting_until(
+                &format!("case feature {label}"),
+                A3954SettingCommand::CaseFeatures(changed),
+                |state| a3954_of(state).case_features == changed,
+            );
+            let after_value = read(a3954_of(&after).case_features);
+            let restored = live.set_setting_until(
+                &format!("case feature {label} restore"),
+                A3954SettingCommand::CaseFeatures(initial_features),
+                |state| a3954_of(state).case_features == initial_features,
+            );
+            let restored_features = a3954_of(&restored).case_features;
+            println!(
+                "  case feature {label}: {} -> {}, restored {}",
+                on_off(before),
+                on_off(after_value),
+                on_off(read(restored_features))
+            );
+            assert_eq!(
+                after_value, !before,
+                "the {label} case feature is written and re-polled"
+            );
+            assert_eq!(
+                restored_features, initial_features,
+                "the connect case features are restored after the {label} toggle"
+            );
+        }
+
+        // --- The case language: walk the two other measured values, then the
+        // connect language back. The restore is attempted before the
+        // assertions, so a language write the device did not apply still ends
+        // with the connect language written.
+        let mut language_steps = Vec::new();
+        for language in A3954CaseLanguage::ALL {
+            if language == initial_language {
+                continue;
+            }
+            let asked = a3954_case_language_label(language);
+            let after = live.set_setting_until(
+                &format!("case language {asked}"),
+                A3954SettingCommand::CaseLanguage(language),
+                |state| a3954_of(state).case_language == language,
+            );
+            language_steps.push((language, a3954_of(&after).case_language));
+        }
+        let restored_language = a3954_of(&live.set_setting_until(
+            "case language restore",
+            A3954SettingCommand::CaseLanguage(initial_language),
+            |state| a3954_of(state).case_language == initial_language,
+        ))
+        .case_language;
+        let walked: Vec<&str> = language_steps
+            .iter()
+            .map(|(asked, _)| a3954_case_language_label(*asked))
+            .collect();
+        println!(
+            "  case language: {} -> {}, restored {}",
+            a3954_case_language_label(initial_language),
+            walked.join(" -> "),
+            a3954_case_language_label(restored_language)
+        );
+        for (asked, reported) in &language_steps {
+            assert_eq!(
+                reported, asked,
+                "the written case language is re-polled as the language asked for"
+            );
+        }
+        assert_eq!(
+            restored_language, initial_language,
+            "the connect case language is restored"
+        );
+
+        // --- The final poll must equal the connect state for every field this
+        // check wrote; the air pressure (deferred in this slice) and the
+        // firmware must be unchanged.
+        let final_state = live.poll();
+        let final_a3954 = a3954_of(&final_state).clone();
+        println!("  final state:");
+        print_a3954_buttons_and_case(&final_state);
+        assert_eq!(
+            final_a3954.button_action_bytes(),
+            initial_buttons,
+            "all twelve final action bytes equal the connect state"
+        );
+        assert_eq!(
+            final_a3954.case_features, initial_features,
+            "the final case features equal the connect state"
+        );
+        assert_eq!(
+            final_a3954.case_language, initial_language,
+            "the final case language equals the connect state"
+        );
+        assert_eq!(
+            final_a3954.air_pressure, initial.air_pressure,
+            "the air-pressure reading was not touched"
+        );
+        assert_eq!(
+            final_state.firmware, initial_firmware,
+            "the earbud firmware is unchanged"
+        );
+        println!(
+            "  restored: all 12 action bytes, the four case features and the case language equal the connect state; {} reconnect(s); pairing untouched",
+            live.reconnects
+        );
+        drop(live);
+        println!("  disconnected: the RFCOMM socket is closed");
+    }
+
     /// The spacing between two live setting commands: the measured minimum is
     /// 250 ms, with a margin for the RFCOMM round trip. The live A3954 ignores a
     /// setting command that arrives too soon after the previous one.
@@ -14442,7 +14732,7 @@ mod tests {
     const A3954_WRITE_ATTEMPTS: usize = 4;
 
     /// A live A3954 session with the one reconnect path every write of
-    /// [`manual_a3954_settings`] shares.
+    /// [`manual_a3954_settings`] and [`manual_a3954_buttons_and_case`] shares.
     ///
     /// A settings write can drop the RFCOMM link (the Soundcore-app-measured
     /// LDAC toggle does); the next [`DeviceSession::poll_state`] then fails, so
@@ -14550,6 +14840,34 @@ mod tests {
                 }
                 println!(
                     "  {what}: the device did not report the write; retrying ({attempt}/{A3954_WRITE_ATTEMPTS})"
+                );
+            }
+            self.poll()
+        }
+
+        /// Writes one A3954 `04 81` gesture frame and polls until `expected`
+        /// holds, with the same spacing and retry as
+        /// [`Self::set_setting_until`]. The caller passes the whole action byte,
+        /// so the nibble it does not edit is preserved and a restore is exact.
+        fn set_button_until(
+            &mut self,
+            what: &str,
+            button: A3954Button,
+            action: A3954ButtonActionByte,
+            expected: impl Fn(A3954ButtonActionByte) -> bool,
+        ) -> DeviceState {
+            for attempt in 1..=A3954_WRITE_ATTEMPTS {
+                std::thread::sleep(A3954_WRITE_SPACING);
+                let state = self.write_then_poll(what, move |session| {
+                    session.set_a3954_button(button, action)
+                });
+                let reported = a3954_of(&state).button_action_byte(button);
+                if expected(reported) {
+                    return state;
+                }
+                println!(
+                    "  {what}: the device still reports {}; retrying ({attempt}/{A3954_WRITE_ATTEMPTS})",
+                    a3954_action_label(reported.tws())
                 );
             }
             self.poll()
@@ -14804,6 +15122,91 @@ mod tests {
             a3954.main_buttons,
             a3954.slide_buttons
         );
+    }
+
+    /// Prints the live connection state, the twelve gesture actions and the case
+    /// features/language of a parsed A3954 state by label only: no serial, no
+    /// Bluetooth address and no raw frame or state bytes.
+    fn print_a3954_buttons_and_case(state: &DeviceState) {
+        let a3954 = a3954_of(state);
+        println!(
+            "  firmware: left={} right={} case={}",
+            state.firmware.left.as_deref().unwrap_or("unknown"),
+            state.firmware.right.as_deref().unwrap_or("unknown"),
+            a3954.case_firmware.as_deref().unwrap_or("unknown")
+        );
+        // The `01 01` TWS flag names which nibble of each action byte is the
+        // live action: the connected (low) or disconnected (high) nibble.
+        println!(
+            "  tws link: {} (the {} action slot is live)",
+            if state.tws_connected {
+                "connected"
+            } else {
+                "disconnected"
+            },
+            if state.tws_connected {
+                "connected-state"
+            } else {
+                "disconnected-state"
+            }
+        );
+        for button in A3954Button::ALL {
+            let byte = a3954.button_action_byte(button);
+            let live = if state.tws_connected {
+                byte.tws()
+            } else {
+                byte.non_tws()
+            };
+            println!(
+                "  button {}: {}",
+                a3954_button_label(button),
+                a3954_action_label(live)
+            );
+        }
+        let features = a3954.case_features;
+        println!(
+            "  case features: atmospheric={} remote camera={} find device={} case spatial audio={}",
+            on_off(features.atmospheric),
+            on_off(features.remote_camera),
+            on_off(features.find_device),
+            on_off(features.case_spatial_audio)
+        );
+        println!(
+            "  case language: {}",
+            a3954_case_language_label(a3954.case_language)
+        );
+    }
+
+    /// The Controls page's label for one action slot of a gesture byte; an
+    /// unmeasured nibble is named without printing its value.
+    fn a3954_action_label(value: A3954ButtonActionValue) -> &'static str {
+        match value {
+            A3954ButtonActionValue::Action(action) => match action {
+                A3954ButtonAction::VolumeUp => "Volume up",
+                A3954ButtonAction::VolumeDown => "Volume down",
+                A3954ButtonAction::PreviousSong => "Previous song",
+                A3954ButtonAction::NextSong => "Next song",
+                A3954ButtonAction::AmbientSoundMode => "Ambient sound mode",
+                A3954ButtonAction::VoiceAssistant => "Voice assistant",
+                A3954ButtonAction::PlayPause => "Play/pause",
+            },
+            A3954ButtonActionValue::Disabled => "None",
+            A3954ButtonActionValue::Unknown(_) => "unrecognised",
+        }
+    }
+
+    /// The Controls page's label for one case language.
+    fn a3954_case_language_label(language: A3954CaseLanguage) -> &'static str {
+        match language {
+            A3954CaseLanguage::Japanese => "Japanese",
+            A3954CaseLanguage::English => "English",
+            A3954CaseLanguage::Chinese => "Chinese",
+        }
+    }
+
+    /// A feature flag for the acceptance output.
+    fn on_off(value: bool) -> &'static str {
+        if value { "on" } else { "off" }
     }
 
     /// Manual hardware check of the controller's `disconnect` and `retry`
@@ -19835,7 +20238,10 @@ mod tests {
 
     #[test]
     fn every_a3954_gesture_row_writes_one_measured_frame_and_re_polls() {
-        let state = a3954_state().a3954.expect("the A3954 block");
+        let device = a3954_state();
+        let tws_connected = device.tws_connected;
+        assert!(tws_connected, "the fixture reports a connected TWS link");
+        let state = device.a3954.expect("the A3954 block");
         for button in A3954Button::ALL {
             // The row id round-trips to the gesture and no other id names it.
             let id = a3954_button_row_id(button);
@@ -19882,15 +20288,16 @@ mod tests {
                 );
             }
 
-            // The row shows the measured TWS action of the fixture.
+            // The row shows the measured action of the live connection slot.
             let measured = state.button_action_byte(button);
-            let row = a3954_gesture_row(button, &state);
+            let row = a3954_gesture_row(button, &state, tws_connected);
             assert_eq!(row.id.as_str(), id);
             assert_eq!(row.kind, RowKind::Select);
             assert_eq!(row.index, a3954_button_action_index(button, measured.tws()));
 
-            // The click writes the whole measured byte with only its TWS nibble
-            // replaced: one `04 81` frame, then the `01 01` re-poll.
+            // The click writes the whole measured byte with only the connected
+            // slot's nibble replaced: one `04 81` frame, then the `01 01`
+            // re-poll.
             let value = a3954_button_action_for_index(button, 0).expect("the first choice");
             let action = measured.with_tws(value);
             let expected = a3954_model()
@@ -19933,6 +20340,74 @@ mod tests {
                 other => panic!("{id}: unexpected event: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_tws_disconnected_a3954_shows_and_writes_the_disconnected_gesture_slot() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            state.set_device_name("Liberty 4 Pro".into());
+            state.set_device_code("A3954".into());
+            // The live device's state during the acceptance: the TWS byte is 0
+            // and left single carries different actions in its two slots
+            // (disconnected: next song, connected: play/pause).
+            let disconnected = a3954_frame_with(&[(1, 0), (116, 0x36), (142, 0)]);
+            let device = soundcore_models::parse_state_frame(a3954_model(), &disconnected)
+                .expect("the disconnected fixture parses");
+            assert!(
+                !device.tws_connected,
+                "the fixture reports no live TWS link"
+            );
+            apply_outcome(
+                ui,
+                &inner,
+                ConnectOutcome::Connected(a3954_model(), Box::new(device)),
+            );
+            wire_actions(ui, &inner);
+            let actions = ui.global::<Actions>();
+            let (commands, queued) = mpsc::channel();
+            *inner.commands.borrow_mut() = Some(commands);
+            let next = |label: &str| {
+                queued
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap_or_else(|_| panic!("{label}: no command was queued"))
+            };
+
+            // The Controls row shows the disconnected slot's action (next song,
+            // option 4), not the connected slot's play/pause (option 7).
+            state.set_page(Page::Controls);
+            show_section_pages(&state, &inner);
+            let panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
+            let presses: Vec<SettingRow> = panels[0].rows.iter().collect();
+            assert_eq!(
+                presses[0].index, 4,
+                "the disconnected slot's next song is shown"
+            );
+
+            // The click writes the disconnected slot and keeps the connected
+            // nibble: 0x36 (next song / play-pause) changed to volume up becomes
+            // 0x06.
+            actions.invoke_set_option("leftSinglePress".into(), 1);
+            match next("left single press") {
+                DeviceCommand::SetA3954Button {
+                    request,
+                    button,
+                    action,
+                } => {
+                    assert_eq!(request, 1);
+                    assert_eq!(button, A3954Button::LeftSingle);
+                    assert_eq!(action.byte(), 0x06, "the connected-state nibble is kept");
+                    assert_eq!(
+                        action.non_tws(),
+                        A3954ButtonActionValue::Action(
+                            soundcore_models::A3954ButtonAction::VolumeUp
+                        )
+                    );
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        });
     }
 
     #[test]

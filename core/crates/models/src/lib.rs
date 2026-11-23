@@ -1049,7 +1049,7 @@ pub struct A3954AutoPowerOff {
 ///
 /// Each byte is a flag: `1` is on and every other byte reads as off, as in
 /// OpenSCL4's parser. [`Self::command_body`] writes them back as the measured
-/// four-byte `07 87` body, in the same order.
+/// four-byte `07 87` body, in the order the Soundcore app sends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct A3954CaseFeatures {
     /// The case's atmospheric-pressure display.
@@ -1064,14 +1064,22 @@ pub struct A3954CaseFeatures {
 }
 
 impl A3954CaseFeatures {
-    /// The exact measured `07 87` body, in state order:
-    /// `[atmospheric, remote_camera, find_device, case_spatial_audio]`.
+    /// The exact measured `07 87` body, in the Soundcore app's order:
+    /// `[remote_camera, find_device, case_spatial_audio, atmospheric]`.
+    ///
+    /// The command order is **not** the state order: body 132..136 reports
+    /// `[atmospheric, remote_camera, find_device, case_spatial_audio]`, while
+    /// the app's `M5` builder (`CmmBtCmdService`) sends the remote camera,
+    /// find-device, case-spatial and atmospheric flags in that order. The live
+    /// acceptance found it on the real device: a body in state order toggled the
+    /// neighbouring feature (writing `[1, 0, 0, 0]` switched the remote camera
+    /// on), and this order toggles the requested feature and restores cleanly.
     pub fn command_body(self) -> [u8; 4] {
         [
-            u8::from(self.atmospheric),
             u8::from(self.remote_camera),
             u8::from(self.find_device),
             u8::from(self.case_spatial_audio),
+            u8::from(self.atmospheric),
         ]
     }
 }
@@ -2021,8 +2029,10 @@ pub enum A3954SettingCommand {
     SpatialAudio(A3954SpatialAudio),
     /// `10 9D` body `[enabled, wait_time]`.
     EasyChat(A3954EasyChat),
-    /// `07 87` body `[atmospheric, remote_camera, find_device,
-    /// case_spatial_audio]`, the four measured flags in state order.
+    /// `07 87` body `[remote_camera, find_device, case_spatial_audio,
+    /// atmospheric]`, the four measured flags in the Soundcore app's command
+    /// order (the state reports a different order; see
+    /// [`A3954CaseFeatures::command_body`]).
     CaseFeatures(A3954CaseFeatures),
     /// `07 8A` body `[language]`; see [`A3954CaseLanguage::command_body`].
     CaseLanguage(A3954CaseLanguage),
