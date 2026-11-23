@@ -26,7 +26,10 @@ use soundcore_diagnostics::{
     DiagnosticSession, PROBES, ProbeResult, ProbeStatus, hex as diagnostic_hex,
 };
 use soundcore_models::{
-    A3062Settings, AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, ButtonAction,
+    A3062Settings, A3954AutoPowerOff, A3954AutoPowerOffDuration, A3954EasyChat,
+    A3954EasyChatWaitTime, A3954EqualizerState, A3954SettingCommand, A3954SoundMode,
+    A3954SoundModeSlider, A3954SpatialAudio, A3954SpatialAudioMode, A3954SpatialAudioMusicMode,
+    A3954State, AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, ButtonAction,
     CUSTOM_EQUALIZER_PRESET_ID, DbLimit, DecibelReadingRefreshRate, DeviceModel, DeviceState,
     DualConnectionDevice, EqualizerPreset, EqualizerState, FIXED_EQ_BANDS, LimitHighVolume,
     SettingCommand, SoundMode, VISIBLE_EQ_BANDS,
@@ -117,8 +120,8 @@ pub fn battery_tile(label: i32, raw: u8, maximum: u8) -> Battery {
 pub const WHOLE_DEVICE_BATTERY_LABEL: i32 = 3;
 
 /// The Overview tiles of a parsed state: one whole-device tile for a
-/// single-battery layout, otherwise left and right. The TWS CMM2 parser has no
-/// case field yet, so the case tile is not invented.
+/// single-battery layout, otherwise left and right and, for a model whose
+/// measured state carries a case battery (the A3954), the case as well.
 pub fn batteries(state: &DeviceState) -> Vec<Battery> {
     if let Some(single) = &state.single_battery {
         return vec![battery_tile(
@@ -131,10 +134,20 @@ pub fn batteries(state: &DeviceState) -> Vec<Battery> {
         return Vec::new();
     };
     let maximum = battery.scale.maximum();
-    vec![
+    let mut tiles = vec![
         battery_tile(0, battery.left, maximum),
         battery_tile(1, battery.right, maximum),
-    ]
+    ];
+    // The A3954 reports the case's ten-step level of 255 when unavailable; the
+    // displayed level is the raw step + 1.
+    if let Some(level) = state
+        .a3954
+        .as_ref()
+        .and_then(|a3954| a3954.case_battery_level)
+    {
+        tiles.push(battery_tile(2, level.saturating_add(1), 10));
+    }
+    tiles
 }
 
 /// The `ModeOption.value` the vendored `ModeText.icon` recognises for a mode.
@@ -191,18 +204,59 @@ pub fn mode_for_index(index: i32) -> Option<SoundMode> {
         .and_then(|index| SoundMode::ALL.get(index).copied())
 }
 
-/// The sidebar sound pages of a parsed state: Sound mode and Equalizer only when
-/// the device reports a measured mode and a supported equalizer, and Effects
-/// only when it reports the remaining-settings block (the A3062's LDAC and
-/// Dolby toggles). A P20i has no measured sound mode, a deferred equalizer and
-/// no settings block, so it shows none of them.
+/// Whether a parsed state has a sound-mode surface these pages can show: the
+/// A3062's three measured modes, or the A3954's 1..=11 scale.
+pub fn has_sound_mode(state: &DeviceState) -> bool {
+    state.sound_mode.is_some() || state.a3954.is_some()
+}
+
+/// Whether a parsed state has an equalizer this app can show: the A3062's
+/// `EqualizerState` block, or the A3954's two-channel block inside `a3954`.
+pub fn has_equalizer(state: &DeviceState) -> bool {
+    state.equalizer.is_some() || state.a3954.is_some()
+}
+
+/// Whether a parsed state has the Effects page: the A3062's settings block
+/// (LDAC and Dolby) or the A3954's own effects (LDAC, spatial audio).
+pub fn has_effects(state: &DeviceState) -> bool {
+    state.settings.is_some() || state.a3954.is_some()
+}
+
+/// Whether the connected model has anything its device worker can write. A
+/// state with none of these surfaces ends its worker as the MVP did, closing the
+/// socket; the A3954 keeps it for its scale, equalizer and settings writes.
+pub fn has_worker_surface(state: &DeviceState) -> bool {
+    has_sound_mode(state) || has_equalizer(state) || state.settings.is_some()
+}
+
+/// Whether the state's dual-connections setting is on: the A3062's settings
+/// block or the A3954's own block. The Connections page's remembered-device
+/// list and the connect-time `0B 01` read follow this flag.
+pub fn dual_connections_enabled(state: &DeviceState) -> bool {
+    state
+        .settings
+        .as_ref()
+        .is_some_and(|settings| settings.dual_connections)
+        || state
+            .a3954
+            .as_ref()
+            .is_some_and(|a3954| a3954.dual_connections)
+}
+
+/// The sidebar sound pages of a parsed state: Sound mode when the device reports
+/// a measured mode (the A3062's three tiles) or the A3954's 1..=11 scale,
+/// Equalizer when it has an equalizer this app can show, and Effects when it
+/// reports LDAC/Dolby settings (the A3062) or LDAC/spatial audio (the A3954).
+/// A P20i has no measured mode, a deferred equalizer and no settings, so it
+/// shows none of them.
 pub fn sound_pages(
-    sound_mode: Option<SoundMode>,
+    has_mode_tiles: bool,
+    has_mode_scale: bool,
     has_equalizer: bool,
     has_settings: bool,
 ) -> Vec<Page> {
     let mut pages = Vec::new();
-    if sound_mode.is_some() {
+    if has_mode_tiles || has_mode_scale {
         pages.push(Page::SoundModes);
     }
     if has_equalizer {
@@ -214,11 +268,12 @@ pub fn sound_pages(
     pages
 }
 
-/// The sidebar device pages of a state with the remaining-settings block: the
-/// A3062's Controls, Comfort, Power, Connections and About. A model without the
-/// block (the A3949 and the rest of the catalog) has no pages and no write path.
-pub fn device_pages(has_settings: bool) -> Vec<Page> {
-    if !has_settings {
+/// The sidebar device pages of a state with a settings surface: the A3062's
+/// settings block or the A3954's own settings block. Both models expose the same
+/// five pages; the rows and commands behind them differ. A model without either
+/// (the A3949 and the rest of the catalog) has no pages and no write path.
+pub fn device_pages(has_settings: bool, has_a3954: bool) -> Vec<Page> {
+    if !has_settings && !has_a3954 {
         return Vec::new();
     }
     vec![
@@ -494,11 +549,27 @@ pub fn preset_options(model: Option<DeviceModel>) -> Vec<ModeOption> {
         .map(DeviceModel::equalizer_presets)
         .unwrap_or_default()
         .iter()
-        .map(|preset| ModeOption {
-            value: preset.id.to_string().into(),
-            label: preset.name.into(),
-        })
+        .map(preset_option)
         .collect()
+}
+
+/// The `AppState.eq-presets` chips of the A3954's own twenty-two-preset catalog,
+/// in display order; empty for every other model.
+pub fn a3954_preset_options(model: Option<DeviceModel>) -> Vec<ModeOption> {
+    model
+        .map(DeviceModel::a3954_equalizer_presets)
+        .unwrap_or_default()
+        .iter()
+        .map(preset_option)
+        .collect()
+}
+
+/// One preset as the page's chip: the id string a click names and its name.
+fn preset_option(preset: &EqualizerPreset) -> ModeOption {
+    ModeOption {
+        value: preset.id.to_string().into(),
+        label: preset.name.into(),
+    }
 }
 
 /// The preset id a chip value names, when the page offers that value. Anything
@@ -773,8 +844,8 @@ pub struct EqualizerDisplay {
 }
 
 impl EqualizerDisplay {
-    /// The page data of a parsed state: presets from `model`'s catalog, the
-    /// current preset and its curve from `equalizer`, and whether its band
+    /// The page data of a parsed A3062 state: presets from `model`'s catalog,
+    /// the current preset and its curve from `equalizer`, and whether its band
     /// controls may write a custom curve.
     pub fn new(model: Option<DeviceModel>, equalizer: Option<&EqualizerState>) -> Self {
         let Some(equalizer) = equalizer else {
@@ -783,18 +854,64 @@ impl EqualizerDisplay {
         let editable = model
             .and_then(|model| model.custom_equalizer_body(equalizer, [0; VISIBLE_EQ_BANDS]))
             .is_some();
-        let presets = preset_options(model);
-        let bands = equalizer_bands(equalizer);
-        let values = equalizer_values(equalizer);
-        let (chart_line, chart_area) = equalizer_chart(&values, EQ_MIN, EQ_MAX);
-        let overview_curve = profile_curve(&values);
         let built_in = equalizer.preset();
+        Self::with_values(
+            editable,
+            preset_options(model),
+            equalizer.preset_id,
+            built_in
+                .map(|preset| preset.name.to_owned())
+                .unwrap_or_default(),
+            &equalizer_values(equalizer),
+        )
+    }
+
+    /// The page data of a parsed A3954 state: chips from the Liberty 4 Pro's own
+    /// twenty-two-preset catalog and the eight visible bands of its two-channel
+    /// block.
+    ///
+    /// The page stays editable: the A3954's 114-byte custom body carries the
+    /// same eight visible bands as the A3062 page, so the band controls, the
+    /// reset button and the saved-profile panel work the same way. A state whose
+    /// both channels are absent shows the page without a curve.
+    pub fn new_a3954(model: Option<DeviceModel>, equalizer: &A3954EqualizerState) -> Self {
+        let editable = model
+            .and_then(|model| model.a3954_custom_equalizer_body(equalizer, [0; VISIBLE_EQ_BANDS]))
+            .is_some();
+        let values: Vec<i16> = equalizer
+            .visible_bands()
+            .map(|bands| bands.to_vec())
+            .unwrap_or_default();
+        Self::with_values(
+            editable,
+            a3954_preset_options(model),
+            equalizer.preset_id,
+            equalizer
+                .preset()
+                .map(|preset| preset.name.to_owned())
+                .unwrap_or_default(),
+            &values,
+        )
+    }
+
+    /// Builds the page data both equalizers share: the chip list, the current
+    /// preset id and name and the eight visible band values in raw dB×10 units.
+    fn with_values(
+        editable: bool,
+        presets: Vec<ModeOption>,
+        preset_id: u16,
+        name: String,
+        values: &[i16],
+    ) -> Self {
+        let bands = equalizer_bands_from_values(values);
+        let (chart_line, chart_area) = equalizer_chart(values, EQ_MIN, EQ_MAX);
+        let overview_curve = profile_curve(values);
         Self {
             available: true,
             editable,
             preset_count: i32::try_from(presets.len()).unwrap_or(0),
             presets,
-            preset: equalizer.preset_id.to_string(),
+            preset: preset_id.to_string(),
             band_count: i32::try_from(bands.len()).unwrap_or(0),
             min: i32::from(EQ_MIN),
             max: i32::from(EQ_MAX),
@@ -805,10 +922,18 @@ impl EqualizerDisplay {
             chart_line,
             chart_area,
             overview_curve,
-            name: built_in
-                .map(|preset| preset.name.to_owned())
-                .unwrap_or_default(),
+            name,
         }
+    }
+}
+
+/// The Equalizer page data of a connected state: the A3954's two-channel block
+/// when it has one, otherwise the A3062's single-channel block (a model without
+/// an equalizer gets the empty page).
+pub fn equalizer_display_for(model: DeviceModel, state: &DeviceState) -> EqualizerDisplay {
+    match &state.a3954 {
+        Some(a3954) => EqualizerDisplay::new_a3954(Some(model), &a3954.equalizer),
+        None => EqualizerDisplay::new(Some(model), state.equalizer.as_ref()),
     }
 }
 
@@ -890,6 +1015,19 @@ trait BandWriter {
 
 impl BandWriter for Inner {
     fn write_curve(&self, bands: [i16; VISIBLE_EQ_BANDS]) -> bool {
+        // The A3954's 114-byte body is a different command; its worker derives
+        // the new curve from the state it last read, exactly as the A3062 one
+        // does.
+        let is_a3954 = self
+            .device
+            .borrow()
+            .as_ref()
+            .is_some_and(|device| device.a3954.is_some());
+        if is_a3954 {
+            return self.send_queued(&self.curve_change, |request| {
+                DeviceCommand::WriteA3954CustomCurve { request, bands }
+            });
+        }
         self.send_queued(&self.curve_change, |request| {
             DeviceCommand::WriteCustomCurve { request, bands }
         })
@@ -1213,6 +1351,12 @@ impl SettingFailure {
     pub fn label(self, setting: SettingCommand) -> String {
         format!("{} ({})", setting_label(setting), self.reason())
     }
+
+    /// The `AppState.error-label` of a failed A3954 write, naming the setting
+    /// the row names; worded like [`Self::label`].
+    pub fn a3954_label(self, setting: A3954SettingCommand) -> String {
+        format!("{} ({})", a3954_setting_label(setting), self.reason())
+    }
 }
 
 /// The row name a failed write's banner shows, matching the setting it wrote.
@@ -1245,6 +1389,132 @@ pub fn change_setting<T: Transport>(
         .map_err(SettingFailure::from_session)?;
     let state = session.poll_state().map_err(SettingFailure::from_session)?;
     Ok(Box::new(state))
+}
+
+/// One A3954 sound-mode click: the 1..=11 scale slider or the wind-noise
+/// toggle. Both travel in the same measured `06 81` body, so the worker derives
+/// the whole new sound mode from the state it last read instead of trusting the
+/// page's copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum A3954SoundModeChange {
+    /// The 1..=11 slider position.
+    Scale(u8),
+    /// The wind-noise suppression flag; the detection bit is read-only.
+    Wind(bool),
+}
+
+impl A3954SoundModeChange {
+    /// The sound mode this change asks for, from the state the worker last read;
+    /// `None` for a position outside 1..=11.
+    fn apply(self, current: A3954SoundMode) -> Option<A3954SoundMode> {
+        match self {
+            Self::Scale(position) => {
+                let slider = A3954SoundModeSlider::new(position)?;
+                Some(A3954SoundMode {
+                    // The slider decides which half of the scale is active.
+                    mode: slider.mode(),
+                    slider,
+                    ..current
+                })
+            }
+            Self::Wind(on) => Some(A3954SoundMode {
+                wind_noise_suppression: on,
+                ..current
+            }),
+        }
+    }
+}
+
+/// Writes one A3954 `06 81` body and re-reads the state, returning the
+/// sound-mode block the device reports.
+///
+/// Blocking: only the device worker calls this, never the UI thread.
+pub fn change_a3954_sound_mode<T: Transport>(
+    session: &mut DeviceSession<T>,
+    sound_mode: A3954SoundMode,
+) -> Result<A3954SoundMode, ModeFailure> {
+    session
+        .set_a3954_sound_mode(sound_mode)
+        .map_err(ModeFailure::from_session)?;
+    let state = session.poll_state().map_err(ModeFailure::from_session)?;
+    state
+        .a3954
+        .map(|a3954| a3954.sound_mode)
+        .ok_or(ModeFailure::Unreadable)
+}
+
+/// Writes one A3954 `03 87` preset frame and re-reads the state, returning the
+/// two-channel block the device reports. `current` is the last state the worker
+/// read: the write keeps its HearID block.
+///
+/// Blocking: only the device worker calls this, never the UI thread.
+pub fn change_a3954_equalizer_preset<T: Transport>(
+    session: &mut DeviceSession<T>,
+    current: &A3954EqualizerState,
+    preset: &EqualizerPreset,
+) -> Result<A3954EqualizerState, EqFailure> {
+    session
+        .set_a3954_equalizer_preset(current, preset)
+        .map_err(EqFailure::from_session)?;
+    let state = session.poll_state().map_err(EqFailure::from_session)?;
+    state
+        .a3954
+        .map(|a3954| a3954.equalizer)
+        .ok_or(EqFailure::Unreadable)
+}
+
+/// Writes the eight visible bands as an A3954 `03 87` custom curve, re-reads the
+/// state and returns the block the device reports. `current` is the last state
+/// the worker read: the write keeps its HearID block.
+///
+/// Blocking: only the device worker calls this, never the UI thread.
+pub fn change_a3954_custom_equalizer<T: Transport>(
+    session: &mut DeviceSession<T>,
+    current: &A3954EqualizerState,
+    visible_bands: [i16; VISIBLE_EQ_BANDS],
+) -> Result<A3954EqualizerState, EqFailure> {
+    session
+        .set_a3954_custom_equalizer(current, visible_bands)
+        .map_err(EqFailure::from_session)?;
+    let state = session.poll_state().map_err(EqFailure::from_session)?;
+    state
+        .a3954
+        .map(|a3954| a3954.equalizer)
+        .ok_or(EqFailure::Unreadable)
+}
+
+/// Writes one A3954 settings frame and re-reads the state, returning the whole
+/// re-polled state so the caller can update the panels and About.
+///
+/// Blocking: only the device worker calls this, never the UI thread.
+pub fn change_a3954_setting<T: Transport>(
+    session: &mut DeviceSession<T>,
+    setting: A3954SettingCommand,
+) -> Result<Box<DeviceState>, SettingFailure> {
+    session
+        .set_a3954_setting(setting)
+        .map_err(SettingFailure::from_session)?;
+    let state = session.poll_state().map_err(SettingFailure::from_session)?;
+    Ok(Box::new(state))
+}
+
+/// The row name a failed A3954 write's banner shows, matching the setting the
+/// row names.
+pub fn a3954_setting_label(setting: A3954SettingCommand) -> &'static str {
+    match setting {
+        A3954SettingCommand::Ldac(_) => "LDAC",
+        A3954SettingCommand::DualConnections(_) => "Dual connections",
+        A3954SettingCommand::AutoPowerOff(_) => "Auto power off",
+        A3954SettingCommand::LimitHighVolume { .. } => "Limit high volume",
+        A3954SettingCommand::LimitHighVolumeRefreshRate(_) => "Refresh rate",
+        A3954SettingCommand::LowBatteryPrompt(_) => "Low battery prompt",
+        A3954SettingCommand::AmbientSoundModeCycle(_) => "Mode cycle",
+        A3954SettingCommand::WearingDetection(_) => "Wearing detection",
+        A3954SettingCommand::SoundLeakCompensation(_) => "Sound leak compensation",
+        A3954SettingCommand::SpatialAudio(_) => "Spatial audio",
+        A3954SettingCommand::EasyChat(_) => "Easy chat",
+        A3954SettingCommand::CaseLanguage(_) => "Case language",
+    }
 }
 
 /// How many list reads a connect, disconnect or forget may take while the
@@ -1699,6 +1969,28 @@ enum DeviceCommand {
         request: u64,
         setting: SettingCommand,
     },
+    /// Write one A3954 `06 81` sound-mode change (the 1..=11 scale or the wind
+    /// toggle) and re-read the state; `request` identifies the click the same
+    /// way `ChangeSoundMode` does.
+    ChangeA3954SoundMode {
+        request: u64,
+        change: A3954SoundModeChange,
+    },
+    /// Write one A3954 `03 87` equalizer preset and re-read the state; `request`
+    /// identifies the chip click the same way `ChangeEqualizerPreset` does.
+    ChangeA3954Preset { request: u64, preset_id: u16 },
+    /// Write the A3954's 114-byte custom curve and re-read the state; `request`
+    /// identifies the drag release, typed value or saved profile.
+    WriteA3954CustomCurve {
+        request: u64,
+        bands: [i16; VISIBLE_EQ_BANDS],
+    },
+    /// Write one A3954 settings frame and re-read the state; `request`
+    /// identifies the toggle, choice or slider release.
+    SetA3954Setting {
+        request: u64,
+        setting: A3954SettingCommand,
+    },
     /// Ask for the dual-connections list: the worker writes the empty `0B 01`
     /// frame and reports the devices the earbuds remember and whether they are
     /// connected. Used by the Connections page's refresh.
@@ -1754,6 +2046,34 @@ enum Event {
         attempt: u64,
         request: u64,
         setting: SettingCommand,
+        outcome: Result<Box<DeviceState>, SettingFailure>,
+    },
+    /// A device worker finished an A3954 sound-mode change and re-read the
+    /// state.
+    ScaleChanged {
+        attempt: u64,
+        request: u64,
+        outcome: Result<A3954SoundMode, ModeFailure>,
+    },
+    /// A device worker finished an A3954 equalizer preset change and re-read
+    /// the state.
+    A3954PresetChanged {
+        attempt: u64,
+        request: u64,
+        outcome: Result<A3954EqualizerState, EqFailure>,
+    },
+    /// A device worker finished an A3954 custom-curve write and re-read the
+    /// state.
+    A3954CurveChanged {
+        attempt: u64,
+        request: u64,
+        outcome: Result<A3954EqualizerState, EqFailure>,
+    },
+    /// A device worker finished an A3954 settings write and re-read the state.
+    A3954SettingChanged {
+        attempt: u64,
+        request: u64,
+        setting: A3954SettingCommand,
         outcome: Result<Box<DeviceState>, SettingFailure>,
     },
     /// A device worker read the dual-connections list: on connect while the
@@ -1824,6 +2144,9 @@ struct Inner {
     /// The newest custom equalizer curve change; results of older changes are
     /// stale.
     curve_change: Cell<u64>,
+    /// The newest A3954 sound-mode scale or wind change; results of older
+    /// changes are stale.
+    scale_change: Cell<u64>,
     /// The newest remaining-settings change; results of older changes are
     /// stale.
     setting_change: Cell<u64>,
@@ -1989,6 +2312,7 @@ impl Inner {
         self.mode_change.set(0);
         self.preset_change.set(0);
         self.curve_change.set(0);
+        self.scale_change.set(0);
         self.setting_change.set(0);
         let cancel = Arc::new(AtomicBool::new(false));
         *self.cancel.borrow_mut() = Some(Arc::clone(&cancel));
@@ -2021,6 +2345,7 @@ impl Inner {
         self.mode_change.set(0);
         self.preset_change.set(0);
         self.curve_change.set(0);
+        self.scale_change.set(0);
         self.setting_change.set(0);
         *self.cancel.borrow_mut() = None;
         let (commands, command_receiver) = mpsc::channel();
@@ -2059,6 +2384,7 @@ impl Inner {
         self.mode_change.set(0);
         self.preset_change.set(0);
         self.curve_change.set(0);
+        self.scale_change.set(0);
         self.setting_change.set(0);
     }
 
@@ -2085,15 +2411,14 @@ impl Inner {
     }
 
     /// Whether the Connections page should show the remembered-device list: the
-    /// device's settings block says dual connections are on. Only the A3062 has
-    /// that block, so the deferred A3949 never shows a list and never reads
-    /// `0B 01`.
+    /// connected device reports dual connections on. The A3062 keeps that flag in
+    /// its settings block, the A3954 in its own; a model without either (the
+    /// deferred A3949) never shows a list and never reads `0B 01`.
     fn dual_list_visible(&self) -> bool {
         self.device
             .borrow()
             .as_ref()
-            .and_then(|device_state| device_state.settings)
-            .is_some_and(|settings| settings.dual_connections)
+            .is_some_and(|device| dual_connections_enabled(device))
     }
 
     /// Drops the remembered-device list the Connections page shows, e.g. when
@@ -2159,6 +2484,7 @@ impl Controller {
             mode_change: Cell::new(0),
             preset_change: Cell::new(0),
             curve_change: Cell::new(0),
+            scale_change: Cell::new(0),
             setting_change: Cell::new(0),
             diagnostic_request: Cell::new(0),
             device: RefCell::new(None),
@@ -2355,7 +2681,7 @@ fn initial_state(ui: &AppWindow, inner: &Rc<Inner>) {
     // Only Add Device, the device cards, the Overview battery, the Sound mode
     // and the Equalizer page are wired before a device connects; every section
     // page's content stays empty until an A3062 reports its settings.
-    show_sound_mode(&state, None, false, false);
+    show_sound_mode(&state, None);
     show_equalizer(&state, &EqualizerDisplay::default());
     reset_diagnostics(&state);
     clear_section_pages(&state);
@@ -2542,6 +2868,16 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         move |setting_id, value| {
             if let Some(window) = inner.ui.upgrade() {
                 set_number(&window, &inner, setting_id.as_str(), value);
+            }
+        }
+    });
+
+    // The A3954's sound-mode scale: the slider release names a 1..=11 position.
+    actions.on_set_scale({
+        let inner = Rc::clone(inner);
+        move |position| {
+            if let Some(window) = inner.ui.upgrade() {
+                set_scale(&window, &inner, position);
             }
         }
     });
@@ -3299,8 +3635,8 @@ fn set_tray_item(window: &AppWindow, inner: &Rc<Inner>, index: i32, on: bool) {
 /// data — the worker stops after it, so no newer result can replace it, and a
 /// click queued behind the failed one will never run. Surfacing the failure is
 /// then the only report the user gets, and the banner's Retry stays available.
-fn mode_result_applies(
-    outcome: &Result<SoundMode, ModeFailure>,
+fn mode_result_applies<T, F>(
+    outcome: &Result<T, F>,
     attempt: u64,
     request: u64,
     current_attempt: u64,
@@ -3368,14 +3704,11 @@ fn drain_events(inner: &Rc<Inner>) {
                     let demo_connected =
                         inner.demo.get() && matches!(&outcome, ConnectOutcome::Connected(..));
                     // Only a connected model with a measured mode, a supported
-                    // equalizer or the settings block keeps its worker (and
+                    // equalizer or a settings surface keeps its worker (and
                     // socket) for writes; everything else ends as in the MVP.
                     let keeps_worker = matches!(
                         &outcome,
-                        ConnectOutcome::Connected(_, state)
-                            if state.sound_mode.is_some()
-                                || state.equalizer.is_some()
-                                || state.settings.is_some()
+                        ConnectOutcome::Connected(_, state) if has_worker_surface(state)
                     );
                     if !keeps_worker {
                         inner.stop_worker();
@@ -3473,6 +3806,74 @@ fn drain_events(inner: &Rc<Inner>) {
                 );
                 if applies && let Some(window) = inner.ui.upgrade() {
                     apply_setting_outcome(&window, inner, setting, outcome);
+                }
+            }
+            Ok(Event::ScaleChanged {
+                attempt,
+                request,
+                outcome,
+            }) => {
+                let applies = mode_result_applies(
+                    &outcome,
+                    attempt,
+                    request,
+                    inner.connect.get(),
+                    inner.scale_change.get(),
+                );
+                if applies && let Some(window) = inner.ui.upgrade() {
+                    apply_scale_outcome(&window, inner, outcome);
+                }
+            }
+            Ok(Event::A3954PresetChanged {
+                attempt,
+                request,
+                outcome,
+            }) => {
+                let applies = equalizer_change_applies(
+                    &outcome,
+                    attempt,
+                    request,
+                    inner.connect.get(),
+                    inner.preset_change.get(),
+                );
+                if applies && let Some(window) = inner.ui.upgrade() {
+                    apply_a3954_preset_outcome(&window, inner, outcome);
+                    inner.refresh_saved_profiles(&window.global::<AppState>());
+                }
+            }
+            Ok(Event::A3954CurveChanged {
+                attempt,
+                request,
+                outcome,
+            }) => {
+                let applies = equalizer_change_applies(
+                    &outcome,
+                    attempt,
+                    request,
+                    inner.connect.get(),
+                    inner.curve_change.get(),
+                );
+                if applies && let Some(window) = inner.ui.upgrade() {
+                    apply_a3954_curve_outcome(&window, inner, outcome);
+                    // A re-polled curve changes which saved profile is applied.
+                    inner.refresh_saved_profiles(&window.global::<AppState>());
+                }
+            }
+            Ok(Event::A3954SettingChanged {
+                attempt,
+                request,
+                setting,
+                outcome,
+            }) => {
+                let applies = setting_result_applies(
+                    &outcome,
+                    attempt,
+                    request,
+                    inner.connect.get(),
+                    inner.setting_change.get(),
+                );
+                if applies && let Some(window) = inner.ui.upgrade() {
+                    apply_a3954_setting_outcome(&window, inner, setting, outcome);
                 }
             }
             Ok(Event::DualConnectionsRead { attempt, outcome }) => {
@@ -3754,17 +4155,18 @@ fn serve_device_with_heartbeat<T: Transport>(
         }
     };
     let model = session.model();
-    let has_sound_mode = state.sound_mode.is_some();
+    // The A3954 keeps its sound-mode, equalizer and settings blocks inside
+    // `a3954`; the worker keeps that state for the next write's HearID and
+    // mode/airplane/wind basis, exactly as it keeps the A3062 equalizer.
+    let mut a3954 = state.a3954.clone();
+    let has_sound_mode = state.sound_mode.is_some() || a3954.is_some();
     let mut equalizer = state.equalizer;
-    let has_equalizer = equalizer.is_some();
+    let has_equalizer = equalizer.is_some() || a3954.is_some();
     let has_settings = state.settings.is_some();
-    // The A3062 asks for its remembered-device list once on connect, but only
-    // while dual connections are on; with them off the Connections page has no
-    // list and no `0B 01` is written.
-    let dual_enabled = model.dual_connections
-        && state
-            .settings
-            .is_some_and(|settings| settings.dual_connections);
+    // A model with dual-connections support asks for its remembered-device list
+    // once on connect, but only while the setting is on; with it off the
+    // Connections page has no list and no `0B 01` is written.
+    let dual_enabled = model.dual_connections && dual_connections_enabled(&state);
     let _ = events.send(Event::Connected {
         attempt,
         outcome: ConnectOutcome::Connected(model, Box::new(state)),
@@ -3778,10 +4180,10 @@ fn serve_device_with_heartbeat<T: Transport>(
             return;
         }
     }
-    // A model with neither a measured mode, a supported equalizer nor the
-    // settings block has nothing this worker can write; ending it closes the
-    // socket as the MVP did. Any other model keeps its session open for the
-    // `06 81`, `03 87` and settings writes.
+    // A model with neither a measured mode, a supported equalizer nor a settings
+    // block has nothing this worker can write; ending it closes the socket as
+    // the MVP did. Any other model keeps its session open for the `06 81`,
+    // `03 87` and settings writes.
     if !has_sound_mode && !has_equalizer && !has_settings {
         return;
     }
@@ -3902,6 +4304,129 @@ fn serve_device_with_heartbeat<T: Transport>(
                 if failed {
                     // Same rule as a failed mode change: stop writing on a
                     // session that is out of step and let Retry reconnect.
+                    return;
+                }
+                if dual_turned_on {
+                    let outcome = read_dual_connections(&mut session);
+                    let disconnected = outcome == Err(DualFailure::Disconnected);
+                    let _ = events.send(Event::DualConnectionsRead { attempt, outcome });
+                    if disconnected {
+                        return;
+                    }
+                }
+            }
+            DeviceCommand::ChangeA3954SoundMode { request, change } => {
+                // The UI only offers a slider position or the wind bit. The
+                // worker derives the rest of the five-byte body from the state it
+                // last read, so a stale page can never swap the mode half or the
+                // airplane-mode setting.
+                let outcome = match a3954.as_ref() {
+                    Some(current) => match change.apply(current.sound_mode) {
+                        Some(target) => {
+                            let reported = change_a3954_sound_mode(&mut session, target);
+                            if let Ok(reported) = &reported
+                                && let Some(current) = a3954.as_mut()
+                            {
+                                current.sound_mode = *reported;
+                            }
+                            reported
+                        }
+                        None => Err(ModeFailure::Unreadable),
+                    },
+                    None => Err(ModeFailure::Unreadable),
+                };
+                let failed = outcome.is_err();
+                let _ = events.send(Event::ScaleChanged {
+                    attempt,
+                    request,
+                    outcome,
+                });
+                if failed {
+                    // Same rule as a failed mode change: stop writing on a
+                    // session that is out of step and let Retry reconnect.
+                    return;
+                }
+            }
+            DeviceCommand::ChangeA3954Preset { request, preset_id } => {
+                // Only a preset of the A3954 catalog can be selected; an unknown
+                // id is an unreadable answer instead of an invented body.
+                let preset = model
+                    .a3954_equalizer_presets()
+                    .iter()
+                    .find(|preset| preset.id == preset_id);
+                let outcome = match (preset, a3954.as_ref()) {
+                    (Some(preset), Some(current)) => {
+                        let reported =
+                            change_a3954_equalizer_preset(&mut session, &current.equalizer, preset);
+                        if let Ok(reported) = &reported
+                            && let Some(current) = a3954.as_mut()
+                        {
+                            current.equalizer = *reported;
+                        }
+                        reported
+                    }
+                    _ => Err(EqFailure::Unreadable),
+                };
+                let failed = outcome.is_err();
+                let _ = events.send(Event::A3954PresetChanged {
+                    attempt,
+                    request,
+                    outcome,
+                });
+                if failed {
+                    // Same rule as a failed A3062 preset change.
+                    return;
+                }
+            }
+            DeviceCommand::WriteA3954CustomCurve { request, bands } => {
+                let outcome = match a3954.as_ref() {
+                    Some(current) => {
+                        let reported =
+                            change_a3954_custom_equalizer(&mut session, &current.equalizer, bands);
+                        if let Ok(reported) = &reported
+                            && let Some(current) = a3954.as_mut()
+                        {
+                            current.equalizer = *reported;
+                        }
+                        reported
+                    }
+                    None => Err(EqFailure::Unreadable),
+                };
+                let failed = outcome.is_err();
+                let _ = events.send(Event::A3954CurveChanged {
+                    attempt,
+                    request,
+                    outcome,
+                });
+                if failed {
+                    // Same rule as a failed A3062 curve change.
+                    return;
+                }
+            }
+            DeviceCommand::SetA3954Setting { request, setting } => {
+                let outcome = change_a3954_setting(&mut session, setting);
+                // The re-polled state becomes the base of the next A3954 write,
+                // exactly as after an A3062 settings write.
+                if let Ok(reported) = &outcome {
+                    a3954 = reported.a3954.clone();
+                }
+                // Toggling dual connections on makes the Connections page show
+                // its list, so the worker reads it right away; the device's own
+                // answer decides.
+                let dual_turned_on = matches!(setting, A3954SettingCommand::DualConnections(_))
+                    && outcome
+                        .as_ref()
+                        .ok()
+                        .and_then(|reported| reported.a3954.as_ref())
+                        .is_some_and(|a3954| a3954.dual_connections);
+                let failed = outcome.is_err();
+                let _ = events.send(Event::A3954SettingChanged {
+                    attempt,
+                    request,
+                    setting,
+                    outcome,
+                });
+                if failed {
                     return;
                 }
                 if dual_turned_on {
@@ -4141,10 +4666,45 @@ fn serve_demo_device(
                     return;
                 }
             }
+            // The simulated device is the committed A3062 capture, whose state
+            // has no A3954 blocks, so the A3954 commands are never offered. If
+            // one arrives anyway it fails like a model without the blocks
+            // instead of hanging the page.
+            DeviceCommand::ChangeA3954SoundMode { request, .. } => {
+                let _ = events.send(Event::ScaleChanged {
+                    attempt,
+                    request,
+                    outcome: Err(ModeFailure::Unreadable),
+                });
+                return;
+            }
+            DeviceCommand::ChangeA3954Preset { request, .. } => {
+                let _ = events.send(Event::A3954PresetChanged {
+                    attempt,
+                    request,
+                    outcome: Err(EqFailure::Unreadable),
+                });
+                return;
+            }
+            DeviceCommand::WriteA3954CustomCurve { request, .. } => {
+                let _ = events.send(Event::A3954CurveChanged {
+                    attempt,
+                    request,
+                    outcome: Err(EqFailure::Unreadable),
+                });
+                return;
+            }
+            DeviceCommand::SetA3954Setting { request, setting } => {
+                let _ = events.send(Event::A3954SettingChanged {
+                    attempt,
+                    request,
+                    setting,
+                    outcome: Err(SettingFailure::Unreadable),
+                });
+                return;
+            }
             // The probes are read-only reads of a real radio link, which a
-            // simulated device does not have. The Diagnostics page is marked
-            // unavailable after a demo connect and never queues this command;
-            // ignoring it here keeps the demo worker from inventing a capture.
+            // simulated device does not have.
             DeviceCommand::RunDiagnostics { .. } => {}
         }
     }
@@ -4445,7 +5005,7 @@ fn begin_connecting(state: &AppState<'_>, inner: &Rc<Inner>, request: ConnectReq
     state.set_batteries(ModelRc::default());
     inner.device.borrow_mut().take();
     inner.clear_dual_devices();
-    show_sound_mode(state, None, false, false);
+    show_sound_mode(state, None);
     show_equalizer(state, &EqualizerDisplay::default());
     reset_diagnostics(state);
     clear_section_pages(state);
@@ -4502,7 +5062,7 @@ fn begin_demo_connect(window: &AppWindow, inner: &Rc<Inner>, model: SelectedMode
     state.set_batteries(ModelRc::default());
     inner.device.borrow_mut().take();
     inner.clear_dual_devices();
-    show_sound_mode(&state, None, false, false);
+    show_sound_mode(&state, None);
     show_equalizer(&state, &EqualizerDisplay::default());
     reset_diagnostics(&state);
     clear_section_pages(&state);
@@ -4530,7 +5090,7 @@ fn cancel_connect(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_error_label("".into());
     inner.device.borrow_mut().take();
     inner.clear_dual_devices();
-    show_sound_mode(&state, None, false, false);
+    show_sound_mode(&state, None);
     show_equalizer(&state, &EqualizerDisplay::default());
     reset_diagnostics(&state);
     clear_section_pages(&state);
@@ -4565,7 +5125,7 @@ fn disconnect(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_error_label("".into());
     inner.device.borrow_mut().take();
     inner.clear_dual_devices();
-    show_sound_mode(&state, None, false, false);
+    show_sound_mode(&state, None);
     show_equalizer(&state, &EqualizerDisplay::default());
     reset_diagnostics(&state);
     clear_section_pages(&state);
@@ -4621,18 +5181,18 @@ fn apply_outcome(window: &AppWindow, inner: &Rc<Inner>, outcome: ConnectOutcome)
             // A fresh connection starts from no remembered-device list; the
             // worker reports one when dual connections are on.
             inner.clear_dual_devices();
-            let equalizer = EqualizerDisplay::new(Some(model), device_state.equalizer.as_ref());
-            let has_settings = device_state.settings.is_some();
+            let equalizer = equalizer_display_for(model, &device_state);
             state.set_batteries(ModelRc::new(VecModel::from(batteries(&device_state))));
             state.set_one_earbud(device_state.battery.is_some() && !device_state.tws_connected);
-            show_sound_mode(
-                &state,
-                device_state.sound_mode,
-                equalizer.available,
-                has_settings,
-            );
-            show_device_pages(&state, has_settings);
+            show_sound_mode(&state, Some(&device_state));
+            show_device_pages(&state, Some(&device_state));
             show_equalizer(&state, &equalizer);
+            // The A3954 has no three-mode tiles this slice can show, so a fresh
+            // connection opens its 1..=11 scale; every other model keeps the
+            // page it was on.
+            if device_state.a3954.is_some() {
+                state.set_page(Page::SoundModes);
+            }
             show_diagnostics_device(&state, model, &device_state, inner);
             state.set_connection(Connection::Connected);
             state.set_connection_reason("".into());
@@ -4657,7 +5217,7 @@ fn apply_failure(inner: &Rc<Inner>, state: &AppState<'_>, failure: ConnectFailur
     state.set_batteries(ModelRc::default());
     inner.device.borrow_mut().take();
     inner.clear_dual_devices();
-    show_sound_mode(state, None, false, false);
+    show_sound_mode(state, None);
     show_equalizer(state, &EqualizerDisplay::default());
     reset_diagnostics(state);
     clear_section_pages(state);
@@ -5076,57 +5636,95 @@ fn open_url(url: &str) {
 }
 
 ///
-/// A device that reports a mode gets the three tiles, their labels and the
-/// Sound mode page; a P20i gets none of them, so it never offers a mode change.
-/// The 1-to-11 scale and the per-mode strength/wind rows stay out of scope, so
-/// `mode-scale` is false and `mode-rows` stays empty.
-fn show_sound_mode(
-    state: &AppState<'_>,
-    sound_mode: Option<SoundMode>,
-    has_equalizer: bool,
-    has_settings: bool,
-) {
+/// Fills the Sound mode page from the connected state, or empties it when there
+/// is no connected device.
+///
+/// The A3062 shows its three measured mode tiles; the A3954, whose ambient sound
+/// is one 1..=11 scale, shows the scale at the position the device reports plus
+/// its wind-noise suppression toggle. The mode labels feed the scale's mode
+/// words on both pages.
+fn show_sound_mode(state: &AppState<'_>, device: Option<&DeviceState>) {
+    let sound_mode = device.and_then(|device| device.sound_mode);
+    let a3954 = device.and_then(|device| device.a3954.as_ref());
     state.set_modes(ModelRc::new(VecModel::from(mode_options(sound_mode))));
     state.set_mode_index(mode_index(sound_mode));
-    state.set_mode_scale(false);
-    state.set_mode_rows(ModelRc::default());
+    state.set_mode_scale(a3954.is_some());
+    state.set_scale_position(
+        a3954.map_or(i32::from(A3954SoundModeSlider::NORMAL), |a3954| {
+            i32::from(a3954.sound_mode.slider.value())
+        }),
+    );
+    state.set_mode_rows(ModelRc::new(VecModel::from(
+        a3954.map_or_else(Vec::new, |a3954| {
+            a3954_mode_rows(a3954.sound_mode.wind_noise_suppression)
+        }),
+    )));
+    // The scale has no airplane-mode position, so no airplane chip is offered.
+    state.set_airplane_index(-1);
+    state.set_airplane_label("".into());
     state.set_sound_pages(ModelRc::new(VecModel::from(sound_pages(
-        sound_mode,
-        has_equalizer,
-        has_settings,
+        sound_mode.is_some(),
+        a3954.is_some(),
+        device.is_some_and(has_equalizer),
+        device.is_some_and(has_effects),
     ))));
-    let label = |mode: SoundMode| {
-        if sound_mode.is_some() {
-            mode_label(mode)
-        } else {
-            ""
-        }
-    };
-    state.set_noise_canceling_label(label(SoundMode::NoiseCanceling).into());
-    state.set_transparency_label(label(SoundMode::Transparency).into());
-    state.set_normal_label(label(SoundMode::Normal).into());
+    state.set_noise_canceling_label(mode_label(SoundMode::NoiseCanceling).into());
+    state.set_transparency_label(mode_label(SoundMode::Transparency).into());
+    state.set_normal_label(mode_label(SoundMode::Normal).into());
+}
+
+/// The sound-mode rows under the A3954 scale: the measured wind-noise
+/// suppression toggle. Its detection bit is a read-only status and has no row.
+fn a3954_mode_rows(wind_noise_suppression: bool) -> Vec<SettingRow> {
+    vec![toggle_row(
+        WIND_NOISE_SUPPRESSION_ID,
+        "Wind noise suppression",
+        wind_noise_suppression,
+    )]
 }
 
 /// Fills the sidebar device pages and the aside capability flags of a connected
-/// state. Only the A3062's settings block adds the pages; the A3949 and every
-/// other model keeps the MVP's surface, so it has no page and no write path.
-fn show_device_pages(state: &AppState<'_>, has_settings: bool) {
-    state.set_device_pages(ModelRc::new(VecModel::from(device_pages(has_settings))));
-    // The A3062 has one control surface, an LDAC toggle and no spatial audio;
-    // its case has no registers this slice reads.
+/// state. The A3062's settings block and the A3954's own block both add the five
+/// device pages; the A3954 also reports spatial audio, and the A3062 does not.
+/// A model with neither block (the A3949) keeps the MVP's surface, so it has no
+/// page and no write path.
+fn show_device_pages(state: &AppState<'_>, device: Option<&DeviceState>) {
+    let has_settings = device.is_some_and(|device| device.settings.is_some());
+    let a3954 = device.and_then(|device| device.a3954.as_ref());
+    state.set_device_pages(ModelRc::new(VecModel::from(device_pages(
+        has_settings,
+        a3954.is_some(),
+    ))));
+    // Neither model has per-earbud control surfaces in this slice, and only the
+    // A3954 reports spatial audio. The A3954 reports its case battery on the
+    // About page; the case page itself is deferred.
     state.set_has_sides(false);
-    state.set_has_ldac(has_settings);
-    state.set_has_spatial(false);
-    state.set_case_battery("".into());
+    state.set_has_ldac(has_settings || a3954.is_some());
+    state.set_has_spatial(a3954.is_some());
+    state.set_case_battery(a3954_case_battery(a3954).into());
     // The Connections page's "open Windows settings" links need a device page
     // that has them.
-    state.set_system_settings_available(has_settings);
+    state.set_system_settings_available(has_settings || a3954.is_some());
+}
+
+/// The case battery the About page and the case aside show, or an empty string
+/// when the model has no measured case battery: the raw ten-step level plus one,
+/// as the measured display level.
+fn a3954_case_battery(a3954: Option<&A3954State>) -> String {
+    a3954
+        .and_then(|a3954| a3954.case_battery_level)
+        .map(|level| {
+            battery_tile(2, level.saturating_add(1), 10)
+                .value
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 /// Empties the section pages of a device that is connecting, disconnected or
 /// failed: no sidebar pages and no panels.
 fn clear_section_pages(state: &AppState<'_>) {
-    show_device_pages(state, false);
+    show_device_pages(state, None);
     state.set_panels(ModelRc::default());
 }
 
@@ -5209,14 +5807,19 @@ fn dual_devices_row(devices: &[DualConnectionDevice]) -> SettingRow {
 /// Connections page. The list row is built from `dual_devices` in reply order,
 /// so the option the user clicks is always the device at that index.
 ///
-/// The A3062 is the only model with a settings block; a state without one (the
-/// A3949 and the rest of the catalog so far) has no panels, so it can neither
-/// show a settings page nor name a setting for a write.
+/// The A3062 and the A3954 both have a settings surface, but their rows and write
+/// commands differ; each model's branch builds only rows its own command builder
+/// can name. A state without either block (the A3949 and the rest of the catalog
+/// so far) has no panels, so it can neither show a settings page nor name a
+/// setting for a write.
 pub fn panels_for_page(
     page: Page,
     device_state: &DeviceState,
     dual_devices: &[DualConnectionDevice],
 ) -> Vec<SettingsPanel> {
+    if let Some(a3954) = device_state.a3954.as_ref() {
+        return a3954_panels_for_page(page, device_state, a3954, dual_devices);
+    }
     let Some(settings) = device_state.settings else {
         return Vec::new();
     };
@@ -5317,6 +5920,243 @@ pub fn panels_for_page(
         _ => Vec::new(),
     };
     panels.into_iter().flatten().collect()
+}
+
+/// The five sidebar pages of an A3954, built from its own measured settings
+/// block. Each row's id is the one the controller's `a3954_*_command` helpers
+/// map back to a measured [`A3954SettingCommand`], so a row can only ever write
+/// the setting it shows.
+///
+/// Button remapping is deliberately deferred by this slice: the Controls page
+/// shows the ambient-sound-mode cycle toggles, which are the only measured
+/// button-related writes, and an info row says remapping is not available.
+fn a3954_panels_for_page(
+    page: Page,
+    device_state: &DeviceState,
+    a3954: &A3954State,
+    dual_devices: &[DualConnectionDevice],
+) -> Vec<SettingsPanel> {
+    let panels: Vec<Option<SettingsPanel>> = match page {
+        Page::Controls => vec![
+            settings_panel(
+                PanelKind::Presses,
+                vec![info_row(
+                    "buttonRemapping",
+                    "Button remapping",
+                    "Not available in this version",
+                )],
+            ),
+            settings_panel(PanelKind::Cycle, cycle_rows(a3954.ambient_sound_mode_cycle)),
+        ],
+        Page::Comfort => vec![
+            settings_panel(
+                PanelKind::Plain,
+                vec![
+                    toggle_row(
+                        "wearingDetection",
+                        "Wearing detection",
+                        a3954.wearing_detection,
+                    ),
+                    toggle_row("easyChat", "Easy chat", a3954.easy_chat.enabled),
+                    select_row(
+                        "easyChatWaitTime",
+                        "Easy chat wait time",
+                        &EASY_CHAT_WAIT_OPTIONS,
+                        easy_chat_wait_index(a3954.easy_chat.wait_time),
+                    ),
+                    toggle_row(
+                        "soundLeakCompensation",
+                        "Sound leak compensation",
+                        a3954.sound_leak_compensation,
+                    ),
+                ],
+            ),
+            settings_panel(
+                PanelKind::Volume,
+                vec![
+                    toggle_row(
+                        "limitHighVolume",
+                        "Limit high volume",
+                        a3954.limit_high_volume.enabled,
+                    ),
+                    range_row(
+                        "limitHighVolumeDbLimit",
+                        "dB limit",
+                        i32::from(DbLimit::MIN),
+                        i32::from(DbLimit::MAX),
+                        i32::from(DbLimit::STEP),
+                        i32::from(a3954.limit_high_volume.db_limit.value()),
+                    ),
+                    select_row(
+                        "limitHighVolumeRefreshRate",
+                        "Refresh rate",
+                        &REFRESH_RATE_OPTIONS,
+                        refresh_rate_index(a3954.limit_high_volume.refresh_rate),
+                    ),
+                ],
+            ),
+        ],
+        Page::Power => vec![settings_panel(
+            PanelKind::Plain,
+            vec![
+                select_row(
+                    "autoPowerOff",
+                    "Auto power off",
+                    &A3954_AUTO_POWER_OFF_OPTIONS,
+                    a3954_auto_power_off_index(a3954.auto_power_off),
+                ),
+                toggle_row(
+                    "lowBatteryPrompt",
+                    "Low battery prompt",
+                    a3954.low_battery_prompt,
+                ),
+            ],
+        )],
+        // The remembered-device list belongs to the dual-connections setting:
+        // with it off the page has the toggle only, and the controller sends no
+        // `0B 01` either.
+        Page::Connections => {
+            let mut panels = vec![settings_panel(
+                PanelKind::Plain,
+                vec![toggle_row(
+                    "dualConnections",
+                    "Dual connections",
+                    a3954.dual_connections,
+                )],
+            )];
+            if a3954.dual_connections {
+                panels.push(settings_panel(
+                    PanelKind::DualDevices,
+                    vec![dual_devices_row(dual_devices)],
+                ));
+            }
+            panels
+        }
+        Page::Effects => {
+            // The two spatial-audio choices only act while the enable switch is
+            // on, so they are disabled with the device's own reason when it is
+            // off; the row still shows the value the device reports.
+            let (spatial_enabled, spatial_reason) = if a3954.spatial_audio.enabled {
+                (true, "")
+            } else {
+                (false, "Turn on spatial audio first")
+            };
+            let mut music_mode = select_row(
+                "spatialAudioMusicMode",
+                "Spatial audio music mode",
+                &SPATIAL_AUDIO_MUSIC_MODE_OPTIONS,
+                spatial_audio_music_mode_index(a3954.spatial_audio.music_mode),
+            );
+            music_mode.enabled = spatial_enabled;
+            music_mode.reason = spatial_reason.into();
+            let mut mode = select_row(
+                "spatialAudioMode",
+                "Spatial audio mode",
+                &SPATIAL_AUDIO_MODE_OPTIONS,
+                i32::from(a3954.spatial_audio.mode.value()),
+            );
+            mode.enabled = spatial_enabled;
+            mode.reason = spatial_reason.into();
+            vec![settings_panel(
+                PanelKind::Plain,
+                vec![
+                    toggle_row("ldac", "LDAC", a3954.ldac),
+                    toggle_row("spatialAudio", "Spatial audio", a3954.spatial_audio.enabled),
+                    music_mode,
+                    mode,
+                    toggle_row(
+                        "soundLeakCompensation",
+                        "Sound leak compensation",
+                        a3954.sound_leak_compensation,
+                    ),
+                ],
+            )]
+        }
+        Page::About => vec![settings_panel(
+            PanelKind::Info,
+            a3954_about_rows(device_state, a3954),
+        )],
+        _ => Vec::new(),
+    };
+    panels.into_iter().flatten().collect()
+}
+
+/// The auto-power-off choices of the A3954: off, then the four measured
+/// durations in index order.
+pub const A3954_AUTO_POWER_OFF_OPTIONS: [&str; 5] = [
+    "Disabled",
+    "10 minutes",
+    "20 minutes",
+    "30 minutes",
+    "60 minutes",
+];
+
+/// The easy-chat wait choices, in the order [`A3954EasyChatWaitTime`] lists them.
+pub const EASY_CHAT_WAIT_OPTIONS: [&str; 3] = ["5 seconds", "10 seconds", "15 seconds"];
+
+/// The spatial-audio music modes, in the order [`A3954SpatialAudioMusicMode`]
+/// lists them.
+pub const SPATIAL_AUDIO_MUSIC_MODE_OPTIONS: [&str; 2] = ["Fixed", "Head tracking"];
+
+/// The spatial-audio effect modes, in the order [`A3954SpatialAudioMode`] lists
+/// them.
+pub const SPATIAL_AUDIO_MODE_OPTIONS: [&str; 4] = ["Music", "Podcast", "Movie", "Gaming"];
+
+/// The index of an A3954 auto-power-off state in
+/// [`A3954_AUTO_POWER_OFF_OPTIONS`]: zero is off, then the four durations.
+pub fn a3954_auto_power_off_index(auto_power_off: A3954AutoPowerOff) -> i32 {
+    if auto_power_off.enabled {
+        i32::from(auto_power_off.duration.index()) + 1
+    } else {
+        0
+    }
+}
+
+/// The index of an easy-chat wait time in [`EASY_CHAT_WAIT_OPTIONS`].
+pub fn easy_chat_wait_index(wait_time: A3954EasyChatWaitTime) -> i32 {
+    i32::from(wait_time.value())
+}
+
+/// The index of an A3954 spatial-audio music mode in
+/// [`SPATIAL_AUDIO_MUSIC_MODE_OPTIONS`].
+pub fn spatial_audio_music_mode_index(music_mode: A3954SpatialAudioMusicMode) -> i32 {
+    match music_mode {
+        A3954SpatialAudioMusicMode::Fixed => 0,
+        A3954SpatialAudioMusicMode::HeadTracking => 1,
+    }
+}
+
+/// The About rows of an A3954: both earbud batteries, the case battery, both
+/// earbud firmwares and the case firmware. The serial and the Bluetooth address
+/// are deliberately omitted: the vendored Info row copies its whole text, and
+/// serials stay out of screenshots, reports and logs.
+pub fn a3954_about_rows(device_state: &DeviceState, a3954: &A3954State) -> Vec<SettingRow> {
+    let mut rows = Vec::new();
+    if let Some(battery) = &device_state.battery {
+        let maximum = battery.scale.maximum();
+        let left = battery_tile(0, battery.left, maximum);
+        rows.push(info_row("leftBattery", "Left battery", left.value.as_str()));
+        let right = battery_tile(1, battery.right, maximum);
+        rows.push(info_row(
+            "rightBattery",
+            "Right battery",
+            right.value.as_str(),
+        ));
+    }
+    if let Some(level) = a3954.case_battery_level {
+        let case = battery_tile(2, level.saturating_add(1), 10);
+        rows.push(info_row("caseBattery", "Case battery", case.value.as_str()));
+    }
+    if let Some(firmware) = device_state.firmware.left.as_deref() {
+        rows.push(info_row("leftFirmware", "Left firmware", firmware));
+    }
+    if let Some(firmware) = device_state.firmware.right.as_deref() {
+        rows.push(info_row("rightFirmware", "Right firmware", firmware));
+    }
+    if let Some(firmware) = a3954.case_firmware.as_deref() {
+        rows.push(info_row("caseFirmware", "Case firmware", firmware));
+    }
+    rows
 }
 
 /// One settings panel, or `None` when it would have no rows; an empty panel
@@ -5545,18 +6385,148 @@ fn refresh_rate_from_index(index: i32) -> Option<DecibelReadingRefreshRate> {
         .and_then(|index| DecibelReadingRefreshRate::ALL.get(index).copied())
 }
 
+/// The write an A3954 section-page toggle names, or `None` for any other id:
+/// an unknown id never writes. The wind-noise toggle is not a settings write
+/// (it travels in the `06 81` sound-mode body) and is handled by the sound-mode
+/// path; the page's row id is accepted there, not here.
+pub fn a3954_toggle_command(
+    id: &str,
+    on: bool,
+    current: &A3954State,
+) -> Option<A3954SettingCommand> {
+    Some(match id {
+        "ldac" => A3954SettingCommand::Ldac(on),
+        "lowBatteryPrompt" => A3954SettingCommand::LowBatteryPrompt(on),
+        "dualConnections" => A3954SettingCommand::DualConnections(on),
+        "wearingDetection" => A3954SettingCommand::WearingDetection(on),
+        "soundLeakCompensation" => A3954SettingCommand::SoundLeakCompensation(on),
+        "spatialAudio" => A3954SettingCommand::SpatialAudio(A3954SpatialAudio {
+            enabled: on,
+            ..current.spatial_audio
+        }),
+        // The enable flag and the wait time travel in one measured body, so the
+        // toggle keeps the wait the device reports.
+        "easyChat" => A3954SettingCommand::EasyChat(A3954EasyChat {
+            enabled: on,
+            wait_time: current.easy_chat.wait_time,
+        }),
+        // The enable flag and the dB limit travel in one measured body, so the
+        // toggle keeps the limit the device reports.
+        "limitHighVolume" => A3954SettingCommand::LimitHighVolume {
+            enabled: on,
+            db_limit: current.limit_high_volume.db_limit,
+        },
+        // A cycle toggle changes one bit and keeps the other two.
+        "noiseCancelingModeInCycle" => {
+            A3954SettingCommand::AmbientSoundModeCycle(AmbientSoundModeCycle {
+                noise_canceling: on,
+                ..current.ambient_sound_mode_cycle
+            })
+        }
+        "transparencyModeInCycle" => {
+            A3954SettingCommand::AmbientSoundModeCycle(AmbientSoundModeCycle {
+                transparency: on,
+                ..current.ambient_sound_mode_cycle
+            })
+        }
+        "normalModeInCycle" => A3954SettingCommand::AmbientSoundModeCycle(AmbientSoundModeCycle {
+            normal: on,
+            ..current.ambient_sound_mode_cycle
+        }),
+        _ => return None,
+    })
+}
+
+/// The write an A3954 section-page select names, or `None` for an unknown id or
+/// an index outside the row's choices.
+pub fn a3954_option_command(
+    id: &str,
+    index: i32,
+    current: &A3954State,
+) -> Option<A3954SettingCommand> {
+    match id {
+        // Choosing a duration also enables auto power off; choosing "Disabled"
+        // keeps the duration the device reports, so switching back on restores
+        // it.
+        "autoPowerOff" => {
+            let auto_power_off = match index {
+                0 => A3954AutoPowerOff {
+                    enabled: false,
+                    duration: current.auto_power_off.duration,
+                },
+                1..=4 => A3954AutoPowerOff {
+                    enabled: true,
+                    duration: A3954AutoPowerOffDuration::from_index(u8::try_from(index - 1).ok()?)?,
+                },
+                _ => return None,
+            };
+            Some(A3954SettingCommand::AutoPowerOff(auto_power_off))
+        }
+        "limitHighVolumeRefreshRate" => {
+            refresh_rate_from_index(index).map(A3954SettingCommand::LimitHighVolumeRefreshRate)
+        }
+        "easyChatWaitTime" => {
+            let wait_time = A3954EasyChatWaitTime::from_value(u8::try_from(index).ok()?)?;
+            Some(A3954SettingCommand::EasyChat(A3954EasyChat {
+                enabled: current.easy_chat.enabled,
+                wait_time,
+            }))
+        }
+        "spatialAudioMusicMode" => {
+            let music_mode = match index {
+                0 => A3954SpatialAudioMusicMode::Fixed,
+                1 => A3954SpatialAudioMusicMode::HeadTracking,
+                _ => return None,
+            };
+            Some(A3954SettingCommand::SpatialAudio(A3954SpatialAudio {
+                music_mode,
+                ..current.spatial_audio
+            }))
+        }
+        "spatialAudioMode" => {
+            let mode = A3954SpatialAudioMode::from_value(u8::try_from(index).ok()?)?;
+            Some(A3954SettingCommand::SpatialAudio(A3954SpatialAudio {
+                mode,
+                ..current.spatial_audio
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// The write an A3954 section-page range release names, or `None` for an
+/// unknown id or a value outside the measured dB steps.
+pub fn a3954_number_command(
+    id: &str,
+    value: i32,
+    current: &A3954State,
+) -> Option<A3954SettingCommand> {
+    if id != "limitHighVolumeDbLimit" {
+        return None;
+    }
+    let db_limit = DbLimit::new(u8::try_from(value).ok()?)?;
+    Some(A3954SettingCommand::LimitHighVolume {
+        enabled: current.limit_high_volume.enabled,
+        db_limit,
+    })
+}
+
+/// The setting id of the Sound mode page's wind-noise toggle. It travels in the
+/// `06 81` sound-mode body, not in an A3954 settings frame.
+pub const WIND_NOISE_SUPPRESSION_ID: &str = "windNoiseSuppression";
+
 /// Fills the vendored Equalizer page from the parsed state.
 ///
 /// The page is editable exactly when this slice can write a custom equalizer
-/// body for the model (the A3062): the band controls, the range note, the reset
-/// button and the saved-profile panel with its Save button are enabled and the
-/// eight visible bands are editable. A model whose equalizer is deferred (the
-/// A3949) keeps all of them hidden, so it has no page and no profile writes.
-/// The saved-profile panel offers the import blocks (paste and file) and the
-/// export block (choose profiles, save to a file or the clipboard), which the
-/// same editability gates: only the A3062's page shows the panel. The legacy
-/// migration stays inert: the legacy list is always empty and no migrate action
-/// is wired.
+/// body for the model (the A3062's 53-byte body or the A3954's 114-byte one):
+/// the band controls, the range note, the reset button and the saved-profile
+/// panel with its Save button are enabled and the eight visible bands are
+/// editable. A model whose equalizer is deferred (the A3949) keeps all of them
+/// hidden, so it has no page and no profile writes. The saved-profile panel
+/// offers the import blocks (paste and file) and the export block (choose
+/// profiles, save to a file or the clipboard), which the same editability gates:
+/// the A3062 and A3954 pages show the panel. The legacy migration stays inert:
+/// the legacy list is always empty and no migrate action is wired.
 fn show_equalizer(state: &AppState<'_>, display: &EqualizerDisplay) {
     state.set_eq_available(display.available);
     state.set_eq_read_only(!display.editable);
@@ -5731,18 +6701,243 @@ fn show_equalizer_state(state: &AppState<'_>, equalizer: &EqualizerState) {
     );
 }
 
+/// Applies a finished A3954 sound-mode change: the scale position and the wind
+/// toggle follow the state the device reports, or the error banner names the
+/// setting that failed.
+fn apply_scale_outcome(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    outcome: Result<A3954SoundMode, ModeFailure>,
+) {
+    let state = window.global::<AppState>();
+    match outcome {
+        Ok(reported) => {
+            // Keep the controller's copy in step, so a later write is based on
+            // the state the device reports rather than the clicked position.
+            store_a3954_sound_mode(inner, reported);
+            show_a3954_sound_mode_state(&state, reported);
+            state.set_error_label("".into());
+        }
+        Err(failure) => {
+            // The worker closes the session after a failed change; Retry in the
+            // banner opens a fresh connection.
+            inner.stop_worker();
+            state.set_error_label(failure.label().into());
+        }
+    }
+    refresh_tray(inner, &state);
+}
+
+/// Stores the reported A3954 sound-mode block in the controller's copy of the
+/// state.
+fn store_a3954_sound_mode(inner: &Rc<Inner>, reported: A3954SoundMode) {
+    if let Some(device) = inner.device.borrow_mut().as_mut()
+        && let Some(a3954) = device.a3954.as_mut()
+    {
+        a3954.sound_mode = reported;
+    }
+}
+
+/// Shows the A3954 scale position and wind toggle the device reports.
+fn show_a3954_sound_mode_state(state: &AppState<'_>, reported: A3954SoundMode) {
+    state.set_scale_position(i32::from(reported.slider.value()));
+    state.set_mode_rows(ModelRc::new(VecModel::from(a3954_mode_rows(
+        reported.wind_noise_suppression,
+    ))));
+}
+
+/// Applies a finished A3954 equalizer preset change: the preset and curve the
+/// device reports become the page's, or the error banner names the setting that
+/// failed. The preset catalog is kept; only the state-dependent fields change.
+fn apply_a3954_preset_outcome(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    outcome: Result<A3954EqualizerState, EqFailure>,
+) {
+    let state = window.global::<AppState>();
+    match outcome {
+        Ok(reported) => {
+            store_a3954_equalizer(inner, reported);
+            show_a3954_equalizer_state(&state, &reported);
+            state.set_error_label("".into());
+        }
+        Err(failure) => {
+            // The worker closes the session after a failed change; Retry in the
+            // banner opens a fresh connection.
+            inner.stop_worker();
+            state.set_error_label(failure.label().into());
+        }
+    }
+}
+
+/// Applies a finished A3954 custom-curve write to the page.
+fn apply_a3954_curve_outcome(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    outcome: Result<A3954EqualizerState, EqFailure>,
+) {
+    let state = window.global::<AppState>();
+    match outcome {
+        Ok(reported) => {
+            store_a3954_equalizer(inner, reported);
+            show_a3954_equalizer_state(&state, &reported);
+            state.set_error_label("".into());
+        }
+        Err(failure) => {
+            inner.stop_worker();
+            state.set_error_label(failure.bands_label().into());
+        }
+    }
+}
+
+/// Stores the reported A3954 equalizer block in the controller's copy of the
+/// state.
+fn store_a3954_equalizer(inner: &Rc<Inner>, reported: A3954EqualizerState) {
+    if let Some(device) = inner.device.borrow_mut().as_mut()
+        && let Some(a3954) = device.a3954.as_mut()
+    {
+        a3954.equalizer = reported;
+    }
+}
+
+/// Replaces the state-dependent Equalizer page fields with a re-read A3954
+/// block: the preset id and name, the eight visible bands and the curve.
+fn show_a3954_equalizer_state(state: &AppState<'_>, equalizer: &A3954EqualizerState) {
+    let values: Vec<i16> = equalizer
+        .visible_bands()
+        .map(|bands| bands.to_vec())
+        .unwrap_or_default();
+    let (chart_line, chart_area) = equalizer_chart(&values, EQ_MIN, EQ_MAX);
+    state.set_eq_preset(equalizer.preset_id.to_string().into());
+    state.set_eq_bands(ModelRc::new(VecModel::from(equalizer_bands_from_values(
+        &values,
+    ))));
+    state.set_eq_lines(ModelRc::new(VecModel::from(equalizer_lines())));
+    state.set_eq_chart_line(chart_line.into());
+    state.set_eq_chart_area(chart_area.into());
+    state.set_eq_curve(profile_curve(&values).into());
+    state.set_eq_name(
+        equalizer
+            .preset()
+            .map(|preset| preset.name)
+            .unwrap_or_default()
+            .into(),
+    );
+}
+
+/// Applies a finished A3954 settings change: the re-polled state replaces the
+/// controller's copy and refills the panels and About, or the error banner names
+/// the setting that failed.
+fn apply_a3954_setting_outcome(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    setting: A3954SettingCommand,
+    outcome: Result<Box<DeviceState>, SettingFailure>,
+) {
+    let state = window.global::<AppState>();
+    match outcome {
+        Ok(reported) => {
+            // Turning dual connections off takes the remembered-device list
+            // away with the setting, so no stale row can be forgotten or
+            // connected while it is off.
+            let dual_off = reported
+                .a3954
+                .as_ref()
+                .is_some_and(|a3954| !a3954.dual_connections);
+            *inner.device.borrow_mut() = Some(reported);
+            if dual_off {
+                inner.clear_dual_devices();
+            }
+            show_overview(&state, inner);
+            show_section_pages(&state, inner);
+            state.set_error_label("".into());
+        }
+        Err(failure) => {
+            // The worker closes the session after a failed write; Retry in the
+            // banner opens a fresh connection.
+            inner.stop_worker();
+            state.set_error_label(failure.a3954_label(setting).into());
+        }
+    }
+    refresh_tray(inner, &state);
+}
+
 /// Answers a choice control on the UI thread. The Sound mode tiles keep their
 /// own `ambientSoundMode` id and `06 81` write; every other id is a section row,
 /// and an id or index this slice does not write is ignored, so no other frame
-/// can be written.
+/// can be written. The A3954's rows name its own settings commands.
 fn set_option(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, index: i32) {
     if setting_id == SOUND_MODE_SETTING_ID {
         set_ambient_sound_mode(window, inner, index);
         return;
     }
+    if connected_a3954(inner) {
+        answer_a3954_setting(window, inner, |a3954| {
+            a3954_option_command(setting_id, index, a3954)
+        });
+        return;
+    }
     answer_setting(window, inner, |settings| {
         option_command(setting_id, index, settings)
     });
+}
+
+/// Answers the Sound mode page's `set-scale` slider release: queues one A3954
+/// `06 81` scale write. A position outside 1..=11, a page that is not showing
+/// the scale, or a device that is not an A3954 writes nothing.
+fn set_scale(window: &AppWindow, inner: &Rc<Inner>, position: i32) {
+    let state = window.global::<AppState>();
+    if state.get_connection() != Connection::Connected
+        || !state.get_mode_scale()
+        || !connected_a3954(inner)
+    {
+        return;
+    }
+    let Ok(position) = u8::try_from(position) else {
+        return;
+    };
+    if A3954SoundModeSlider::new(position).is_none() {
+        return;
+    }
+    let sent = inner.send_queued(&inner.scale_change, |request| {
+        DeviceCommand::ChangeA3954SoundMode {
+            request,
+            change: A3954SoundModeChange::Scale(position),
+        }
+    });
+    if !sent {
+        // The worker of a previous failed change has closed the connection; the
+        // banner's Retry reconnects.
+        state.set_error_label(ModeFailure::Disconnected.label().into());
+    }
+}
+
+/// Answers the sound-mode page's wind-noise toggle: the flag travels in the
+/// A3954 `06 81` sound-mode body, not in a settings frame.
+fn set_a3954_wind(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
+    let state = window.global::<AppState>();
+    if state.get_connection() != Connection::Connected || !connected_a3954(inner) {
+        return;
+    }
+    let sent = inner.send_queued(&inner.scale_change, |request| {
+        DeviceCommand::ChangeA3954SoundMode {
+            request,
+            change: A3954SoundModeChange::Wind(on),
+        }
+    });
+    if !sent {
+        state.set_error_label(ModeFailure::Disconnected.label().into());
+    }
+}
+
+/// Whether the connected device is an A3954, whose settings rows name the
+/// `A3954SettingCommand` writes rather than the A3062 ones.
+fn connected_a3954(inner: &Rc<Inner>) -> bool {
+    inner
+        .device
+        .borrow()
+        .as_ref()
+        .is_some_and(|device| device.a3954.is_some())
 }
 
 /// Answers a Sound mode tile: queues one `06 81` write on the device worker.
@@ -5766,8 +6961,20 @@ fn set_ambient_sound_mode(window: &AppWindow, inner: &Rc<Inner>, index: i32) {
     }
 }
 
-/// Answers a toggle on a section page.
+/// Answers a toggle on a section page. The A3954's wind-noise row travels in
+/// the sound-mode body; every other id names a settings write of the connected
+/// model.
 fn set_toggle(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, on: bool) {
+    if setting_id == WIND_NOISE_SUPPRESSION_ID {
+        set_a3954_wind(window, inner, on);
+        return;
+    }
+    if connected_a3954(inner) {
+        answer_a3954_setting(window, inner, |a3954| {
+            a3954_toggle_command(setting_id, on, a3954)
+        });
+        return;
+    }
     answer_setting(window, inner, |settings| {
         toggle_command(setting_id, on, settings)
     });
@@ -5775,6 +6982,12 @@ fn set_toggle(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, on: bool)
 
 /// Answers a range release on a section page.
 fn set_number(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, value: i32) {
+    if connected_a3954(inner) {
+        answer_a3954_setting(window, inner, |a3954| {
+            a3954_number_command(setting_id, value, a3954)
+        });
+        return;
+    }
     answer_setting(window, inner, |settings| {
         number_command(setting_id, value, settings)
     });
@@ -5814,6 +7027,40 @@ fn answer_setting(
         // The worker of a previous failed write has closed the connection; the
         // banner's Retry reconnects.
         state.set_error_label(SettingFailure::Disconnected.label(setting).into());
+    }
+}
+
+/// Queues one A3954 settings write on the device worker, named from the last
+/// connected state. Nothing is sent when the connection cannot write, the device
+/// is not an A3954 or the click names no write, so an unknown row id never
+/// writes.
+fn answer_a3954_setting(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    command: impl FnOnce(&A3954State) -> Option<A3954SettingCommand>,
+) {
+    let state = window.global::<AppState>();
+    if state.get_connection() != Connection::Connected {
+        return;
+    }
+    let setting = {
+        let device = inner.device.borrow();
+        let Some(a3954) = device
+            .as_ref()
+            .and_then(|device_state| device_state.a3954.as_ref())
+        else {
+            return;
+        };
+        command(a3954)
+    };
+    let Some(setting) = setting else {
+        return;
+    };
+    let sent = inner.send_queued(&inner.setting_change, |request| {
+        DeviceCommand::SetA3954Setting { request, setting }
+    });
+    if !sent {
+        state.set_error_label(SettingFailure::Disconnected.a3954_label(setting).into());
     }
 }
 
@@ -5917,6 +7164,17 @@ fn select_equalizer_preset(window: &AppWindow, inner: &Rc<Inner>, value: &str) {
     let Some(preset_id) = selectable_preset_id(&presets, value) else {
         return;
     };
+    // The A3954's chips name its own catalog and write the 114-byte body; the
+    // A3062 writes the 53-byte one.
+    if connected_a3954(inner) {
+        let sent = inner.send_queued(&inner.preset_change, |request| {
+            DeviceCommand::ChangeA3954Preset { request, preset_id }
+        });
+        if !sent {
+            state.set_error_label(EqFailure::Disconnected.label().into());
+        }
+        return;
+    }
     let sent = inner.send_queued(&inner.preset_change, |request| {
         DeviceCommand::ChangeEqualizerPreset { request, preset_id }
     });
@@ -6938,7 +8196,8 @@ mod tests {
     use soundcore_diagnostics::ProbeId;
     use soundcore_models::catalog::FormFactor;
     use soundcore_models::{
-        BatteryScale, BatteryState, FirmwareVersions, HostDevice, Layout, SoundMode,
+        A3954AmbientSoundMode, BatteryScale, BatteryState, FirmwareVersions, HostDevice, Layout,
+        SoundMode,
     };
     use soundcore_protocol::{Command, encode};
     use std::sync::atomic::AtomicU64;
@@ -9055,7 +10314,7 @@ mod tests {
         let state = a3062_state();
         assert_eq!(state.settings, Some(measured_settings()));
         assert_eq!(
-            device_pages(state.settings.is_some()),
+            device_pages(state.settings.is_some(), false),
             vec![
                 Page::Controls,
                 Page::Comfort,
@@ -9066,7 +10325,8 @@ mod tests {
         );
         assert_eq!(
             sound_pages(
-                state.sound_mode,
+                state.sound_mode.is_some(),
+                false,
                 state.equalizer.is_some(),
                 state.settings.is_some()
             ),
@@ -9080,10 +10340,11 @@ mod tests {
         // settings block, so no page, no panel and no writable row exists.
         let state = a3949_state();
         assert_eq!(state.settings, None);
-        assert!(device_pages(state.settings.is_some()).is_empty());
+        assert!(device_pages(state.settings.is_some(), false).is_empty());
         assert!(
             sound_pages(
-                state.sound_mode,
+                state.sound_mode.is_some(),
+                false,
                 state.equalizer.is_some(),
                 state.settings.is_some()
             )
@@ -10462,7 +11723,8 @@ mod tests {
         assert_eq!(state.sound_mode, Some(SoundMode::Normal));
         assert_eq!(
             sound_pages(
-                state.sound_mode,
+                state.sound_mode.is_some(),
+                false,
                 state.equalizer.is_some(),
                 state.settings.is_some()
             ),
@@ -10477,7 +11739,15 @@ mod tests {
         let state =
             soundcore_models::parse_state_frame(model, &captured_a3949_frame()).expect("parses");
         assert_eq!(state.sound_mode, None);
-        assert!(sound_pages(state.sound_mode, state.equalizer.is_some(), false).is_empty());
+        assert!(
+            sound_pages(
+                state.sound_mode.is_some(),
+                false,
+                state.equalizer.is_some(),
+                false
+            )
+            .is_empty()
+        );
         assert!(mode_options(state.sound_mode).is_empty());
         assert_eq!(mode_index(state.sound_mode), -1);
     }
@@ -11092,7 +12362,8 @@ mod tests {
             .expect("the A3062 capture parses");
         assert_eq!(
             sound_pages(
-                a3062_state.sound_mode,
+                a3062_state.sound_mode.is_some(),
+                false,
                 a3062_state.equalizer.is_some(),
                 a3062_state.settings.is_some()
             ),
@@ -11117,7 +12388,8 @@ mod tests {
         );
         assert!(
             sound_pages(
-                a3949_state.sound_mode,
+                a3949_state.sound_mode.is_some(),
+                false,
                 a3949_state.equalizer.is_some(),
                 a3949_state.settings.is_some()
             )
@@ -11357,13 +12629,13 @@ mod tests {
         // Request 1 is superseded, but the worker stops after the failure, so
         // request 2 never runs: the failure must still reach the page or the
         // click leaves no feedback at all.
-        let failure = Err(ModeFailure::TimedOut);
+        let failure: Result<SoundMode, ModeFailure> = Err(ModeFailure::TimedOut);
         assert!(
             mode_result_applies(&failure, 4, 1, 4, 2),
             "a failure of the current attempt always surfaces"
         );
         // A superseded success is still stale; the newest result applies.
-        let success = Ok(SoundMode::Normal);
+        let success: Result<SoundMode, ModeFailure> = Ok(SoundMode::Normal);
         assert!(!mode_result_applies(&success, 4, 1, 4, 2));
         assert!(mode_result_applies(&success, 4, 2, 4, 2));
         assert!(mode_result_applies(&failure, 4, 2, 4, 2));
@@ -12092,6 +13364,7 @@ mod tests {
             mode_change: Cell::new(0),
             preset_change: Cell::new(0),
             curve_change: Cell::new(0),
+            scale_change: Cell::new(0),
             setting_change: Cell::new(0),
             diagnostic_request: Cell::new(0),
             device: RefCell::new(None),
@@ -16066,6 +17339,1226 @@ mod tests {
             assert_eq!(1, state.get_devices().row_count());
             assert!(state.get_devices().iter().next().unwrap().demo);
             assert!(!state.get_diagnostic_available());
+        });
+    }
+
+    // =======================================================================
+    // A3954 (Liberty 4 Pro): controller wiring
+    // =======================================================================
+
+    /// The committed sanitized real A3954 `01 01` frame.
+    fn captured_a3954_frame() -> Vec<u8> {
+        captured_frame(include_str!("../../core/data/a3954-state.json"))
+    }
+
+    /// The parsed state of the committed real A3954 capture: both earbud
+    /// batteries, the equalizer's custom curve, the 1..=11 scale and every
+    /// measured settings block.
+    fn a3954_state() -> DeviceState {
+        let model = soundcore_models::model_by_code("A3954").expect("A3954 is a state model");
+        soundcore_models::parse_state_frame(model, &captured_a3954_frame())
+            .expect("the real capture parses")
+    }
+
+    fn a3954_model() -> DeviceModel {
+        soundcore_models::model_by_code("A3954").expect("A3954 is a state model")
+    }
+
+    /// The A3954 state frame with body bytes replaced and the checksum
+    /// recomputed, for a device answer after a setting changed.
+    fn a3954_frame_with(changes: &[(usize, u8)]) -> Vec<u8> {
+        let mut frame = captured_a3954_frame();
+        for (offset, value) in changes {
+            frame[STATE_FRAME_HEADER_LEN + offset] = *value;
+        }
+        let checksum_at = frame.len() - 1;
+        frame[checksum_at] = soundcore_protocol::checksum(&frame[..checksum_at]);
+        frame
+    }
+
+    /// The A3954 state the tests connect to for writes that are not about dual
+    /// connections: the measured capture with the dual-connections flag off, so
+    /// the worker does not read the `0B 01` list on connect and the scripted
+    /// reads stay one per command.
+    fn a3954_connect_frame() -> Vec<u8> {
+        a3954_frame_with(&[(142, 0)])
+    }
+
+    /// The exact five-byte-body `06 81` frame, built the way the measured
+    /// frames are: the outbound header, the body and the checksum.
+    fn a3954_sound_mode_frame(body: &[u8; 5]) -> Vec<u8> {
+        let mut frame = hex("08 EE 00 00 00 06 81 0F 00");
+        frame.extend_from_slice(body);
+        let checksum = soundcore_protocol::checksum(&frame);
+        frame.push(checksum);
+        frame
+    }
+
+    /// The exact 114-byte-body `03 87` frame.
+    fn a3954_equalizer_frame(body: &[u8; 114]) -> Vec<u8> {
+        let mut frame = hex("08 EE 00 00 00 03 87 7C 00");
+        frame.extend_from_slice(body);
+        let checksum = soundcore_protocol::checksum(&frame);
+        frame.push(checksum);
+        frame
+    }
+
+    /// One of the eleven `06 81` frames the Soundcore app sent to the real
+    /// Liberty 4 Pro, by slider position, from the core fixture.
+    fn captured_a3954_mode_write(position: u8) -> Vec<u8> {
+        let json = include_str!("../../core/data/a3954-sound-modes.json");
+        let anchor = format!("\"position\": {position}");
+        let at = json
+            .find(&anchor)
+            .unwrap_or_else(|| panic!("the fixture lists position {position}"));
+        captured_frame(&json[at..])
+    }
+
+    /// One measured `01 01` channel's ten band bytes of a curve, as the state
+    /// body stores them: each value is `value + 120`.
+    fn a3954_band_bytes(bands: [i16; 10]) -> Vec<u8> {
+        bands
+            .iter()
+            .map(|band| u8::try_from(band + 120).expect("a band byte is value + 120"))
+            .collect()
+    }
+
+    #[test]
+    fn the_real_a3954_capture_exposes_the_scale_equalizer_and_settings_pages() {
+        let state = a3954_state();
+        // The A3954's ambient sound is one 1..=11 scale, so the shared
+        // `sound_mode` field stays empty and the page comes from `a3954`.
+        assert_eq!(state.sound_mode, None);
+        let a3954 = state.a3954.as_ref().expect("the A3954 block");
+        assert_eq!(a3954.sound_mode.slider.value(), 11);
+        assert_eq!(
+            sound_pages(
+                state.sound_mode.is_some(),
+                state.a3954.is_some(),
+                has_equalizer(&state),
+                has_effects(&state)
+            ),
+            vec![Page::SoundModes, Page::Equalizer, Page::Effects]
+        );
+        assert_eq!(
+            device_pages(state.settings.is_some(), state.a3954.is_some()),
+            vec![
+                Page::Controls,
+                Page::Comfort,
+                Page::Power,
+                Page::Connections,
+                Page::About
+            ]
+        );
+        assert!(has_worker_surface(&state));
+        assert!(dual_connections_enabled(&state));
+        // Left, right and the measured case battery, which is the raw step + 1
+        // of 10.
+        let tiles = batteries(&state);
+        let values: Vec<&str> = tiles.iter().map(|tile| tile.value.as_str()).collect();
+        assert_eq!(values, ["96%", "98%", "100%"]);
+        assert_eq!(
+            tiles.iter().map(|tile| tile.label).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn the_a3954_connection_fills_the_scale_page_and_the_equalizer() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            state.set_device_name("Liberty 4 Pro".into());
+            state.set_device_code("A3954".into());
+            let device = a3954_state();
+            apply_outcome(
+                ui,
+                &inner,
+                ConnectOutcome::Connected(a3954_model(), Box::new(device)),
+            );
+
+            // The scale page: scale mode, the reported position, no A3062 tiles
+            // and the measured wind-noise toggle.
+            assert_eq!(Page::SoundModes, state.get_page());
+            assert!(state.get_mode_scale());
+            assert_eq!(11, state.get_scale_position());
+            assert_eq!(0, state.get_modes().row_count());
+            assert_eq!(-1, state.get_mode_index());
+            let rows: Vec<SettingRow> = state.get_mode_rows().iter().collect();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id.as_str(), WIND_NOISE_SUPPRESSION_ID);
+            assert_eq!(rows[0].kind, RowKind::Toggle);
+            assert!(
+                rows[0].checked,
+                "the measured capture reports wind suppression on"
+            );
+            assert_eq!(
+                state.get_normal_label().as_str(),
+                "Normal",
+                "the scale's mode words are filled"
+            );
+            assert_eq!(-1, state.get_airplane_index(), "no airplane chip");
+            let sound_pages: Vec<Page> = state.get_sound_pages().iter().collect();
+            assert_eq!(
+                sound_pages,
+                vec![Page::SoundModes, Page::Equalizer, Page::Effects]
+            );
+            let device_pages: Vec<Page> = state.get_device_pages().iter().collect();
+            assert_eq!(device_pages.len(), 5);
+            assert!(state.get_has_ldac());
+            assert!(state.get_has_spatial(), "the A3954 has spatial audio");
+            assert!(!state.get_has_sides());
+            assert_eq!(state.get_case_battery().as_str(), "100%");
+
+            // The equalizer page: the Liberty 4 Pro's own twenty-two-preset
+            // catalog and the eight visible bands of the capture's custom curve.
+            assert!(state.get_eq_available());
+            assert!(!state.get_eq_read_only(), "the A3954 page is editable");
+            assert_eq!(22, state.get_eq_presets().row_count());
+            assert_eq!(22, state.get_eq_preset_count());
+            assert_eq!(
+                "65278",
+                state.get_eq_preset().as_str(),
+                "the capture reports custom bands (0xFEFE)"
+            );
+            assert_eq!(8, state.get_eq_bands().row_count());
+            let bands: Vec<EqBand> = state.get_eq_bands().iter().collect();
+            assert_eq!(
+                bands.iter().map(|band| band.value).collect::<Vec<_>>(),
+                vec![18, 8, 0, 0, 0, 0, 0, 0],
+                "the visible bands are the capture's left channel"
+            );
+            assert!(state.get_has_saved_profiles());
+
+            // The Overview has the scale and equalizer blocks and the A3954
+            // shortcuts, and no panic path anywhere.
+            let overview: Vec<crate::OverviewRow> = state.get_overview_rows().iter().collect();
+            assert!(!overview.is_empty());
+            let kinds: Vec<crate::BlockKind> = overview
+                .iter()
+                .flat_map(|row| row.blocks.iter().map(|block| block.kind))
+                .collect();
+            assert!(kinds.contains(&crate::BlockKind::SoundMode));
+            assert!(kinds.contains(&crate::BlockKind::Equalizer));
+            assert!(kinds.contains(&crate::BlockKind::Comfort));
+            assert!(kinds.contains(&crate::BlockKind::Connections));
+            assert!(state.get_quick_toggles().row_count() > 0);
+        });
+    }
+
+    #[test]
+    fn the_a3954_scale_position_maps_to_the_measured_mode_halves() {
+        let current = a3954_state().a3954.expect("the A3954 block").sound_mode;
+        for position in 1..=11u8 {
+            let slider = A3954SoundModeSlider::new(position).expect("a measured position");
+            let target = A3954SoundModeChange::Scale(position)
+                .apply(current)
+                .expect("a measured position applies");
+            assert_eq!(target.slider, slider);
+            assert_eq!(target.mode, slider.mode(), "position {position}");
+            assert_eq!(
+                target.mode.value(),
+                if position < 6 {
+                    1
+                } else if position == 6 {
+                    2
+                } else {
+                    0
+                },
+                "1..=5 transparency, 6 normal, 7..=11 noise canceling"
+            );
+            // The airplane-mode setting and the wind flag are kept.
+            assert_eq!(target.airplane_mode, current.airplane_mode);
+            assert_eq!(
+                target.wind_noise_suppression,
+                current.wind_noise_suppression
+            );
+        }
+        assert_eq!(None, A3954SoundModeChange::Scale(0).apply(current));
+        assert_eq!(None, A3954SoundModeChange::Scale(12).apply(current));
+
+        // The wind toggle changes only the suppression bit; detection is
+        // read-only and never written.
+        let wind_off = A3954SoundModeChange::Wind(false)
+            .apply(current)
+            .expect("the wind toggle applies");
+        assert!(!wind_off.wind_noise_suppression);
+        assert_eq!(wind_off.slider, current.slider);
+        assert_eq!(wind_off.mode, current.mode);
+        assert_eq!(wind_off.airplane_mode, current.airplane_mode);
+        assert!(!wind_off.wind_noise_detected);
+    }
+
+    #[test]
+    fn a_scale_click_writes_the_measured_frame_and_re_reads_the_scale() {
+        let current = a3954_state().a3954.expect("the A3954 block").sound_mode;
+        let target = A3954SoundModeChange::Scale(3)
+            .apply(current)
+            .expect("position 3");
+        // The core's body is exactly one of the eleven frames the app sent.
+        assert_eq!(
+            a3954_sound_mode_frame(
+                &a3954_model()
+                    .a3954_sound_mode_body(target)
+                    .expect("the A3954 scale body")
+            ),
+            captured_a3954_mode_write(3),
+            "the worker writes the measured frame for position 3"
+        );
+
+        let transport = FakeTransport::scripted([
+            a3954_connect_frame(),
+            a3954_frame_with(&[(125, 1), (126, 3), (127, 0), (128, 1)]),
+        ]);
+        let session = session_with("A3954", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::ChangeA3954SoundMode {
+                request: 1,
+                change: A3954SoundModeChange::Scale(3),
+            })
+            .expect("the scale click is queued");
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                captured_a3954_mode_write(3),
+                state_request(),
+            ],
+            "the connect poll, exactly one 06 81 frame, then the 01 01 re-poll"
+        );
+        assert!(matches!(
+            received.try_recv().expect("the state report"),
+            Event::Connected {
+                attempt: 9,
+                outcome: ConnectOutcome::Connected(..)
+            }
+        ));
+        match received.try_recv().expect("the scale change") {
+            Event::ScaleChanged {
+                attempt: 9,
+                request: 1,
+                outcome: Ok(reported),
+            } => {
+                assert_eq!(reported.slider.value(), 3);
+                assert_eq!(reported.mode, A3954AmbientSoundMode::Transparency);
+                assert!(reported.wind_noise_suppression, "the flag is kept");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_wind_toggle_writes_the_same_measured_body_shape_and_re_reads_it() {
+        let current = a3954_state().a3954.expect("the A3954 block").sound_mode;
+        let target = A3954SoundModeChange::Wind(false)
+            .apply(current)
+            .expect("the wind toggle applies");
+        let body = a3954_model()
+            .a3954_sound_mode_body(target)
+            .expect("the A3954 scale body");
+        assert_eq!(body, [0, 11, 0, 0, 0xFF], "the measured five-byte shape");
+
+        let transport = FakeTransport::scripted([
+            a3954_connect_frame(),
+            a3954_frame_with(&[(125, 0), (126, 11), (127, 0), (128, 0)]),
+        ]);
+        let session = session_with("A3954", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::ChangeA3954SoundMode {
+                request: 1,
+                change: A3954SoundModeChange::Wind(false),
+            })
+            .expect("the wind click is queued");
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                a3954_sound_mode_frame(&body),
+                state_request()
+            ],
+            "the wind flag travels in the one 06 81 frame"
+        );
+        let _ = received.try_recv().expect("the state report");
+        match received.try_recv().expect("the wind change") {
+            Event::ScaleChanged {
+                outcome: Ok(reported),
+                ..
+            } => assert!(!reported.wind_noise_suppression),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_a3954_equalizer_page_uses_its_own_catalog_and_visible_bands() {
+        let model = Some(a3954_model());
+        let a3954 = a3954_state().a3954.expect("the A3954 block");
+        let display = EqualizerDisplay::new_a3954(model, &a3954.equalizer);
+        assert!(display.available);
+        assert!(display.editable, "the A3954 custom body is writable");
+        assert_eq!(display.preset_count, 22);
+        assert_eq!(display.preset, "65278");
+        assert_eq!(display.name, "", "the capture reports custom bands");
+        assert_eq!(display.band_count, 8);
+        assert_eq!(
+            display
+                .bands
+                .iter()
+                .map(|band| band.value)
+                .collect::<Vec<_>>(),
+            vec![18, 8, 0, 0, 0, 0, 0, 0]
+        );
+        // The Liberty 4 Pro catalog is its own: twenty-two sequential ids,
+        // including Bass Booster at id 2 as the core measured.
+        let presets = a3954_preset_options(model);
+        assert_eq!(presets.len(), 22);
+        assert_eq!(presets[0].value.as_str(), "0");
+        assert_eq!(presets[0].label.as_str(), "Soundcore Signature");
+        assert_eq!(
+            selectable_preset_id(&presets, "2"),
+            Some(2),
+            "Bass Booster is an A3954 preset"
+        );
+        assert_eq!(selectable_preset_id(&presets, "17"), Some(17));
+    }
+
+    #[test]
+    fn an_a3954_preset_click_writes_the_114_byte_body_and_re_reads_it() {
+        let current = a3954_state().a3954.expect("the A3954 block").equalizer;
+        let preset = soundcore_models::a3954_equalizer_preset(17).expect("Rock");
+        let body = a3954_model()
+            .a3954_equalizer_preset_body(&current, preset)
+            .expect("the A3954 preset body");
+        assert_eq!(body.len(), 114);
+        assert_eq!(
+            body[0..2].to_vec(),
+            17u16.to_le_bytes().to_vec(),
+            "the preset id"
+        );
+        assert_eq!(
+            body[4..14].to_vec(),
+            a3954_band_bytes(preset.bands),
+            "the left channel carries the preset"
+        );
+        assert_eq!(
+            body[14..24].to_vec(),
+            a3954_band_bytes(preset.bands),
+            "the right channel too"
+        );
+        assert_eq!(
+            body[24..26].to_vec(),
+            vec![0xFF, 0xFF],
+            "the measured unknown bytes"
+        );
+        assert_eq!(body[26], 0, "the HearID flag is cleared for the write");
+
+        // The device answers the re-poll with the preset it now reports.
+        let mut changes = vec![(44, 17), (45, 0)];
+        for (index, byte) in a3954_band_bytes(preset.bands).into_iter().enumerate() {
+            changes.push((46 + index, byte));
+            changes.push((56 + index, byte));
+        }
+        let transport = FakeTransport::scripted([a3954_frame_with(&changes)]);
+        let mut session = session_with("A3954", &transport);
+
+        let reported =
+            change_a3954_equalizer_preset(&mut session, &current, preset).expect("the write takes");
+        assert_eq!(reported.preset_id, 17);
+        assert_eq!(reported.preset().map(|preset| preset.name), Some("Rock"));
+        let expected: [i16; VISIBLE_EQ_BANDS] = std::array::from_fn(|index| preset.bands[index]);
+        assert_eq!(reported.visible_bands(), Some(expected));
+        assert_eq!(
+            transport.writes(),
+            vec![a3954_equalizer_frame(&body), state_request()],
+            "one measured 03 87 frame, then the 01 01 re-poll"
+        );
+    }
+
+    #[test]
+    fn an_a3954_custom_curve_writes_the_114_byte_body_and_re_reads_it() {
+        let current = a3954_state().a3954.expect("the A3954 block").equalizer;
+        let curve = [30, -30, 60, 0, -60, 20, 0, -20];
+        let body = a3954_model()
+            .a3954_custom_equalizer_body(&current, curve)
+            .expect("the A3954 custom body");
+        assert_eq!(
+            body[0..2].to_vec(),
+            soundcore_models::CUSTOM_EQUALIZER_PRESET_ID
+                .to_le_bytes()
+                .to_vec()
+        );
+        let mut bands = [0i16; 10];
+        bands[..VISIBLE_EQ_BANDS].copy_from_slice(&curve);
+        bands[VISIBLE_EQ_BANDS..].copy_from_slice(&soundcore_models::A3954_FIXED_EQ_BANDS);
+        assert_eq!(body[4..14].to_vec(), a3954_band_bytes(bands));
+        assert_eq!(body[14..24].to_vec(), a3954_band_bytes(bands));
+        assert_eq!(body[24..26].to_vec(), vec![0xFF, 0xFF]);
+        assert_eq!(
+            body[72],
+            a3954_band_bytes(bands)[0],
+            "the active left curve"
+        );
+        assert_eq!(
+            body[92],
+            a3954_band_bytes(bands)[0],
+            "the active right curve"
+        );
+
+        let mut changes = vec![(44, 0xFE), (45, 0xFE)];
+        for (index, byte) in a3954_band_bytes(bands).into_iter().enumerate() {
+            changes.push((46 + index, byte));
+            changes.push((56 + index, byte));
+        }
+        let transport = FakeTransport::scripted([a3954_frame_with(&changes)]);
+        let mut session = session_with("A3954", &transport);
+
+        let reported =
+            change_a3954_custom_equalizer(&mut session, &current, curve).expect("the write takes");
+        assert!(reported.is_custom());
+        assert_eq!(reported.visible_bands(), Some(curve));
+        assert_eq!(
+            transport.writes(),
+            vec![a3954_equalizer_frame(&body), state_request()]
+        );
+    }
+
+    #[test]
+    fn the_a3954_settings_pages_have_their_measured_rows() {
+        let state = a3954_state();
+        // Controls: the ambient-mode cycle toggles and the deferred remapping
+        // note. Button remapping is not part of this slice.
+        let controls = panels_for_page(Page::Controls, &state, &[]);
+        assert_eq!(
+            panel_kinds(&controls),
+            vec![PanelKind::Presses, PanelKind::Cycle]
+        );
+        assert_eq!(row_ids(&controls[0]), ["buttonRemapping"]);
+        assert_eq!(row_kinds(&controls[0]), vec![RowKind::Info]);
+        let remapping: SettingRow = controls[0].rows.iter().next().expect("the remapping row");
+        assert_eq!(remapping.text.as_str(), "Not available in this version");
+        assert_eq!(
+            row_ids(&controls[1]),
+            [
+                "noiseCancelingModeInCycle",
+                "transparencyModeInCycle",
+                "normalModeInCycle"
+            ]
+        );
+        let cycle: Vec<bool> = controls[1].rows.iter().map(|row| row.checked).collect();
+        assert_eq!(cycle, [true, true, false], "the measured cycle bits");
+
+        // Comfort: the measured comfort switches and the volume panel.
+        let comfort = panels_for_page(Page::Comfort, &state, &[]);
+        assert_eq!(
+            panel_kinds(&comfort),
+            vec![PanelKind::Plain, PanelKind::Volume]
+        );
+        assert_eq!(
+            row_ids(&comfort[0]),
+            [
+                "wearingDetection",
+                "easyChat",
+                "easyChatWaitTime",
+                "soundLeakCompensation"
+            ]
+        );
+        assert_eq!(
+            row_kinds(&comfort[0]),
+            vec![
+                RowKind::Toggle,
+                RowKind::Toggle,
+                RowKind::Select,
+                RowKind::Toggle
+            ]
+        );
+        let comfort_rows: Vec<SettingRow> = comfort[0].rows.iter().collect();
+        assert!(
+            !comfort_rows[0].checked,
+            "the measured wearing detection is off"
+        );
+        assert!(!comfort_rows[1].checked, "the measured easy chat is off");
+        assert_eq!(
+            select_options(&comfort[0], 2),
+            ["5 seconds", "10 seconds", "15 seconds"]
+        );
+        assert_eq!(
+            comfort_rows[2].index, 0,
+            "the measured easy-chat wait is 5 seconds"
+        );
+        assert!(!comfort_rows[3].checked);
+        assert_eq!(
+            row_ids(&comfort[1]),
+            [
+                "limitHighVolume",
+                "limitHighVolumeDbLimit",
+                "limitHighVolumeRefreshRate"
+            ]
+        );
+        let volume: Vec<SettingRow> = comfort[1].rows.iter().collect();
+        assert!(!volume[0].checked, "the measured limit high volume is off");
+        assert_eq!(
+            (
+                volume[1].minimum,
+                volume[1].maximum,
+                volume[1].step,
+                volume[1].value
+            ),
+            (75, 100, 5, 90),
+            "the measured dB range and the reported limit"
+        );
+        assert_eq!(volume[2].index, 0, "the measured refresh rate is real time");
+
+        // Power: the A3954's ten-minute durations and the low-battery prompt.
+        let power = panels_for_page(Page::Power, &state, &[]);
+        assert_eq!(panel_kinds(&power), vec![PanelKind::Plain]);
+        assert_eq!(row_ids(&power[0]), ["autoPowerOff", "lowBatteryPrompt"]);
+        assert_eq!(
+            select_options(&power[0], 0),
+            [
+                "Disabled",
+                "10 minutes",
+                "20 minutes",
+                "30 minutes",
+                "60 minutes"
+            ]
+        );
+        let power_rows: Vec<SettingRow> = power[0].rows.iter().collect();
+        assert_eq!(
+            power_rows[0].index, 3,
+            "the measured auto power off is on at 30 minutes"
+        );
+        assert!(
+            power_rows[1].checked,
+            "the measured low battery prompt is on"
+        );
+
+        // Connections: the toggle and, while it is on, the measured list.
+        let connections = panels_for_page(Page::Connections, &state, &captured_dual_devices());
+        assert_eq!(
+            panel_kinds(&connections),
+            vec![PanelKind::Plain, PanelKind::DualDevices]
+        );
+        assert_eq!(row_ids(&connections[0]), ["dualConnections"]);
+        assert!(
+            connections[0]
+                .rows
+                .iter()
+                .next()
+                .expect("the dual toggle")
+                .checked
+        );
+        assert_eq!(
+            list_options(&connections[1], 0),
+            ["Desktop — connected", "Phone model"]
+        );
+
+        // Effects: LDAC, spatial audio and the sound-leak switch. The two
+        // spatial choices only act while spatial audio is on.
+        let effects = panels_for_page(Page::Effects, &state, &[]);
+        assert_eq!(panel_kinds(&effects), vec![PanelKind::Plain]);
+        assert_eq!(
+            row_ids(&effects[0]),
+            [
+                "ldac",
+                "spatialAudio",
+                "spatialAudioMusicMode",
+                "spatialAudioMode",
+                "soundLeakCompensation"
+            ]
+        );
+        let effect_rows: Vec<SettingRow> = effects[0].rows.iter().collect();
+        assert!(effect_rows[0].checked, "the measured LDAC is on");
+        assert!(!effect_rows[1].checked, "the measured spatial audio is off");
+        assert!(
+            !effect_rows[2].enabled && !effect_rows[3].enabled,
+            "the spatial choices are disabled while spatial audio is off"
+        );
+        assert_eq!(
+            effect_rows[2].reason.as_str(),
+            "Turn on spatial audio first"
+        );
+        assert_eq!(select_options(&effects[0], 2), ["Fixed", "Head tracking"]);
+        assert_eq!(
+            select_options(&effects[0], 3),
+            ["Music", "Podcast", "Movie", "Gaming"]
+        );
+        assert!(!effect_rows[4].checked);
+
+        // About: both earbud batteries, the case battery, both firmwares and
+        // the case firmware; no serial or address.
+        let about = panels_for_page(Page::About, &state, &[]);
+        assert_eq!(panel_kinds(&about), vec![PanelKind::Info]);
+        assert_eq!(
+            row_ids(&about[0]),
+            [
+                "leftBattery",
+                "rightBattery",
+                "caseBattery",
+                "leftFirmware",
+                "rightFirmware",
+                "caseFirmware"
+            ]
+        );
+        let about_rows: Vec<SettingRow> = about[0].rows.iter().collect();
+        assert_eq!(about_rows[0].text.as_str(), "96%");
+        assert_eq!(about_rows[1].text.as_str(), "98%");
+        assert_eq!(about_rows[2].text.as_str(), "100%");
+        assert_eq!(about_rows[3].text.as_str(), "04.29");
+        assert_eq!(about_rows[4].text.as_str(), "04.29");
+        assert_eq!(about_rows[5].text.as_str(), "01.58");
+        assert!(
+            !row_ids(&about[0]).iter().any(|id| id == "serialNumber"),
+            "the serial is never shown"
+        );
+    }
+
+    #[test]
+    fn a3954_row_ids_name_only_measured_setting_commands() {
+        let state = a3954_state().a3954.expect("the A3954 block");
+        let toggle = |id, on| a3954_toggle_command(id, on, &state);
+        assert_eq!(
+            toggle("ldac", false),
+            Some(A3954SettingCommand::Ldac(false))
+        );
+        assert_eq!(
+            toggle("spatialAudio", true),
+            Some(A3954SettingCommand::SpatialAudio(A3954SpatialAudio {
+                enabled: true,
+                ..state.spatial_audio
+            }))
+        );
+        assert_eq!(
+            toggle("wearingDetection", true),
+            Some(A3954SettingCommand::WearingDetection(true))
+        );
+        assert_eq!(
+            toggle("easyChat", true),
+            Some(A3954SettingCommand::EasyChat(A3954EasyChat {
+                enabled: true,
+                wait_time: state.easy_chat.wait_time
+            }))
+        );
+        assert_eq!(
+            toggle("soundLeakCompensation", true),
+            Some(A3954SettingCommand::SoundLeakCompensation(true))
+        );
+        assert_eq!(
+            toggle("limitHighVolume", true),
+            Some(A3954SettingCommand::LimitHighVolume {
+                enabled: true,
+                db_limit: state.limit_high_volume.db_limit
+            })
+        );
+        assert_eq!(
+            toggle("lowBatteryPrompt", false),
+            Some(A3954SettingCommand::LowBatteryPrompt(false))
+        );
+        assert_eq!(
+            toggle("dualConnections", false),
+            Some(A3954SettingCommand::DualConnections(false))
+        );
+        assert_eq!(
+            toggle("noiseCancelingModeInCycle", false),
+            Some(A3954SettingCommand::AmbientSoundModeCycle(
+                AmbientSoundModeCycle {
+                    noise_canceling: false,
+                    ..state.ambient_sound_mode_cycle
+                }
+            ))
+        );
+        assert_eq!(
+            toggle("windNoiseSuppression", true),
+            None,
+            "the wind flag travels in the 06 81 body, not a settings frame"
+        );
+        assert_eq!(
+            toggle("dolbyAudio", true),
+            None,
+            "the A3954 has no Dolby row"
+        );
+        assert_eq!(toggle("sideTone", true), None);
+
+        let option = |id, index| a3954_option_command(id, index, &state);
+        assert_eq!(
+            option("autoPowerOff", 0),
+            Some(A3954SettingCommand::AutoPowerOff(A3954AutoPowerOff {
+                enabled: false,
+                duration: state.auto_power_off.duration
+            })),
+            "choosing Disabled keeps the reported duration"
+        );
+        assert_eq!(
+            option("autoPowerOff", 3),
+            Some(A3954SettingCommand::AutoPowerOff(A3954AutoPowerOff {
+                enabled: true,
+                duration: A3954AutoPowerOffDuration::ThirtyMinutes
+            }))
+        );
+        assert_eq!(option("autoPowerOff", 5), None);
+        assert_eq!(
+            option("easyChatWaitTime", 2),
+            Some(A3954SettingCommand::EasyChat(A3954EasyChat {
+                enabled: state.easy_chat.enabled,
+                wait_time: A3954EasyChatWaitTime::FifteenSeconds
+            }))
+        );
+        assert_eq!(
+            option("spatialAudioMusicMode", 1),
+            Some(A3954SettingCommand::SpatialAudio(A3954SpatialAudio {
+                music_mode: A3954SpatialAudioMusicMode::HeadTracking,
+                ..state.spatial_audio
+            }))
+        );
+        assert_eq!(
+            option("spatialAudioMode", 3),
+            Some(A3954SettingCommand::SpatialAudio(A3954SpatialAudio {
+                mode: A3954SpatialAudioMode::Gaming,
+                ..state.spatial_audio
+            }))
+        );
+        assert_eq!(
+            option("limitHighVolumeRefreshRate", 1),
+            Some(A3954SettingCommand::LimitHighVolumeRefreshRate(
+                DecibelReadingRefreshRate::TenSeconds
+            ))
+        );
+        assert_eq!(option("doublePress", 0), None);
+
+        let db_limit = DbLimit::new(95).expect("95 dB is a measured step");
+        assert_eq!(
+            a3954_number_command("limitHighVolumeDbLimit", 95, &state),
+            Some(A3954SettingCommand::LimitHighVolume {
+                enabled: state.limit_high_volume.enabled,
+                db_limit
+            })
+        );
+        assert_eq!(
+            a3954_number_command("limitHighVolumeDbLimit", 91, &state),
+            None
+        );
+        assert_eq!(a3954_number_command("sideTone", 80, &state), None);
+
+        // The banner names the setting that failed.
+        assert_eq!(a3954_setting_label(A3954SettingCommand::Ldac(true)), "LDAC");
+        assert_eq!(
+            SettingFailure::Disconnected.a3954_label(A3954SettingCommand::WearingDetection(false)),
+            "Wearing detection (connection lost)"
+        );
+    }
+
+    #[test]
+    fn each_a3954_settings_page_writes_one_measured_frame_and_re_polls() {
+        let cases: [(&str, A3954SettingCommand); 13] = [
+            ("LDAC off", A3954SettingCommand::Ldac(false)),
+            (
+                "spatial audio on",
+                A3954SettingCommand::SpatialAudio(A3954SpatialAudio {
+                    enabled: true,
+                    music_mode: A3954SpatialAudioMusicMode::Fixed,
+                    mode: A3954SpatialAudioMode::Music,
+                }),
+            ),
+            (
+                "wearing detection on",
+                A3954SettingCommand::WearingDetection(true),
+            ),
+            (
+                "easy chat on",
+                A3954SettingCommand::EasyChat(A3954EasyChat {
+                    enabled: true,
+                    wait_time: A3954EasyChatWaitTime::TenSeconds,
+                }),
+            ),
+            (
+                "sound leak compensation on",
+                A3954SettingCommand::SoundLeakCompensation(true),
+            ),
+            (
+                "limit high volume on",
+                A3954SettingCommand::LimitHighVolume {
+                    enabled: true,
+                    db_limit: DbLimit::new(95).expect("95 dB is a measured step"),
+                },
+            ),
+            (
+                "refresh rate",
+                A3954SettingCommand::LimitHighVolumeRefreshRate(
+                    DecibelReadingRefreshRate::TenSeconds,
+                ),
+            ),
+            (
+                "auto power off",
+                A3954SettingCommand::AutoPowerOff(A3954AutoPowerOff {
+                    enabled: true,
+                    duration: A3954AutoPowerOffDuration::TenMinutes,
+                }),
+            ),
+            (
+                "low battery prompt off",
+                A3954SettingCommand::LowBatteryPrompt(false),
+            ),
+            (
+                "ambient cycle",
+                A3954SettingCommand::AmbientSoundModeCycle(AmbientSoundModeCycle {
+                    noise_canceling: true,
+                    transparency: false,
+                    normal: true,
+                }),
+            ),
+            (
+                "dual connections off",
+                A3954SettingCommand::DualConnections(false),
+            ),
+            (
+                "spatial music mode",
+                A3954SettingCommand::SpatialAudio(A3954SpatialAudio {
+                    enabled: false,
+                    music_mode: A3954SpatialAudioMusicMode::HeadTracking,
+                    mode: A3954SpatialAudioMode::Music,
+                }),
+            ),
+            (
+                "spatial effect mode",
+                A3954SettingCommand::SpatialAudio(A3954SpatialAudio {
+                    enabled: false,
+                    music_mode: A3954SpatialAudioMusicMode::Fixed,
+                    mode: A3954SpatialAudioMode::Gaming,
+                }),
+            ),
+        ];
+        for (label, setting) in cases {
+            let expected = a3954_model()
+                .a3954_setting_frame(setting)
+                .expect("the measured A3954 frame");
+            // The connect state reports dual connections off, so no `0B 01`
+            // list read sits between the connect poll and the write.
+            let transport = FakeTransport::scripted([a3954_connect_frame(), a3954_connect_frame()]);
+            let session = session_with("A3954", &transport);
+            let (events, received) = mpsc::channel();
+            let (commands, command_receiver) = mpsc::channel();
+            commands
+                .send(DeviceCommand::SetA3954Setting {
+                    request: 1,
+                    setting,
+                })
+                .unwrap_or_else(|_| panic!("{label}: the write is queued"));
+            drop(commands);
+
+            serve_device(session, 9, events, command_receiver);
+
+            assert_eq!(
+                transport.writes(),
+                vec![state_request(), expected, state_request()],
+                "{label}: one settings frame, then the 01 01 re-poll"
+            );
+            assert!(matches!(
+                received.try_recv().expect("{label}: the state report"),
+                Event::Connected {
+                    attempt: 9,
+                    outcome: ConnectOutcome::Connected(..)
+                }
+            ));
+            match received
+                .try_recv()
+                .unwrap_or_else(|_| panic!("{label}: the write result"))
+            {
+                Event::A3954SettingChanged {
+                    attempt: 9,
+                    request: 1,
+                    setting: reported,
+                    outcome: Ok(state),
+                } => {
+                    assert_eq!(reported, setting, "{label}");
+                    assert!(
+                        state.a3954.is_some(),
+                        "{label}: the event carries the re-polled state"
+                    );
+                }
+                other => panic!("{label}: unexpected event: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_a3954_connect_reads_the_dual_list_while_the_setting_is_on() {
+        // The measured capture reports dual connections on, so the worker reads
+        // the remembered-device list right after the state, like the A3062.
+        let transport = FakeTransport::scripted([captured_a3954_frame(), captured_dual_reply()]);
+        let session = session_with("A3954", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        drop(commands);
+
+        serve_device(session, 9, events, command_receiver);
+
+        assert_eq!(
+            transport.writes(),
+            vec![
+                state_request(),
+                soundcore_models::dual_connections_request(),
+            ],
+            "the connect poll, then the one 0B 01 list request"
+        );
+        let _ = received.try_recv().expect("the state report");
+        match received.try_recv().expect("the list read") {
+            Event::DualConnectionsRead {
+                attempt: 9,
+                outcome: Ok(devices),
+            } => {
+                assert_eq!(devices, captured_dual_devices());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_a3954_pages_queue_their_measured_commands_from_the_wired_actions() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            state.set_device_name("Liberty 4 Pro".into());
+            state.set_device_code("A3954".into());
+            let a3954 = a3954_state().a3954.expect("the A3954 block");
+            apply_outcome(
+                ui,
+                &inner,
+                ConnectOutcome::Connected(a3954_model(), Box::new(a3954_state())),
+            );
+            wire_actions(ui, &inner);
+            let actions = ui.global::<Actions>();
+            let (commands, queued) = mpsc::channel();
+            *inner.commands.borrow_mut() = Some(commands);
+            let next = |label: &str| {
+                queued
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap_or_else(|_| panic!("{label}: no command was queued"))
+            };
+
+            actions.invoke_set_scale(3);
+            assert_eq!(
+                next("scale"),
+                DeviceCommand::ChangeA3954SoundMode {
+                    request: 1,
+                    change: A3954SoundModeChange::Scale(3),
+                }
+            );
+            // A position outside 1..=11 writes nothing.
+            actions.invoke_set_scale(0);
+            actions.invoke_set_scale(12);
+            assert!(queued.try_recv().is_err(), "no invalid scale write");
+
+            actions.invoke_set_toggle("windNoiseSuppression".into(), false);
+            assert_eq!(
+                next("wind"),
+                DeviceCommand::ChangeA3954SoundMode {
+                    request: 2,
+                    change: A3954SoundModeChange::Wind(false),
+                }
+            );
+
+            actions.invoke_set_toggle("spatialAudio".into(), true);
+            match next("spatial audio") {
+                DeviceCommand::SetA3954Setting { request, setting } => {
+                    assert_eq!(request, 1);
+                    assert_eq!(
+                        setting,
+                        A3954SettingCommand::SpatialAudio(A3954SpatialAudio {
+                            enabled: true,
+                            ..a3954.spatial_audio
+                        })
+                    );
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+
+            actions.invoke_set_option("spatialAudioMode".into(), 3);
+            match next("spatial mode") {
+                DeviceCommand::SetA3954Setting { request, setting } => {
+                    assert_eq!(request, 2);
+                    assert_eq!(
+                        setting,
+                        A3954SettingCommand::SpatialAudio(A3954SpatialAudio {
+                            mode: A3954SpatialAudioMode::Gaming,
+                            ..a3954.spatial_audio
+                        })
+                    );
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+
+            actions.invoke_set_number("limitHighVolumeDbLimit".into(), 95);
+            match next("dB limit") {
+                DeviceCommand::SetA3954Setting { request, setting } => {
+                    assert_eq!(request, 3);
+                    assert_eq!(
+                        setting,
+                        A3954SettingCommand::LimitHighVolume {
+                            enabled: a3954.limit_high_volume.enabled,
+                            db_limit: DbLimit::new(95).expect("95 dB"),
+                        }
+                    );
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+
+            // Ids the A3954 does not have, or that belong to the scale, never
+            // write a settings frame.
+            actions.invoke_set_toggle("dolbyAudio".into(), true);
+            actions.invoke_set_toggle("sideTone".into(), true);
+            actions.invoke_set_option("doublePress".into(), 0);
+            assert!(queued.try_recv().is_err(), "no invented A3062 write");
+
+            // The Sound mode tile path has no A3954 tiles, so it writes nothing.
+            actions.invoke_set_option("ambientSoundMode".into(), 0);
+            assert!(queued.try_recv().is_err(), "no A3062 06 81 write");
+
+            actions.invoke_eq_preset("17".into());
+            assert_eq!(
+                next("preset"),
+                DeviceCommand::ChangeA3954Preset {
+                    request: 1,
+                    preset_id: 17,
+                }
+            );
+
+            actions.invoke_eq_commit(0, 30);
+            match next("curve") {
+                DeviceCommand::WriteA3954CustomCurve { request, bands } => {
+                    assert_eq!(request, 1);
+                    assert_eq!(
+                        bands,
+                        [30, 8, 0, 0, 0, 0, 0, 0],
+                        "the commit writes the whole visible curve"
+                    );
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+
+            // A saved profile applies through the same A3954 custom-curve
+            // command, with the profile's eight visible bands.
+            inner
+                .profiles
+                .borrow_mut()
+                .add(profile("A3954 curve", [1, 2, 3, 4, 5, 6, 7, 8]))
+                .expect("the test profile is valid");
+            actions.invoke_eq_apply("A3954 curve".into());
+            match next("saved profile") {
+                DeviceCommand::WriteA3954CustomCurve { request, bands } => {
+                    assert_eq!(request, 2);
+                    assert_eq!(bands, [1, 2, 3, 4, 5, 6, 7, 8]);
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+            actions.invoke_eq_apply("missing".into());
+            assert!(
+                queued.try_recv().is_err(),
+                "a missing profile writes nothing"
+            );
+        });
+    }
+
+    #[test]
+    fn a_reported_a3954_scale_and_setting_refresh_the_pages() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            state.set_device_name("Liberty 4 Pro".into());
+            state.set_device_code("A3954".into());
+            apply_outcome(
+                ui,
+                &inner,
+                ConnectOutcome::Connected(a3954_model(), Box::new(a3954_state())),
+            );
+
+            // A reported scale position moves the page and the Overview slider.
+            let current = a3954_state().a3954.expect("the A3954 block").sound_mode;
+            let slider = A3954SoundModeSlider::new(4).expect("position 4");
+            let reported = A3954SoundMode {
+                mode: slider.mode(),
+                slider,
+                ..current
+            };
+            apply_scale_outcome(ui, &inner, Ok(reported));
+            assert_eq!(4, state.get_scale_position());
+            let rows: Vec<SettingRow> = state.get_mode_rows().iter().collect();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id.as_str(), WIND_NOISE_SUPPRESSION_ID);
+            assert_eq!(
+                inner
+                    .device
+                    .borrow()
+                    .as_ref()
+                    .and_then(|device| device.a3954.as_ref())
+                    .expect("the A3954 state")
+                    .sound_mode
+                    .slider
+                    .value(),
+                4,
+                "the controller's copy follows the device"
+            );
+
+            // A reported settings value refills the current page's panels.
+            state.set_page(Page::Effects);
+            show_section_pages(&state, &inner);
+            let mut device = a3954_state();
+            device.a3954.as_mut().expect("the A3954 block").ldac = false;
+            apply_a3954_setting_outcome(
+                ui,
+                &inner,
+                A3954SettingCommand::Ldac(false),
+                Ok(Box::new(device)),
+            );
+            let panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
+            assert_eq!(panel_kinds(&panels), vec![PanelKind::Plain]);
+            let effects: Vec<SettingRow> = panels[0].rows.iter().collect();
+            assert!(!effects[0].checked, "the re-polled LDAC value is shown");
+        });
+    }
+
+    #[test]
+    fn the_a3954_tray_hides_the_a3062_mode_list_and_shows_its_ldac() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            show_saved_card(&state);
+            state.set_device_code("A3954".into());
+            apply_outcome(
+                ui,
+                &inner,
+                ConnectOutcome::Connected(a3954_model(), Box::new(a3954_state())),
+            );
+            refresh_tray(&inner, &state);
+            let content = inner.tray_content.borrow().clone();
+            assert!(content.connected);
+            assert!(
+                content.modes.is_empty(),
+                "the A3954 scale has no A3062 mode tiles for the tray"
+            );
+            assert_eq!(-1, content.mode_index);
+            assert!(content.has_ldac);
+            assert!(content.ldac, "the measured capture reports LDAC on");
+            assert!(
+                content.battery.contains("Case 100%"),
+                "the case battery joins the tray line: {}",
+                content.battery
+            );
+            let lines = crate::tray::menu_lines(&content);
+            assert!(
+                !lines.iter().any(|line| line == "Sound mode"),
+                "no invalid mode submenu: {lines:?}"
+            );
+            assert!(lines.iter().any(|line| line.contains("LDAC")), "{lines:?}");
         });
     }
 }

@@ -148,9 +148,15 @@ impl TrayContent {
     /// Whether a device is known comes from the saved cards rather than from the
     /// connection, so a disconnected device still offers Connect; the battery,
     /// modes and LDAC come from the state the controller last read and are shown
-    /// only while connected. The quick-preset section stays hidden: this app has
-    /// no quick presets, so the vendored menu would only ever say "No presets
-    /// yet".
+    /// only while connected.
+    ///
+    /// The Sound mode submenu offers the A3062's three measured tiles. It stays
+    /// empty for a model whose ambient sound is a scale this menu has no entries
+    /// for (the A3954), so the submenu is hidden instead of offering A3062 mode
+    /// values the device does not take.
+    ///
+    /// The quick-preset section stays hidden: this app has no quick presets, so
+    /// the vendored menu would only ever say "No presets yet".
     pub fn from_state(
         state: &AppState<'_>,
         device: Option<&DeviceState>,
@@ -172,6 +178,12 @@ impl TrayContent {
         } else {
             Vec::new()
         };
+        // The A3954 keeps its LDAC flag in its own state block; the A3062 in the
+        // settings block.
+        let ldac = device.is_some_and(|device| match device.settings {
+            Some(settings) => settings.ldac,
+            None => device.a3954.as_ref().is_some_and(|a3954| a3954.ldac),
+        });
         Self {
             has_device: state.get_devices().row_count() > 0,
             device_name: state.get_device_name().to_string(),
@@ -185,10 +197,7 @@ impl TrayContent {
                 -1
             },
             has_ldac: connected && state.get_has_ldac(),
-            ldac: connected
-                && device
-                    .and_then(|device| device.settings)
-                    .is_some_and(|settings| settings.ldac),
+            ldac: connected && ldac,
             show_battery: settings.battery,
             show_modes: settings.modes,
             show_presets: false,

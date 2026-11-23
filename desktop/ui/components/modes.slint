@@ -2,7 +2,7 @@
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { AppState, Actions, ModeOption, RowKind, SettingRow } from "../types.slint";
-import { Icon, Chip, Panel, PanelHeading } from "basics.slint";
+import { Icon, Chip, Panel, PanelHeading, Toggle } from "basics.slint";
 import { RangeSlider, Segmented, SettingText } from "settings.slint";
 import { LocalizedText } from "localized.slint";
 
@@ -151,12 +151,42 @@ export component ModeScale inherits VerticalLayout {
     }
 }
 
-// a setting of the current mode: a choice between ways it works, or its strength
+// a setting of the current mode: a choice between ways it works, its strength, or a switch such as the
+// wind-noise suppression of the 1-to-11 scale
 export component ModeRow inherits VerticalLayout {
     in property <SettingRow> setting;
-    private property <string> label: SettingText.short-label(setting.id) != "" ? SettingText.short-label(setting.id) : setting.label;
+    private property <string> label: SettingText.short-label(setting.id) != "" ? SettingText.short-label(setting.id) : LocalizedText.setting-label(setting.id, setting.label);
+    private property <string> description: SettingText.description(setting.id, AppState.device-is-speaker);
     padding-top: 14px;
     spacing: 8px;
+    if root.setting.kind == RowKind.toggle: HorizontalLayout {
+        spacing: 12px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 4px;
+            Text {
+                text: root.label;
+                color: Theme.text;
+                font-size: Theme.font-small;
+                font-weight: 500;
+                wrap: word-wrap;
+            }
+            if root.description != "": Text {
+                text: root.description;
+                color: Theme.muted;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+        }
+        Toggle {
+            checked: root.setting.checked;
+            enabled: root.setting.enabled;
+            label: root.label;
+            y: (parent.height - self.height) / 2;
+            toggled(on) => { Actions.set-toggle(root.setting.id, on); }
+        }
+    }
     if root.setting.kind == RowKind.select: HorizontalLayout {
         spacing: 12px;
         Text {
