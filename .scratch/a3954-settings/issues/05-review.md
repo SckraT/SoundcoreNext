@@ -146,3 +146,19 @@ README and ticket 04.
 
 No Bluetooth address or serial number is recorded in this file, the test output,
 the UI runs or the captures.
+
+### Merge and final gates
+
+- Ticket branch: `ticket/a3954-review` @ `f076a1d` “Fix the A3954 settings review
+  findings” (parent `7236a76` “Merge the live A3954 acceptance”).
+- Merge commit: `feature/a3954-settings` @ `ff249f0` “Merge the A3954 settings
+  review fixes”, made with `--no-ff`.
+- Gates rerun on the merged `feature/a3954-settings` tree: desktop
+  `cargo fmt --all -- --check` clean, `cargo build` clean,
+  `cargo clippy --all-targets -- -D warnings` clean, `cargo test`
+  **288 passed / 0 failed / 14 ignored**; core `cargo fmt --all -- --check`
+  clean, `cargo build --workspace` clean,
+  `cargo clippy --workspace --all-targets -- -D warnings` clean,
+  `cargo test --workspace` **186 passed / 0 failed / 0 ignored**.
+- The release merge of `feature/a3954-settings` into `master` is the next
+  release step, reported from the release worktree.
