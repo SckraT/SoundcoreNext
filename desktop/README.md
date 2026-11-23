@@ -157,15 +157,16 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
 - **Demo mode** is available in the Add Device dialog's paired-device step: switching
   it on replaces the Windows paired-device list with one simulated Space One Pro
   (A3062, a neutral all-zero placeholder address, name “soundcore Space One Pro · Demo”).
-  Connecting to it needs no pairing, no RFCOMM link, no session and no Windows
-  device lookup: the state is parsed from the committed sanitized A3062 capture
-  (`core/data/a3062-state.json`), and every page and control is served on the same
-  event and command path a real device uses, so the UI wiring is the same. Sound
-  mode, equalizer presets, custom bands, the settings rows and the
-  dual-connections list update only the simulated state; the app never writes a
-  frame, never looks up a Windows device for it and never produces diagnostics from
-  it. The Diagnostics page is marked unavailable with a demo-mode explanation
-  because there is no radio to probe. My Devices keeps the saved demo card —
+  Connecting to it needs no pairing, no Bluetooth/RFCOMM link, no device session
+  and no Windows device lookup: the state is parsed from the committed sanitized
+  A3062 capture (`core/data/a3062-state.json`), and an in-process demo worker
+  serves the same event and command channel a real device worker uses, handling
+  every command against that local state, so the UI wiring is the same and no
+  command leaves the process. Sound mode, equalizer presets, custom bands, the
+  settings rows and the dual-connections list update only the simulated state;
+  the app never writes a frame to a device, never looks up a Windows device for
+  it and never produces diagnostics from it. The Diagnostics page is marked
+  unavailable with a demo-mode explanation because there is no radio to probe. My Devices keeps the saved demo card —
   marked “Demo device · Not connected” while disconnected — and Disconnect /
   Connect work without hardware; each connect starts from the captured state
   again, so demo writes do not persist (demo-only behaviour). Demo mode is offered
@@ -195,9 +196,9 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   **Theme** is Follow system, Light or Dark: Follow system resolves Windows' app
   mode once the native window exists, keeps re-reading it while it is chosen and
   follows a system light/dark switch without a restart. **Palette** chooses the
-  Purple, Sage or Rose accent, **Content scale** sets 100 %, 110 % or 125 %
-  (theme tokens already include it) and **Device color in pictures** draws the
-  current device, every saved card, the Add Device model list and the chosen
+  Purple, Sage or Rose accent, **Content scale** sets 100 %, 110 %, 125 % or
+  150 % (theme tokens already include it) and **Device color in pictures** draws
+  the current device, every saved card, the Add Device model list and the chosen
   model as the theme's color, Silver or Black. **App language** offers Follow
   system plus the 16 bundled languages by their own names; the choice is applied
   to the running window immediately and a code Slint does not bundle falls back
@@ -206,7 +207,8 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   Controls the connected device cannot use are not offered: the one-earbud badge
   needs a TWS pair (the single-battery A3062 never shows it) and the sound-mode
   view choice needs a device whose core reports the 1–11 scale (the A3062 has
-  only its three modes). Every choice applies to the running window at once and
+  only its three modes and no core model exposes that scale yet, so the choice
+  stays hidden). Every choice applies to the running window at once and
   is saved through the same flushed temporary file and rename into
   `%APPDATA%\OpenSCL4\desktop-preferences.json`, the one document that also
   holds the notification-area choices. On the next start the saved theme,
@@ -232,13 +234,18 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   bands, and an applied saved profile's custom curve), the measured one-frame
   settings writes behind the section pages, and the dual-connections writes
   (`0B 84` for the setting, `0B 82`/`0B 81`/`0B 83` for a list row); its `0B 01`
-  list request is the only other read. The app's persisted files are the saved
-  profiles, Overview preferences and desktop/tray preferences. Windows pairing
-  stays in Windows settings and the app never changes it; **Forget** asks the
-  earbuds themselves to drop a remembered device, which is the un-pairing the
-  vendored note warns about.
+  list request is the only other read. In Demo mode these same requests and
+  commands are answered in-process by the demo worker against its simulated
+  state, so no frame is written to a device. The app's persisted files are the
+  saved profiles, Overview preferences and desktop/tray preferences. Windows
+  pairing stays in Windows settings and the app never changes it; **Forget**
+  asks the earbuds themselves to drop a remembered device, which is the
+  un-pairing the vendored note warns about.
 - ANC strength, wind noise, adaptive ANC and the 1-to-11 strength scale are not
-  part of this slice, so the Sound mode page shows only the three mode tiles.
+  part of this slice, so the Sound mode page shows only the three mode tiles. The
+  Settings **Sound modes** view choice is therefore deferred until a core model
+  exposes that 1–11 scale: it is still saved but stays hidden
+  (`app-mode-view-applies` is always false) rather than offering a fake view.
   Legacy migration and HearID are out of scope: their vendored controls keep
   their empty or hidden state, as described above.
 - Tray **Quick presets** stay out of scope: the app has no quick presets, so the
@@ -284,10 +291,11 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
 ## Screenshots
 
 The real-device captures in this section were taken during the earlier RFCOMM
-acceptance slices. The three Demo-mode captures come from the current build with
-no Bluetooth hardware: their device values are simulated, so they document the
-interface only and are not a hardware-acceptance result. No Bluetooth address or
-serial number appears in any of them.
+acceptance slices. The three Demo-mode captures come from the demo-acceptance
+build (ticket 04) run on Windows with no Bluetooth hardware: their device values
+are simulated and the Settings capture predates the 150 % content-scale choice,
+so they document the interface only and are not a hardware-acceptance result. No
+Bluetooth address or serial number appears in any of them.
 
 ![Demo mode Overview](demo-overview.png)
 
@@ -297,8 +305,9 @@ from the running app on Windows. The hero names the simulated device
 Quick settings panel holds the saved LDAC chip, the Sound mode and Your sound
 panels follow the simulated state, and the four shortcut cards are the saved
 Standard layout. Every value is parsed from the sanitized committed A3062
-capture; no RFCOMM link is opened, no session or device worker exists and no
-frame is written anywhere.
+capture; no Bluetooth/RFCOMM link or device session is opened, and no command
+leaves the process — the in-process demo worker only serves the simulated state,
+so no frame is written to a device.
 
 ![Demo mode Diagnostics](demo-diagnostics.png)
 

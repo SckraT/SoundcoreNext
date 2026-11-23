@@ -84,9 +84,11 @@ content, not in duplicated action or state logic.
 
 ## 3. Responsive Windows layout
 
-- The shell chooses wide Overview and Diagnostics layouts only when usable
-  content width exceeds `900px * Theme.content-scale`. Both branches render the
-  same domain content in a different arrangement.
+- The shell chooses wide Overview, Equalizer, Presets, Settings and Diagnostics
+  layouts only when usable content width exceeds `900px * Theme.content-scale`;
+  the section (device-settings) pages use `860px * Theme.content-scale` for
+  their main/aside split. Both branches render the same domain content in a
+  different arrangement.
 - Wide pages may place large panels in two columns and keep a supporting aside
   aligned to the top rather than stretching it to the main column's height.
   Narrow pages use one column; larger action groups stack vertically. The outer

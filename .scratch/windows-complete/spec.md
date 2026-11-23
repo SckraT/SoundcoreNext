@@ -16,12 +16,15 @@ then verify the finished client on a real Space One Pro (A3062).
 
 - Build recovery: translation domain and bundled translations, logs, tray/settings
   persistence, `Controller::shown`, compile and tests.
-- Settings: theme, palette, content scale, device art color, sound-mode view,
-  one-earbud badge, language, Copy logs; persisted in
+- Settings: theme, palette, content scale, device art color, sound-mode view
+  (deferred until a core model exposes the 1–11 scale, so the control stays
+  hidden), one-earbud badge, language, Copy logs; persisted in
   `%APPDATA%\OpenSCL4\desktop-preferences.json`.
 - Demo device mode: Add Device → Demo mode creates a simulated A3062; the app
-  connects to it without RFCOMM, all supported pages render and controls update
-  local simulated state; no device commands are sent.
+  connects to it without Bluetooth, RFCOMM or a device session, and an
+  in-process demo worker serves the same event and command channel locally, so
+  all supported pages render and controls update the simulated state while no
+  command leaves the process.
 - Overview preferences, tray persistence, Disconnect, idle heartbeat and Lost/
   Retry behaviour exercised from demo and tests.
 - UI-kit visual/adaptive acceptance at 800×700, 1030×760, 1280×820, 1440×900,
@@ -42,7 +45,7 @@ then verify the finished client on a real Space One Pro (A3062).
 | Ticket | Depends on | Outcome |
 |---|---|---|
 | `01-build-recovery.md` | — | Green build/tests; translations, logs, settings/tray wiring, `shown` |
-| `02-settings-wiring.md` | 01 | Every Settings control persists and applies; Copy logs |
+| `02-settings-wiring.md` | 01 | Every offered Settings control persists and applies; Copy logs |
 | `03-demo-device.md` | 01 | Simulated A3062 demo connect + interactive pages, no device I/O |
 | `04-demo-acceptance.md` | 02,03 | Demo-only visual/adaptive/functional acceptance; fix defects |
 | `05-live-acceptance.md` | 04 | Real A3062 acceptance of all Windows features |
@@ -51,14 +54,17 @@ then verify the finished client on a real Space One Pro (A3062).
 ## Acceptance criteria
 
 1. `cargo build` succeeds; desktop tests and core tests pass; fmt/clippy clean.
-2. Settings page changes theme, palette, content scale, device art, sound-mode
-   view, badge and language and survives restart; Copy logs puts the real recent
-   log on the clipboard.
+2. Settings page changes theme, palette, content scale, device art, badge and
+   language and survives restart; Copy logs puts the real recent log on the
+   clipboard. The 1–11 sound-mode view is deferred until a core model exposes
+   that scale and its control stays hidden rather than showing a fake view.
 3. Demo mode adds a simulated A3062 without Windows pairing and opens its
    Overview; all implemented Sound/Device pages, EQ, profiles and Diagnostics
    entry states render; changing a setting updates the demo state without any
    RFCOMM write.
-4. No demo path sends a device command or claims a real connection.
+4. No demo path opens Bluetooth/RFCOMM or a device session, sends a command
+   outside the process, or claims a real connection; the in-process demo worker
+   only updates its local simulated state.
 5. Visual matrix is clean at the required widths/scales/themes; no clipping.
 6. Real A3062 acceptance passes for connect, modes, EQ, settings, tray,
    diagnostics ZIP redaction and heartbeat Lost/Retry; device left as found.

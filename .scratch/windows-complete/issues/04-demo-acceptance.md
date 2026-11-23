@@ -14,8 +14,9 @@ Use the demo device to accept the finished Windows UI without hardware.
    Sound mode, Equalizer (preset/custom/reset/profiles/import/export preview),
    every Settings page and device page, My Devices disconnect/reconnect, tray
    open/close/quit, Settings appearance/language/copy logs.
-3. Change theme (light/dark/follow), palette, content scale 100/110/125, device
-   color, language (RU/EN), one-earbud badge; verify persistence after restart.
+3. Change theme (light/dark/follow), palette, content scale (100/110/125 in this
+   ticket; ticket 06 added 150), device color, language (RU/EN), one-earbud
+   badge; verify persistence after restart.
 4. Capture the required visual matrix at 800×700, 1030×760, 1280×820 and
    1440×900, at 100/125/150%, light/dark; check long strings and no clipping.
 5. Verify Diagnostics demo messaging and that no ZIP/issue is produced.
@@ -43,10 +44,13 @@ Use the demo device to accept the finished Windows UI without hardware.
   Demo`; its state is parsed from the committed sanitized capture
   (`core/data/a3062-state.json`). No real address, serial number or device name is
   used or recorded anywhere in this document or in the screenshots.
-- No Bluetooth hardware was used, no RFCOMM link was opened and no device command
-  was written during this ticket. The Windows paired-device list seen on the
+- No Bluetooth hardware was used, no RFCOMM link was opened and no device session
+  was created during this ticket. The Windows paired-device list seen on the
   Add Device step before Demo mode is switched on is a read-only Windows
-  enumeration; the demo path never looks a device up or connects to one.
+  enumeration; the demo path never looks a device up or connects to one. Demo
+  controls travel as `DeviceCommand`s to the in-process demo worker, which
+  answers them from its local simulated state; none of them leaves the process
+  and no frame is written to a device.
 
 ### Method
 
@@ -106,8 +110,11 @@ committed as `desktop/demo-overview.png`, `desktop/demo-diagnostics.png` and
 - **Settings**: theme Follow system/Light/Dark, palette Purple/Sage/Rose,
   content scale 100/110/125, device art color As the theme/Silver/Black, language
   English/Russian (the window switched immediately and back), Copy logs put the
-  real recent log on the clipboard, and the one-earbud badge plus the sound-mode
-  scale view are not offered for the A3062. Theme, palette, scale, art color,
+  real recent log on the clipboard, and the one-earbud badge is not offered for
+  the A3062. The sound-mode scale view is not offered for any device: no core
+  model exposes the 1–11 scale yet, so the choice is deferred (the Settings
+  control stays hidden via `app-mode-view-applies=false`; ticket 06 records the
+  deferral). Theme, palette, scale, art color,
   language, tray choices and the Overview layout/quick-toggle selection survived
   a full quit + relaunch; the same choices are in
   `%APPDATA%\OpenSCL4\desktop-preferences.json` / `overview-preferences.json`.
@@ -156,16 +163,18 @@ committed as `desktop/demo-overview.png`, `desktop/demo-diagnostics.png` and
    simulated** (“Connected” only, against ticket 03's “My devices shows Demo
    device”). Fixed to “Connected · Demo device” (`pages/devices.slint`).
 5. **README drift**: the Settings page was undocumented and the Demo-mode
-   paragraph was imprecise (it contained the placeholder demo address, claimed
-   no worker exists, and described the My Devices marking loosely). The Status
+   paragraph was imprecise (it contained the placeholder demo address, described
+   the worker loosely, and described the My Devices marking loosely). The Status
    section no longer describes the shell as a compile-only WIP. The README now
    documents every Settings control and its persistence, the exact demo
    behaviour, three demo-mode screenshots, and a caveat for strings newer than
-   the bundled translation documents.
+   the bundled translation documents. One screenshot caption still claimed no
+   device worker existed (the demo uses an in-process worker); ticket 06
+   corrected that caption and the Demo-mode wording.
 
 No controller/device-flow defect was found: the demo event/command path fills
-every page and re-polls exactly like the real worker, and no frame or Windows
-device lookup happens.
+every page and re-polls exactly like the real worker, and no frame is written to
+a device and no Windows device lookup happens.
 
 ### Visual matrix
 
@@ -180,9 +189,10 @@ are physical pixels of the same logical layout. Captures were inspected page by
 page: no horizontal clipping, no content outside its panel, long labels elide or
 wrap, and dialog actions stay reachable at 800×700 and 150 %. The Connections
 regression above was found this way and re-verified in the final matrix.
-The app's own Settings control offers 100/110/125 % content scale (UI-kit
-contract); the 100/125/150 % matrix is rendered through the harness as the
-ticket specifies.
+The app's own Settings control offered 100/110/125 % content scale at the time of
+this ticket (UI-kit contract); the 100/125/150 % matrix is rendered through the
+harness as the ticket specifies. Ticket 06 added the missing 150 % choice so the
+app control matches the contract.
 
 ### Gates
 

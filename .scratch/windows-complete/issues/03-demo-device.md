@@ -14,7 +14,9 @@ Bluetooth hardware. No command may leave the process.
    `paired-options` with a single deterministic simulated device (neutral MAC,
    e.g. `00:00:00:00:00:01`, name `soundcore Space One Pro · Demo`, code A3062).
 2. `pair` in demo mode creates a `demo: true` saved card and a simulated
-   connected state without opening RFCOMM or spawning a device worker.
+   connected state without opening RFCOMM or a device session; an in-process
+   demo worker serves the local simulated state on the same event/command
+   channel.
 3. Demo state is parsed from a committed sanitized A3062 fixture or built from
    the same `DeviceState` shape; it supplies sound mode, equalizer, settings,
    battery/firmware and Overview data.
@@ -24,7 +26,9 @@ Bluetooth hardware. No command may leave the process.
 5. Controls update only the local demo `DeviceState` and visible models:
    - sound mode / EQ preset / custom bands / settings toggles;
    - EQ profile save/apply/delete and Overview layout/quick-toggle choices;
-   - no `DeviceSession`, `DeviceCommand`, RFCOMM, filesystem device writes.
+   - no `DeviceSession`, RFCOMM write, or filesystem device write; the
+     `DeviceCommand`s are handled in-process by the demo worker against its
+     local simulated state and none leaves the process.
    Diagnostics probes are not run and no ZIP is produced from demo data; the
    page must say demo mode cannot capture or be disabled.
 6. Demo disconnect returns to My Devices and keeps the demo saved card; demo
@@ -38,7 +42,8 @@ Bluetooth hardware. No command may leave the process.
 
 - [x] Add Device → Demo mode → connect works without Windows pairing.
 - [x] Every implemented page opens with data.
-- [x] Changing mode/EQ/settings updates locally; no RFCOMM or worker exists.
+- [x] Changing mode/EQ/settings updates locally in the in-process demo worker;
+      no Bluetooth/RFCOMM/session is used and no command leaves the process.
 - [x] Diagnostics clearly marked unavailable in demo.
 - [x] Desktop gates green.
 

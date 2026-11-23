@@ -1808,8 +1808,9 @@ struct Inner {
     /// The newest connect attempt; results of older attempts are stale.
     connect: Cell<u64>,
     /// Whether the current connection is the simulated demo device. A demo
-    /// connection has no transport and no device worker behind it, so the
-    /// Diagnostics page stays unavailable and no RFCOMM path may be reached.
+    /// connection has no transport, so the Diagnostics page stays unavailable
+    /// and no RFCOMM path may be reached; its in-process worker only serves the
+    /// local simulated state, so no command leaves the process.
     demo: Cell<bool>,
     /// Cancels the in-flight connect attempt without waiting for it.
     cancel: RefCell<Option<Arc<AtomicBool>>>,
@@ -14972,7 +14973,7 @@ mod tests {
                 let mut settings = inner.settings.borrow_mut();
                 settings.theme = AppTheme::Dark;
                 settings.accent = Accent::Rose;
-                settings.content_scale = ContentScale::Percent125;
+                settings.content_scale = ContentScale::Percent150;
                 settings.device_color = DeviceColor::Black;
                 settings.sound_mode_view = SoundModeView::Scale;
                 settings.one_earbud_badge = false;
@@ -14988,7 +14989,7 @@ mod tests {
 
             assert_eq!(state.get_app_theme(), 2);
             assert_eq!(state.get_app_palette(), 2);
-            assert_eq!(state.get_app_content_scale(), 2);
+            assert_eq!(state.get_app_content_scale(), 3);
             assert_eq!(state.get_app_device_color(), 2);
             assert_eq!(state.get_app_mode_view(), 1);
             assert!(
@@ -15290,6 +15291,10 @@ mod tests {
             assert!((theme.get_content_scale() - 1.25).abs() < 1e-6);
             assert_eq!(state.get_app_content_scale(), 2);
 
+            actions.invoke_set_content_scale(3);
+            assert!((theme.get_content_scale() - 1.5).abs() < 1e-6);
+            assert_eq!(state.get_app_content_scale(), 3);
+
             actions.invoke_set_device_color(2);
             assert_eq!(state.get_app_device_color(), 2);
 
@@ -15304,7 +15309,7 @@ mod tests {
                 DesktopSettings {
                     theme: AppTheme::Dark,
                     accent: Accent::Rose,
-                    content_scale: ContentScale::Percent125,
+                    content_scale: ContentScale::Percent150,
                     device_color: DeviceColor::Black,
                     sound_mode_view: SoundModeView::Scale,
                     one_earbud_badge: false,
@@ -15330,7 +15335,7 @@ mod tests {
 
             actions.invoke_set_app_theme(2);
             actions.invoke_set_palette(1);
-            actions.invoke_set_content_scale(2);
+            actions.invoke_set_content_scale(3);
             actions.invoke_set_device_color(2);
             actions.invoke_set_mode_view(1);
             actions.invoke_set_badge(false);
@@ -15339,7 +15344,7 @@ mod tests {
             let saved = settings::load_settings(&path);
             assert_eq!(saved.theme, AppTheme::Dark);
             assert_eq!(saved.accent, Accent::Sage);
-            assert_eq!(saved.content_scale, ContentScale::Percent125);
+            assert_eq!(saved.content_scale, ContentScale::Percent150);
             assert_eq!(saved.device_color, DeviceColor::Black);
             assert_eq!(saved.sound_mode_view, SoundModeView::Scale);
             assert!(!saved.one_earbud_badge);
@@ -15374,8 +15379,10 @@ mod tests {
             for index in [-1, 3, 99] {
                 actions.invoke_set_app_theme(index);
                 actions.invoke_set_palette(index);
-                actions.invoke_set_content_scale(index);
                 actions.invoke_set_device_color(index);
+            }
+            for index in [-1, 4, 99] {
+                actions.invoke_set_content_scale(index);
             }
             for index in [-1, 2, 99] {
                 actions.invoke_set_mode_view(index);

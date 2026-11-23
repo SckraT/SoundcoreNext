@@ -81,13 +81,16 @@ visual language. It does not introduce a third-party UI framework.
   alignment instead of manual child `y` coordinates managed by the parent.
 - Accessibility state coverage: `Button`, `Chip`, `Toggle`, `CheckRow`,
   `RangeSlider`, the `Segmented` options, the Settings palette `Swatch`, the
-  `Select` popup rows and the sound-mode tiles now bind `accessible-enabled`
+  `Select` popup rows, the sound-mode tiles and the preset editor's settings
+  rows (`pages/presets.slint` `FieldRowView`) now bind `accessible-enabled`
   and/or `accessible-checkable` next to their existing labels and checked state.
   Slint only exposes a disabled state when it is bound, and only exposes a
   checked state on an item marked checkable, so without these bindings an
   assistive-technology client saw disabled actions as available and switches,
-  check rows and selected options as stateless. No visual, callback or device
-  behavior changed.
+  check rows and selected options as stateless. `RangeSlider` also implements
+  `accessible-action-set-value` through the same clamped, step-snapped commit as
+  a drag, so the range value its accessibility properties advertise is
+  settable. No visual, callback or device behavior changed.
 - `app.slint`: the section (device-settings) pages choose their two-column
   arrangement with `860px * Theme.content-scale`, like the Overview and
   Diagnostics, so a raised content scale stacks the aside instead of squeezing
@@ -98,6 +101,23 @@ visual language. It does not introduce a third-party UI framework.
   the panel. No callback or device behavior changed.
 - `pages/devices.slint`: the connected saved-device card adds a non-destructive
   Disconnect ghost action beside Open; the card remains available for reconnect.
+  Its status line marks a simulated (Demo-mode) card as `Connected · Demo
+  device` or `Demo device · Not connected`, driven by the existing
+  `DeviceCard.demo` field, so a simulated device stays recognisable on My
+  Devices while connected.
+- `app.slint` (review fixes): the Equalizer, Presets and Settings pages now pick
+  their two-column arrangement with the same `900px * Theme.content-scale` rule
+  as the Overview, Diagnostics and the section pages, so scaling the content
+  stacks those pages instead of squeezing the main column. No content or
+  callback changed.
+- `pages/overview.slint` (review fixes): the device identity uses layout
+  alignment (`cross-axis-alignment`) and the spacing, radius and control tokens
+  instead of manual child `y` coordinates and raw 9/6/3 px values, so it stays
+  centred and scales cleanly at 110/125/150 %.
+- Content scale 150 %: `pages/settings.slint` offers `100 %`, `110 %`, `125 %`
+  and `150 %` (the extra option is wired through the existing
+  `set-content-scale` callback and Rust `ContentScale` mapping); `types.slint`
+  comments record the four choices.
 - `UI_KIT.md`: records the reusable component, state, responsive, persistence
   and future Compose mapping contracts.
 - `GUIDE.md`: adds the practical component/page workflow, local visual checks and
