@@ -164,13 +164,15 @@ fn a_model_without_a_measured_settings_block_has_none() {
     let state = parse_state_frame(model, &hex(&fixture.frame_hex)).expect("parse the real state");
     assert_eq!(state.settings, None, "the P20i has no measured settings");
 
-    for code in ["A3949", "A3947", "A3954", "A3035", "A3040"] {
+    // The A3954 has measured settings, but they are its own commands and
+    // durations (`A3954SettingCommand`), not this A3062 block; see a3954.rs.
+    for code in ["A3949", "A3947", "A3035", "A3040", "A3954"] {
         let model = model_by_code(code).expect("the catalog lists the model");
         assert_eq!(model.settings, None, "{code}");
         assert_eq!(
             model.setting_frame(SettingCommand::Ldac(true)),
             None,
-            "{code} must not build a settings frame"
+            "{code} must not build an A3062 settings frame"
         );
     }
 }

@@ -1,0 +1,72 @@
+{
+  "model": "A3954",
+  "source": "real 06 81 writes of the Soundcore app to a Liberty 4 Pro in analysis/captures/20261104-151814-A3954-Liberty4Pro, in capture order: normal at position 6, transparency at 1..5, noise canceling at 7..11; every body is [mode, position, 0, wind, FF]",
+  "writes": [
+    {
+      "mode_byte": 2,
+      "position": 6,
+      "payload_hex": "02 06 00 01 FF",
+      "frame_hex": "08 EE 00 00 00 06 81 0F 00 02 06 00 01 FF 94"
+    },
+    {
+      "mode_byte": 1,
+      "position": 1,
+      "payload_hex": "01 01 00 01 FF",
+      "frame_hex": "08 EE 00 00 00 06 81 0F 00 01 01 00 01 FF 8E"
+    },
+    {
+      "mode_byte": 1,
+      "position": 2,
+      "payload_hex": "01 02 00 01 FF",
+      "frame_hex": "08 EE 00 00 00 06 81 0F 00 01 02 00 01 FF 8F"
+    },
+    {
+      "mode_byte": 1,
+      "position": 3,
+      "payload_hex": "01 03 00 01 FF",
+      "frame_hex": "08 EE 00 00 00 06 81 0F 00 01 03 00 01 FF 90"
+    },
+    {
+      "mode_byte": 1,
+      "position": 4,
+      "payload_hex": "01 04 00 01 FF",
+      "frame_hex": "08 EE 00 00 00 06 81 0F 00 01 04 00 01 FF 91"
+    },
+    {
+      "mode_byte": 1,
+      "position": 5,
+      "payload_hex": "01 05 00 01 FF",
+      "frame_hex": "08 EE 00 00 00 06 81 0F 00 01 05 00 01 FF 92"
+    },
+    {
+      "mode_byte": 0,
+      "position": 7,
+      "payload_hex": "00 07 00 01 FF",
+      "frame_hex": "08 EE 00 00 00 06 81 0F 00 00 07 00 01 FF 93"
+    },
+    {
+      "mode_byte": 0,
+      "position": 8,
+      "payload_hex": "00 08 00 01 FF",
+      "frame_hex": "08 EE 00 00 00 06 81 0F 00 00 08 00 01 FF 94"
+    },
+    {
+      "mode_byte": 0,
+      "position": 9,
+      "payload_hex": "00 09 00 01 FF",
+      "frame_hex": "08 EE 00 00 00 06 81 0F 00 00 09 00 01 FF 95"
+    },
+    {
+      "mode_byte": 0,
+      "position": 10,
+      "payload_hex": "00 0A 00 01 FF",
+      "frame_hex": "08 EE 00 00 00 06 81 0F 00 00 0A 00 01 FF 96"
+    },
+    {
+      "mode_byte": 0,
+      "position": 11,
+      "payload_hex": "00 0B 00 01 FF",
+      "frame_hex": "08 EE 00 00 00 06 81 0F 00 00 0B 00 01 FF 97"
+    }
+  ]
+}
