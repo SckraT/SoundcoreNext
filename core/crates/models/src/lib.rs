@@ -913,34 +913,6 @@ impl A3954SoundModeSlider {
         Self(Self::NORMAL)
     }
 
-    /// The slider a mode and its 1..=5 strength name.
-    ///
-    /// Transparency strength 1 is the strongest and maps to position 5, and
-    /// noise canceling strength 1 maps to position 7, so the strength is the
-    /// distance from the normal position. `Normal` ignores `strength` and is
-    /// always position 6; airplane mode has no position and returns `None`, as
-    /// does a strength outside 1..=5.
-    pub const fn from_mode_and_strength(mode: A3954AmbientSoundMode, strength: u8) -> Option<Self> {
-        match mode {
-            A3954AmbientSoundMode::Normal => Some(Self(Self::NORMAL)),
-            A3954AmbientSoundMode::NoiseCanceling => {
-                if strength == 0 || strength > 5 {
-                    None
-                } else {
-                    Some(Self(6 + strength))
-                }
-            }
-            A3954AmbientSoundMode::Transparency => {
-                if strength == 0 || strength > 5 {
-                    None
-                } else {
-                    Some(Self(6 - strength))
-                }
-            }
-            A3954AmbientSoundMode::AirplaneMode => None,
-        }
-    }
-
     /// The scale position, in `1..=11`.
     pub const fn value(self) -> u8 {
         self.0
@@ -955,17 +927,6 @@ impl A3954SoundModeSlider {
             A3954AmbientSoundMode::Normal
         } else {
             A3954AmbientSoundMode::NoiseCanceling
-        }
-    }
-
-    /// The 1..=5 strength of the active mode; `None` at the normal position.
-    pub const fn strength(self) -> Option<u8> {
-        if self.0 < Self::NORMAL {
-            Some(6 - self.0)
-        } else if self.0 > Self::NORMAL {
-            Some(self.0 - 6)
-        } else {
-            None
         }
     }
 }
@@ -1251,6 +1212,10 @@ impl A3954EasyChat {
 }
 
 /// The three measured A3954 case-display languages.
+///
+/// The `01 01` body reports the value at byte 157 and this slice parses it as a
+/// read-only field: the case display has no page and the out-of-scope `07 8A`
+/// language write is not built by [`A3954SettingCommand`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum A3954CaseLanguage {
     Japanese,
@@ -1494,7 +1459,7 @@ fn visible_bands(bands: [i16; A3954_EQ_BANDS]) -> [i16; VISIBLE_EQ_BANDS] {
 /// | 44..115 | [`A3954EqualizerState`]: preset, two ten-band channels and the HearID block |
 /// | 116..124 | eight main-button action bytes (remapping deferred) |
 /// | 124 | ambient-sound-mode cycle bits |
-/// | 125..129 | [`A3954SoundMode`] |
+/// | 125..129 | [`A3954SoundMode`], or unavailable (`None`) when a value is unmeasured |
 /// | 129..132 | three unknown bytes the parser skips |
 /// | 132..136 | [`A3954CaseFeatures`] |
 /// | 136 | air pressure, raw centi-atmospheres |
@@ -1535,8 +1500,16 @@ pub struct A3954State {
     pub main_buttons: [u8; A3954_MAIN_BUTTON_COUNT],
     /// The ambient-sound-mode cycle bits at body 124.
     pub ambient_sound_mode_cycle: AmbientSoundModeCycle,
-    /// The sound-mode block at body 125..129.
-    pub sound_mode: A3954SoundMode,
+    /// The sound-mode block at body 125..129, or `None` when the device reports
+    /// a value this slice has not measured.
+    ///
+    /// The one known case is airplane mode: the real device then reports slider
+    /// byte `13`, which is outside the measured 1..=11 scale (observed on the
+    /// real A3954 in ticket 04; the byte's meaning is unmeasured). The block is
+    /// unavailable in that case so the rest of the state still parses and the
+    /// pages hide the scale instead of the whole poll failing; no scale
+    /// position is invented for the byte.
+    pub sound_mode: Option<A3954SoundMode>,
     /// The case features at body 132..136.
     pub case_features: A3954CaseFeatures,
     /// The raw air-pressure byte at body 136: centi-atmospheres, so `98` is
@@ -1559,7 +1532,8 @@ pub struct A3954State {
     pub easy_chat: A3954EasyChat,
     /// Adaptive sound-leak compensation (`10 9A` write).
     pub sound_leak_compensation: bool,
-    /// The case display language.
+    /// The case display language, parsed read-only: the case display has no
+    /// page in this slice and its write is out of scope.
     pub case_language: A3954CaseLanguage,
     /// In-ear wearing detection.
     pub wearing_detection: bool,
@@ -1574,8 +1548,9 @@ pub struct A3954State {
 /// Every variant names the command OpenSCL4's A3954 module uses and the app was
 /// measured sending; turn one into a complete outbound frame with
 /// [`DeviceModel::a3954_setting_frame`]. Button remapping, the case-features
-/// write and air-pressure writes are deliberately not variants: they are
-/// deferred by this slice.
+/// write, air-pressure writes and the case-display language write are
+/// deliberately not variants: they are deferred by this slice (the case language
+/// stays a read-only state field).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum A3954SettingCommand {
     /// `01 FF` body `[on]`; the device confirms with an `01 7F` notification.
@@ -1603,8 +1578,6 @@ pub enum A3954SettingCommand {
     SpatialAudio(A3954SpatialAudio),
     /// `10 9D` body `[enabled, wait_time]`.
     EasyChat(A3954EasyChat),
-    /// `07 8A` body `[language]`.
-    CaseLanguage(A3954CaseLanguage),
 }
 
 impl A3954SettingCommand {
@@ -1622,7 +1595,6 @@ impl A3954SettingCommand {
             Self::SoundLeakCompensation(_) => Command::new(0x10, 0x9A),
             Self::SpatialAudio(_) => Command::new(0x10, 0x81),
             Self::EasyChat(_) => Command::new(0x10, 0x9D),
-            Self::CaseLanguage(_) => Command::new(0x07, 0x8A),
         }
     }
 
@@ -1643,7 +1615,6 @@ impl A3954SettingCommand {
             Self::AmbientSoundModeCycle(cycle) => vec![cycle.byte()],
             Self::SpatialAudio(spatial_audio) => spatial_audio.command_body().to_vec(),
             Self::EasyChat(easy_chat) => easy_chat.command_body().to_vec(),
-            Self::CaseLanguage(language) => vec![language.value()],
         }
     }
 }
@@ -2417,9 +2388,6 @@ pub enum StateError {
     InvalidAutoPowerOffIndex(u8),
     InvalidLimitHighVolumeDbLimit(u8),
     InvalidDecibelReadingRefreshRate(u8),
-    InvalidA3954SoundMode(u8),
-    InvalidA3954SoundModeSlider(u8),
-    InvalidA3954AirplaneMode(u8),
     InvalidA3954AutoPowerOffIndex(u8),
     InvalidA3954SpatialAudioMusicMode(u8),
     InvalidA3954SpatialAudioMode(u8),
@@ -2450,15 +2418,6 @@ impl std::fmt::Display for StateError {
             }
             Self::InvalidDecibelReadingRefreshRate(value) => {
                 write!(f, "invalid decibel reading refresh rate {value}")
-            }
-            Self::InvalidA3954SoundMode(value) => {
-                write!(f, "invalid A3954 ambient sound mode {value}")
-            }
-            Self::InvalidA3954SoundModeSlider(value) => {
-                write!(f, "invalid A3954 sound-mode slider position {value}")
-            }
-            Self::InvalidA3954AirplaneMode(value) => {
-                write!(f, "invalid A3954 airplane mode {value}")
             }
             Self::InvalidA3954AutoPowerOffIndex(value) => {
                 write!(f, "invalid A3954 auto power off duration index {value}")
@@ -2640,6 +2599,23 @@ fn parse_single_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState
     })
 }
 
+/// Parses the A3954 sound-mode block at body 125..129.
+///
+/// `None` when any of the three closed values is one this slice has not
+/// measured: the real device reports slider byte `13` in airplane mode, so the
+/// block is unavailable rather than the whole state poll failing. The wind bits
+/// are flags and only the slider/mode/airplane bytes can make the block
+/// unavailable.
+fn parse_a3954_sound_mode(body: &[u8], offset: usize) -> Option<A3954SoundMode> {
+    Some(A3954SoundMode {
+        mode: A3954AmbientSoundMode::from_value(body[offset])?,
+        slider: A3954SoundModeSlider::new(body[offset + 1])?,
+        airplane_mode: A3954AirplaneMode::from_value(body[offset + 2])?,
+        wind_noise_suppression: body[offset + 3] & 1 != 0,
+        wind_noise_detected: body[offset + 3] & 2 != 0,
+    })
+}
+
 /// Parses the A3954-specific blocks of the measured 165-byte `01 01` body.
 ///
 /// `None` when the model has no [`A3954Capability`], which is every model but
@@ -2650,8 +2626,11 @@ fn parse_single_cmm2_body(model: DeviceModel, body: &[u8]) -> Result<DeviceState
 ///
 /// Every closed enum is validated instead of defaulted, so firmware that
 /// reports a value this slice was not measured with fails the poll instead of
-/// looking like a known setting. Flags are on only when the byte is `1`, as in
-/// OpenSCL4's parser, so an unexpected flag byte reads as off.
+/// looking like a known setting. The sound-mode block is the one measured
+/// exception: the real device reports the unmeasured slider byte `13` in
+/// airplane mode, so that block reads as [`A3954State::sound_mode`] `None` and
+/// the rest of the state still parses. Flags are on only when the byte is `1`,
+/// as in OpenSCL4's parser, so an unexpected flag byte reads as off.
 fn parse_a3954_state(model: DeviceModel, body: &[u8]) -> Result<Option<A3954State>, StateError> {
     let Some(capability) = model.a3954 else {
         return Ok(None);
@@ -2672,19 +2651,7 @@ fn parse_a3954_state(model: DeviceModel, body: &[u8]) -> Result<Option<A3954Stat
     let mut hear_id = [0u8; A3954_HEAR_ID_BLOCK_LEN];
     hear_id.copy_from_slice(&body[hear_id_offset..hear_id_offset + A3954_HEAR_ID_BLOCK_LEN]);
 
-    let sound_mode_offset = capability.sound_mode_offset;
-    let sound_mode = A3954SoundMode {
-        mode: A3954AmbientSoundMode::from_value(body[sound_mode_offset])
-            .ok_or(StateError::InvalidA3954SoundMode(body[sound_mode_offset]))?,
-        slider: A3954SoundModeSlider::new(body[sound_mode_offset + 1]).ok_or(
-            StateError::InvalidA3954SoundModeSlider(body[sound_mode_offset + 1]),
-        )?,
-        airplane_mode: A3954AirplaneMode::from_value(body[sound_mode_offset + 2]).ok_or(
-            StateError::InvalidA3954AirplaneMode(body[sound_mode_offset + 2]),
-        )?,
-        wind_noise_suppression: body[sound_mode_offset + 3] & 1 != 0,
-        wind_noise_detected: body[sound_mode_offset + 3] & 2 != 0,
-    };
+    let sound_mode = parse_a3954_sound_mode(body, capability.sound_mode_offset);
 
     let duration_index = body[A3954_AUTO_POWER_OFF_OFFSET + 1];
     let auto_power_off = A3954AutoPowerOff {

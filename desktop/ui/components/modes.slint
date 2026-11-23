@@ -160,11 +160,11 @@ export component ModeRow inherits VerticalLayout {
     padding-top: 14px;
     spacing: 8px;
     if root.setting.kind == RowKind.toggle: HorizontalLayout {
-        spacing: 12px;
+        spacing: Theme.space-3;
+        cross-axis-alignment: center;
         VerticalLayout {
             horizontal-stretch: 1;
-            alignment: center;
-            spacing: 4px;
+            spacing: Theme.space-1;
             Text {
                 text: root.label;
                 color: Theme.text;
@@ -183,7 +183,6 @@ export component ModeRow inherits VerticalLayout {
             checked: root.setting.checked;
             enabled: root.setting.enabled;
             label: root.label;
-            y: (parent.height - self.height) / 2;
             toggled(on) => { Actions.set-toggle(root.setting.id, on); }
         }
     }

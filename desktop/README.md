@@ -553,7 +553,13 @@ connected badge and the left/right/case battery tiles (69/69/80 %). Quick
 settings holds the saved LDAC chip; the Sound mode panel shows the device's
 1–11 scale at position 6 (Normal) with wind-noise suppression off; the Your
 sound panel shows the device's Acoustic preset and its eight visible bands; the
-shortcuts are the four A3954 pages.
+shortcuts are the four A3954 pages. These captures were taken during ticket 04;
+the later ticket-05 review run used the same build path and found the same
+pages, so no UI capture was repeated. In airplane mode the real device reports
+an unmeasured slider byte, so the controller hides the scale page and the
+Overview's sound-mode block while every other page stays; that state is covered
+by a unit regression rather than a capture because a second real device state
+would require changing the earbuds' mode.
 
 ![Sound mode scale with a connected Liberty 4 Pro](live-a3954-sound-mode.png)
 
@@ -565,9 +571,13 @@ the wind toggle, re-polling after each and restoring the connect position.
 ![Equalizer with a connected Liberty 4 Pro](live-a3954-equalizer.png)
 
 The **Equalizer** page: the A3954's own 22-preset catalog with Acoustic selected
-and the device's eight visible bands (4, 1, 2, 2, 4, 4, 4, 2 dB). The
-acceptance changed the preset to Rock and restored Acoustic; it did not run a
-custom-curve or HearID write.
+and the device's eight visible bands (4, 1, 2, 2, 4, 4, 4, 2 dB). The ticket-04
+acceptance changed the preset to Rock and restored Acoustic. The ticket-05
+review run additionally wrote a custom curve that differed from the connect
+curve, re-polled it as the custom id `0xFEFE` with the written visible bands,
+then restored the connect preset and re-polled it; the real device reports its
+left equalizer channel and no right channel, and the 114-byte bodies keep the
+HearID block verbatim. HearID editing is out of scope and was not done.
 
 ![Sound and effects with a connected Liberty 4 Pro](live-a3954-effects.png)
 
@@ -575,7 +585,9 @@ The **Sound and effects** page: LDAC, Spatial audio with the music-mode and
 effect-mode selects disabled with the device reason “Turn on spatial audio
 first”, sound leak compensation, and the page note that changing the equalizer
 turns spatial audio off. The acceptance toggled LDAC and spatial audio (enable,
-music mode, effect mode) and restored each.
+music mode, effect mode) and restored each. The English reason is controller
+data and is localized by the view (`LocalizedText.setting-reason`); the Russian
+UI shows “Сначала включите пространственный звук”.
 
 ![About with a connected Liberty 4 Pro](live-a3954-about.png)
 

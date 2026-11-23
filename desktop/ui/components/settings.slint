@@ -274,7 +274,7 @@ export component SettingRowView inherits Rectangle {
                 opacity: root.setting.enabled ? 1 : 0.55;
             }
             if root.setting.reason != "": Text {
-                text: root.setting.reason;
+                text: LocalizedText.setting-reason(root.setting.id, root.setting.reason);
                 color: Theme.muted;
                 font-size: Theme.font-small;
                 wrap: word-wrap;

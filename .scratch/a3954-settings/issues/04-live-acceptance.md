@@ -63,7 +63,8 @@ asserted by a second re-poll:
   reconnects);
 - case language English → Japanese → English (the `07 8A` language write has no
   page in this slice; it was exercised once because the re-poll confirms it and
-  it restored);
+  it restored. Ticket 05 removed the unused `07 8A` write API as out of scope;
+  the parsed state field stays read-only);
 - Connections: the read-only `0B 01` list returned **4 remembered devices with
   1 connected**, so the dual-connections toggle was **skipped** (turning it off
   would disconnect that other device), as required; only the list was read.
@@ -102,7 +103,11 @@ as `desktop/live-a3954-overview.png`, `...-sound-mode.png`, `...-equalizer.png`,
 **Deferred.** No custom equalizer curve write, no HearID change, no button
 remapping, no case-features/display write and no air-pressure write. The case
 language command has no page in this slice (its write was exercised only as the
-safe, restore-verified protocol check above).
+safe, restore-verified protocol check above; ticket 05 removed that unused write
+API as out of scope). Ticket 05 later added a hardware-proof custom-curve phase
+to the ignored test and ran it: the custom curve was written and re-polled as
+`0xFEFE`, then the connect preset was restored and re-polled (see
+`05-review.md`). HearID editing is still not done.
 
 ## Follow-up observation (outside this ticket's exercised path)
 
@@ -119,6 +124,15 @@ must tolerate the airplane-mode slider value instead of rejecting the state,
 with a captured frame as evidence; it is not changed here because the exact
 meaning of byte 13 is unmeasured and inventing a value would violate the
 parser's measured-offsets rule.
+
+**Resolved by ticket 05.** The A3954 sound-mode block is now optional
+(`A3954State::sound_mode: Option<A3954SoundMode>`): an unmeasured byte in the
+block makes only the block unavailable (`None`), while the rest of the `01 01`
+state parses and the connection stays usable. The controller hides the scale
+page and the Overview's sound-mode block in that state, and no `06 81` frame is
+derived without a measured block. A regression test uses the observed
+mode=3/slider=13 bytes; the byte's meaning is still unmeasured and no scale
+position is invented for it.
 
 ## Gates
 

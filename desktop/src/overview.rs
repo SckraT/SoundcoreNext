@@ -257,7 +257,16 @@ impl OverviewLayout {
 /// offered.
 pub fn supported(block: OverviewBlock, device: &DeviceState) -> bool {
     match block {
-        OverviewBlock::SoundMode => device.sound_mode.is_some() || device.a3954.is_some(),
+        // The A3954's sound-mode block is optional: an unmeasured value (the
+        // airplane-mode slider byte) hides the scale block instead of the whole
+        // page showing a control the device cannot drive.
+        OverviewBlock::SoundMode => {
+            device.sound_mode.is_some()
+                || device
+                    .a3954
+                    .as_ref()
+                    .is_some_and(|a3954| a3954.sound_mode.is_some())
+        }
         OverviewBlock::Equalizer => device.equalizer.is_some() || device.a3954.is_some(),
         OverviewBlock::QuickPresets | OverviewBlock::Case => false,
         OverviewBlock::Controls
