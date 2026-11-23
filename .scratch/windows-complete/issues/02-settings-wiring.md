@@ -5,7 +5,9 @@
 
 ## Goal
 
-Wire and persist every control on the Settings page.
+Wire and persist every control the Settings page offers. The 1–11 sound-mode view
+is deferred until a core model exposes that scale, so its control stays hidden
+rather than becoming a fake choice.
 
 ## Requirements
 
@@ -18,8 +20,8 @@ Wire and persist every control on the Settings page.
    - `Theme.dark`, `Theme.palette`, `Theme.content-scale`;
    - device art in the selected silver/black color through
      `catalog_adapter::art_in_color`, including the current device and cards;
-   - `app-mode-view-applies` and `one-earbud-badge-applies` from the connected
-     state;
+   - `app-mode-view-applies` (false until a core model exposes the 1–11 scale)
+     and `one-earbud-badge-applies` from the connected state;
    - `language-names` (Follow system + bundled languages) and `app-language`.
 4. Language: `slint::select_bundled_translation` with the chosen code or the
    system locale; update after window is shown; fallback English safely.
@@ -56,11 +58,15 @@ Wire and persist every control on the Settings page.
   with left/right batteries; the single-battery A3062 gets false), sets
   `show-one-earbud-badge`, and fills the notification-area fields through the
   existing `show_tray_settings`. `app-mode-view-applies` stays false: the clean
-  core has no 1–11 modes-scale control, so no connected device can use that view.
+  core has no 1–11 modes-scale control, so no connected device can use that
+  view. The 1–11 Sound-mode view is deferred until a core model exposes that
+  scale; the saved choice is still loaded for later, but the Settings control
+  remains hidden and no fake view is implemented.
 - Theme: `apply_theme(inner, dark)` resolves Follow system once with
   `settings::system_prefers_dark`, writes `Theme.dark`, `Theme.palette` (from the
-  saved accent) and `Theme.content-scale` (the saved 100/110/125 factor), and
-  repaints the current device, every saved card, the Add Device model list and
+  saved accent) and `Theme.content-scale` (the saved content-scale factor; the
+  150 % choice was added in ticket 06), and repaints the current device, every
+  saved card, the Add Device model list and
   the chosen-model confirmation picture through
   `catalog_adapter::form_factor`/`art_in_color`. A model the catalog does not know
   keeps the picture it has, and with no model the default art stays. The paths

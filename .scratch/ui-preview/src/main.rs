@@ -85,7 +85,10 @@ fn setting_row(id: &str, kind: RowKind, label: &str) -> SettingRow {
 }
 
 fn toggle_row(id: &str, label: &str, checked: bool) -> SettingRow {
-    SettingRow { checked, ..setting_row(id, RowKind::Toggle, label) }
+    SettingRow {
+        checked,
+        ..setting_row(id, RowKind::Toggle, label)
+    }
 }
 
 fn select_row(id: &str, label: &str, options: Vec<&str>, index: i32) -> SettingRow {
@@ -102,7 +105,10 @@ fn select_row(id: &str, label: &str, options: Vec<&str>, index: i32) -> SettingR
 }
 
 fn info_row(id: &str, label: &str, text: &str) -> SettingRow {
-    SettingRow { text: text.into(), ..setting_row(id, RowKind::Info, label) }
+    SettingRow {
+        text: text.into(),
+        ..setting_row(id, RowKind::Info, label)
+    }
 }
 
 fn panel(kind: PanelKind, rows: Vec<SettingRow>) -> SettingsPanel {
@@ -218,7 +224,6 @@ fn panels(page: Page) -> ModelRc<SettingsPanel> {
     ModelRc::new(VecModel::from(panels))
 }
 
-
 fn populate(ui: &AppWindow) {
     let state = ui.global::<AppState>();
     state.set_connection(Connection::Connected);
@@ -316,6 +321,97 @@ fn populate(ui: &AppWindow) {
     state.set_eq_band_count(8);
     state.set_eq_min_text("−12.0".into());
     state.set_eq_max_text("+13.4".into());
+    // The Equalizer and Presets pages are captured too: their wide/narrow
+    // breakpoints are part of the adaptive matrix.
+    state.set_eq_available(true);
+    state.set_eq_read_only(false);
+    state.set_eq_preset("Signature".into());
+    state.set_eq_preset_count(22);
+    state.set_eq_presets(ModelRc::new(VecModel::from(vec![
+        ModeOption {
+            value: "Signature".into(),
+            label: "Soundcore Signature".into(),
+        },
+        ModeOption {
+            value: "Acoustic".into(),
+            label: "Acoustic".into(),
+        },
+        ModeOption {
+            value: "Bass".into(),
+            label: "Bass Booster".into(),
+        },
+    ])));
+    state.set_eq_min(-12);
+    state.set_eq_max(13);
+    state.set_eq_bands(ModelRc::new(VecModel::from(
+        [
+            ("100", false, -4),
+            ("200", false, 3),
+            ("400", false, -2),
+            ("800", false, 6),
+            ("1.6", true, 1),
+            ("3.2", true, -3),
+            ("6.4", true, 2),
+            ("12.8", true, 5),
+        ]
+        .into_iter()
+        .map(|(frequency, khz, value)| EqBand {
+            frequency: frequency.into(),
+            khz,
+            value,
+            text: format!("{value:+.1}").into(),
+        })
+        .collect::<Vec<_>>(),
+    )));
+    state.set_eq_lines(ModelRc::new(VecModel::from(vec![
+        EqLine {
+            value: 13,
+            label: "+13.4".into(),
+        },
+        EqLine {
+            value: 0,
+            label: "0 dB".into(),
+        },
+        EqLine {
+            value: -12,
+            label: "−12.0".into(),
+        },
+    ])));
+    state.set_eq_chart_line("M 0 100 C 80 20 160 170 240 90 S 400 40 600 110".into());
+    state.set_eq_chart_area(
+        "M 0 100 C 80 20 160 170 240 90 S 400 40 600 110 L 600 200 L 0 200 Z".into(),
+    );
+    state.set_has_saved_profiles(true);
+    state.set_eq_profiles(ModelRc::new(VecModel::from(vec![EqProfile {
+        name: "Warm".into(),
+        curve: "M 0 50 C 80 10 160 85 240 45 S 400 20 600 55".into(),
+        bands: 8,
+        in_effect: true,
+        export: false,
+    }])));
+    state.set_preset_cards(ModelRc::new(VecModel::from(vec![
+        PresetCard {
+            name: "Work".into(),
+            status: 2,
+            fields: ModelRc::new(VecModel::from(vec![
+                SharedString::from("LDAC · on"),
+                SharedString::from("Dual connections · on"),
+            ])),
+            more: 1,
+            enabled_count: 3,
+            curve: "M 0 50 C 80 10 160 85 240 45 S 400 20 600 55".into(),
+        },
+        PresetCard {
+            name: "Night".into(),
+            status: 0,
+            fields: ModelRc::new(VecModel::from(vec![SharedString::from(
+                "Volume limit · on",
+            )])),
+            more: 0,
+            enabled_count: 1,
+            curve: "".into(),
+        },
+    ])));
     state.set_overview_rows(ModelRc::new(VecModel::from(vec![
         row(
             false,
@@ -446,6 +542,17 @@ fn configure(ui: &AppWindow, capture: &Capture) {
     ui.global::<Theme>().set_dark(capture.dark);
     let state = ui.global::<AppState>();
     state.set_page(capture.page);
+    // The Settings page's segmented control has to show the scale the capture
+    // renders with, or a 150 % capture would claim the 100 % choice is selected.
+    state.set_app_content_scale(if capture.scale >= 1.5 {
+        3
+    } else if capture.scale >= 1.25 {
+        2
+    } else if capture.scale >= 1.1 {
+        1
+    } else {
+        0
+    });
     state.set_panels(panels(capture.page));
     state.set_diagnostic_step(capture.diagnostic_step);
     state.set_editing_layout(matches!(capture.dialog, Dialog::Layout));
@@ -471,6 +578,8 @@ fn captures() -> Vec<Capture> {
             for (page, step, label) in [
                 (Page::Overview, DiagnosticStep::Device, "overview"),
                 (Page::Devices, DiagnosticStep::Device, "devices"),
+                (Page::Equalizer, DiagnosticStep::Device, "equalizer"),
+                (Page::Presets, DiagnosticStep::Device, "presets"),
                 (Page::Controls, DiagnosticStep::Device, "controls"),
                 (
                     Page::Diagnostics,

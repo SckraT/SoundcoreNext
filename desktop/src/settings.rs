@@ -146,6 +146,8 @@ pub enum ContentScale {
     Percent110,
     #[serde(rename = "125")]
     Percent125,
+    #[serde(rename = "150")]
+    Percent150,
 }
 
 impl ContentScale {
@@ -154,6 +156,7 @@ impl ContentScale {
             0 => Some(Self::Percent100),
             1 => Some(Self::Percent110),
             2 => Some(Self::Percent125),
+            3 => Some(Self::Percent150),
             _ => None,
         }
     }
@@ -163,6 +166,7 @@ impl ContentScale {
             Self::Percent100 => 0,
             Self::Percent110 => 1,
             Self::Percent125 => 2,
+            Self::Percent150 => 3,
         }
     }
 
@@ -171,6 +175,7 @@ impl ContentScale {
             Self::Percent100 => 1.0,
             Self::Percent110 => 1.1,
             Self::Percent125 => 1.25,
+            Self::Percent150 => 1.5,
         }
     }
 }
@@ -419,6 +424,8 @@ mod tests {
                 DeviceColor::from_index(index).map(DeviceColor::index),
                 Some(index)
             );
+        }
+        for index in 0..4 {
             assert_eq!(
                 ContentScale::from_index(index).map(ContentScale::index),
                 Some(index)
@@ -428,14 +435,35 @@ mod tests {
             assert_eq!(AppTheme::from_index(index), None);
             assert_eq!(Accent::from_index(index), None);
             assert_eq!(DeviceColor::from_index(index), None);
+        }
+        for index in [-1, 4, i32::MAX] {
             assert_eq!(ContentScale::from_index(index), None);
         }
         assert_eq!(SoundModeView::from_index(0), Some(SoundModeView::Tiles));
         assert_eq!(SoundModeView::from_index(1), Some(SoundModeView::Scale));
         assert_eq!(SoundModeView::from_index(-1), None);
         assert_eq!(SoundModeView::from_index(2), None);
+        assert_eq!(ContentScale::Percent100.factor(), 1.0);
         assert_eq!(ContentScale::Percent110.factor(), 1.1);
         assert_eq!(ContentScale::Percent125.factor(), 1.25);
+        assert_eq!(ContentScale::Percent150.factor(), 1.5);
+    }
+
+    #[test]
+    fn every_content_scale_is_its_percent_string_in_the_document() {
+        for (scale, text) in [
+            (ContentScale::Percent100, "100"),
+            (ContentScale::Percent110, "110"),
+            (ContentScale::Percent125, "125"),
+            (ContentScale::Percent150, "150"),
+        ] {
+            let document = format!("\"{text}\"");
+            assert_eq!(serde_json::to_string(&scale).unwrap(), document);
+            assert_eq!(
+                serde_json::from_str::<ContentScale>(&document).unwrap(),
+                scale
+            );
+        }
     }
 
     #[test]
@@ -516,7 +544,7 @@ mod tests {
             },
             theme: AppTheme::Dark,
             accent: Accent::Rose,
-            content_scale: ContentScale::Percent125,
+            content_scale: ContentScale::Percent150,
             device_color: DeviceColor::Black,
             sound_mode_view: SoundModeView::Scale,
             one_earbud_badge: false,
@@ -527,7 +555,7 @@ mod tests {
         let json = fs::read_to_string(&path).unwrap();
         assert!(json.contains("\"icon\": false"), "tray fields stay flat");
         assert!(json.contains("\"theme\": \"dark\""));
-        assert!(json.contains("\"contentScale\": \"125\""));
+        assert!(json.contains("\"contentScale\": \"150\""));
         assert!(!std::path::PathBuf::from(format!("{}.tmp", path.display())).exists());
         let _ = fs::remove_file(path);
     }

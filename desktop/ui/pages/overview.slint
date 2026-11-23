@@ -98,6 +98,7 @@ component DeviceIdentity inherits HorizontalLayout {
     in property <bool> compact;
     spacing: root.compact ? Theme.space-3 : Theme.space-4;
     horizontal-stretch: 1;
+    cross-axis-alignment: center;
     Image {
         source: AppState.device-art;
         width: root.compact ? 72px * Theme.content-scale : 96px * Theme.content-scale;
@@ -106,7 +107,7 @@ component DeviceIdentity inherits HorizontalLayout {
     }
     VerticalLayout {
         alignment: center;
-        spacing: 6px * Theme.content-scale;
+        spacing: Theme.space-2;
         horizontal-stretch: 1;
         Text {
             text: "SOUNDCORE · " + AppState.device-code;
@@ -127,19 +128,19 @@ component DeviceIdentity inherits HorizontalLayout {
         HorizontalLayout {
             spacing: Theme.space-2;
             alignment: start;
+            cross-axis-alignment: center;
             Rectangle {
                 border-radius: Theme.radius-control;
                 background: Theme.on-sage.transparentize(91%);
-                height: 24px * Theme.content-scale;
+                height: Theme.space-6;
                 HorizontalLayout {
-                    padding-left: 9px;
-                    padding-right: 9px;
-                    spacing: 6px;
+                    padding-left: Theme.space-2;
+                    padding-right: Theme.space-2;
+                    spacing: Theme.space-1;
                     Rectangle {
-                        width: 6px;
-                        height: 6px;
-                        y: (parent.height - self.height) / 2;
-                        border-radius: 3px;
+                        width: Theme.space-2;
+                        height: Theme.space-2;
+                        border-radius: self.width / 2;
                         background: Theme.green;
                     }
                     Text {
@@ -153,10 +154,10 @@ component DeviceIdentity inherits HorizontalLayout {
             if AppState.one-earbud && AppState.show-one-earbud-badge: Rectangle {
                 border-radius: Theme.radius-control;
                 background: Theme.pink;
-                height: 24px * Theme.content-scale;
+                height: Theme.space-6;
                 HorizontalLayout {
-                    padding-left: 9px;
-                    padding-right: 9px;
+                    padding-left: Theme.space-2;
+                    padding-right: Theme.space-2;
                     Text {
                         text: @tr("1 earbud");
                         color: Theme.on-pink;
