@@ -108,6 +108,14 @@ Run the same relevant check/clippy/test sequence from `core` when shared session
 protocol or model behavior changes. The repository root has no Cargo workspace
 manifest; run each crate tree explicitly.
 
+### Full Russian screenshot matrix
+
+For a reviewable Windows matrix, use `tools/ui-capture/capture-ui.ps1`. It
+launches the app in an isolated profile, connects the demo A3062, captures every
+page and the core dialogs at 100/110/125/150 % in both themes, and generates
+`index.html` plus contact sheets grouped by theme×scale, page and feature area.
+It verifies that every `@tr` string has a Russian translation first and fails
+the capture if the window is not in Russian. See `tools/ui-capture/README.md`.
 ### Visual matrix
 
 The preview harness lives in `.scratch/ui-preview`. From that directory:

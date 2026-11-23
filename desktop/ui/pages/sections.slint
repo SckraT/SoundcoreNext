@@ -1,5 +1,6 @@
 // The device's section pages: the heading, the settings in panels, and on the side what helps to read them.
 import { Theme } from "../theme.slint";
+import { LocalizedText } from "../components/localized.slint";
 import { Icons } from "../icons.slint";
 import { AppState, Actions, ControlSide, Page, SystemPage } from "../types.slint";
 import { Icon, Button, ButtonKind, Panel, PanelHeading, Note } from "../components/basics.slint";
@@ -200,17 +201,17 @@ component AsideColumn inherits VerticalLayout {
             spacing: 13px;
             Tip {
                 icon: Icons.noise;
-                title: AppState.noise-canceling-label;
+                title: LocalizedText.option(AppState.noise-canceling-label);
                 text: @tr("Lowers the noise around you.");
             }
             Tip {
                 icon: Icons.ear;
-                title: AppState.transparency-label;
+                title: LocalizedText.option(AppState.transparency-label);
                 text: @tr("Keeps the sounds around you audible.");
             }
             Tip {
                 icon: Icons.headphones;
-                title: AppState.normal-label;
+                title: LocalizedText.option(AppState.normal-label);
                 text: @tr("No processing of ambient sound.");
             }
         }

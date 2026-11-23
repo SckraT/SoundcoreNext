@@ -1133,3 +1133,268 @@ msgstr "Рабочий стол и быстрый доступ"
 
 msgid "The notification area icon is unavailable. Closing the window quits the app."
 msgstr "Значок в области уведомлений недоступен. Закрытие окна завершит приложение."
+
+# --- Added for the current Windows client screens/UX -------------------------
+
+msgid "{}"
+msgstr "{}"
+
+msgid "{} frames"
+msgstr "{} кадров"
+
+msgid "{} of 3"
+msgstr "{} из 3"
+
+msgid "{} of 3 probes"
+msgstr "{} из 3 проб"
+
+msgid "Add quick settings"
+msgstr "Добавить быстрые настройки"
+
+msgid "archive"
+msgstr "архив"
+
+msgid "Archive contents"
+msgstr "Содержимое архива"
+
+msgid "Back to settings"
+msgstr "Назад в настройки"
+
+msgid "Capture"
+msgstr "Сбор"
+
+msgid "Capture finished."
+msgstr "Сбор завершён."
+
+msgid "Capturing diagnostics"
+msgstr "Сбор диагностики"
+
+msgid "Capturing…"
+msgstr "Идёт сбор…"
+
+msgid "Choose quick settings"
+msgstr "Выбор быстрых настроек"
+
+msgid "Choose the switches in Quick settings. The settings themselves do not change."
+msgstr "Выберите переключатели в «Быстрых настройках». Сами настройки устройства не меняются."
+
+msgid "Collect read-only answers, a local ZIP and a prefilled issue."
+msgstr "Собирает ответы только для чтения, локальный ZIP и заполненный issue."
+
+msgid "Collect safe answers."
+msgstr "Безопасный сбор ответов."
+
+msgid "Connected · Demo device"
+msgstr "Подключено · Демо-устройство"
+
+msgid "Device, probes and redaction flags"
+msgstr "Устройство, пробы и флаги редактирования"
+
+msgid "Disconnect"
+msgstr "Отключить"
+
+msgid "Do not include personal information or your serial number."
+msgstr "Не добавляйте личные данные или серийный номер."
+
+msgid "Every tx/rx frame, one JSON object per line"
+msgstr "Каждый кадр tx/rx, по одному JSON-объекту на строку"
+
+msgid "Failed"
+msgstr "Ошибка"
+
+msgid "frames"
+msgstr "кадры"
+
+msgid "How to attach and read the archive"
+msgstr "Как приложить и прочитать архив"
+
+msgid "included"
+msgstr "включено"
+
+msgid "Keep the device nearby and connected. This can take up to a minute."
+msgstr "Держите устройство рядом и подключённым. Это может занять до минуты."
+
+msgid "No device connected. Connect a Soundcore device from My devices, then return here to collect read-only answers."
+msgstr "Нет подключённого устройства. Подключите устройство Soundcore в «Моих устройствах» и вернитесь сюда для сбора ответов только для чтения."
+
+msgid "Not run"
+msgstr "Не выполнялось"
+
+msgid "Open diagnostics"
+msgstr "Открыть диагностику"
+
+msgid "Open GitHub issue"
+msgstr "Открыть issue на GitHub"
+
+msgid "Open issue again"
+msgstr "Открыть issue снова"
+
+msgid "Open My devices"
+msgstr "Открыть «Мои устройства»"
+
+msgid "Optional note"
+msgstr "Необязательная заметка"
+
+msgid "Pending"
+msgstr "Ожидание"
+
+msgid "Preset name"
+msgstr "Название пресета"
+
+msgid "Privacy"
+msgstr "Конфиденциальность"
+
+msgid "probes answered"
+msgstr "проб выполнено"
+
+msgid "Profile name"
+msgstr "Название профиля"
+
+msgid "Quick settings"
+msgstr "Быстрые настройки"
+
+msgid "Read-only answers, a local ZIP and a prefilled issue."
+msgstr "Ответы только для чтения, локальный ZIP и заполненный issue."
+
+msgid "Read-only by design. Missing answers are recorded as timeouts; no setting is changed on the device."
+msgstr "Только чтение. Отсутствие ответа фиксируется как таймаут; настройки устройства не меняются."
+
+msgid "Report ready"
+msgstr "Отчёт готов"
+
+msgid "Review"
+msgstr "Проверка"
+
+msgid "Review before sharing"
+msgstr "Проверьте перед отправкой"
+
+msgid "Review results"
+msgstr "Проверить результаты"
+
+msgid "Save ZIP"
+msgstr "Сохранить ZIP"
+
+msgid "Search models"
+msgstr "Поиск моделей"
+
+msgid "Serial numbers and Bluetooth addresses are redacted by the core exporter."
+msgstr "Серийные номера и Bluetooth-адреса вырезаются экспортёром ядра."
+
+msgid "Serial numbers and Bluetooth addresses are removed before the archive is written. The app never uploads anything."
+msgstr "Серийные номера и Bluetooth-адреса удаляются до записи архива. Приложение ничего не загружает автоматически."
+
+msgid "Start capture"
+msgstr "Начать сбор"
+
+msgid "Succeeded"
+msgstr "Успешно"
+
+msgid "The archive is built locally. Save it and attach it to the GitHub issue yourself — nothing is uploaded automatically."
+msgstr "Архив создаётся локально. Сохраните его и приложите к issue на GitHub самостоятельно — ничего не загружается автоматически."
+
+msgid "The archive was saved locally. Open the prefilled issue and attach the ZIP to send it."
+msgstr "Архив сохранён локально. Откройте заполненный issue и приложите ZIP для отправки."
+
+msgid "The issue is triaged and labelled device-diagnostics. Support is not promised for every model; the log is the first step."
+msgstr "Issue будет рассмотрен и помечен device-diagnostics. Поддержка не гарантируется для каждой модели; лог — первый шаг."
+
+msgid "Three read-only probes — state, battery and charging. The archive also keeps the frames exchanged during the capture."
+msgstr "Три пробы только для чтения — состояние, заряд и зарядка. В архив также попадают кадры, обменянные во время сбора."
+
+msgid "timeouts"
+msgstr "таймауты"
+
+msgid "What happens next"
+msgstr "Что будет дальше"
+
+msgid "What we collect"
+msgstr "Что собираем"
+
+msgid "What were you doing when the problem happened?"
+msgstr "Что вы делали, когда возникла проблема?"
+
+# --- Device-model labels shown as setting rows and options -------------------
+
+msgid "1 minute"
+msgstr "1 минута"
+
+msgid "10 seconds"
+msgstr "10 секунд"
+
+msgid "120 minutes"
+msgstr "120 минут"
+
+msgid "30 minutes"
+msgstr "30 минут"
+
+msgid "60 minutes"
+msgstr "60 минут"
+
+msgid "90 minutes"
+msgstr "90 минут"
+
+msgid "Airplane mode"
+msgstr "Авиарежим"
+
+msgid "Ambient sound mode"
+msgstr "Режим окружающего звука"
+
+msgid "Auto power off"
+msgstr "Автоотключение"
+
+msgid "Bass up"
+msgstr "Больше баса"
+
+msgid "Battery level"
+msgstr "Уровень заряда"
+
+msgid "Charging"
+msgstr "Заряжается"
+
+msgid "dB limit"
+msgstr "Предел дБ"
+
+msgid "Disabled"
+msgstr "Выключено"
+
+msgid "Dolby audio"
+msgstr "Dolby Audio"
+
+msgid "Dual connections"
+msgstr "Два подключения"
+
+msgid "Firmware version"
+msgstr "Версия прошивки"
+
+msgid "Is charging"
+msgstr "Зарядка"
+
+msgid "LDAC"
+msgstr "LDAC"
+
+msgid "Limit high volume"
+msgstr "Ограничение громкости"
+
+msgid "Low battery prompt"
+msgstr "Оповещение о низком заряде"
+
+msgid "None"
+msgstr "Нет"
+
+msgid "Not charging"
+msgstr "Не заряжается"
+
+msgid "Real time"
+msgstr "В реальном времени"
+
+msgid "Refresh rate"
+msgstr "Частота обновления"
+
+msgid "Side tone"
+msgstr "Боковой тон"
+
+msgid "Unknown device"
+msgstr "Неизвестное устройство"
+
+msgid "Voice prompt"
+msgstr "Голосовые подсказки"

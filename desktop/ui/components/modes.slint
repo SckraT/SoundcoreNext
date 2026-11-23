@@ -4,6 +4,7 @@ import { Icons } from "../icons.slint";
 import { AppState, Actions, ModeOption, RowKind, SettingRow } from "../types.slint";
 import { Icon, Chip, Panel, PanelHeading } from "basics.slint";
 import { RangeSlider, Segmented, SettingText } from "settings.slint";
+import { LocalizedText } from "localized.slint";
 
 export global ModeText {
     public pure function icon(value: string) -> image {
@@ -14,10 +15,10 @@ export global ModeText {
     }
 
     public pure function position(position: int) -> string {
-        if position == 0 { return AppState.airplane-label; }
+        if position == 0 { return @tr("Airplane mode"); }
         if position < 6 { return @tr("Transparency, strength {}", 6 - position); }
         if position > 6 { return @tr("Noise canceling, strength {}", position - 6); }
-        return AppState.normal-label;
+        return LocalizedText.option(AppState.normal-label);
     }
 }
 
@@ -29,7 +30,7 @@ component ModeTile inherits Rectangle {
     border-radius: 17px;
     background: selected ? Theme.primary : touch.has-hover ? Theme.high : Theme.container;
     accessible-role: button;
-    accessible-label: mode.label;
+    accessible-label: LocalizedText.mode-label(mode.value, mode.label);
     accessible-checkable: true;
     accessible-checked: selected;
     accessible-action-default => { Actions.set-option("ambientSoundMode", index); }
@@ -53,7 +54,7 @@ component ModeTile inherits Rectangle {
         x: 14px;
         y: parent.height - self.height - 13px;
         width: parent.width - 28px;
-        text: root.mode.label;
+        text: LocalizedText.mode-label(root.mode.value, root.mode.label);
         color: root.selected ? Theme.on-primary : Theme.text;
         font-size: root.compact ? 12px : 13px;
         wrap: word-wrap;
@@ -128,20 +129,20 @@ export component ModeScale inherits VerticalLayout {
     }
     HorizontalLayout {
         Text {
-            text: AppState.transparency-label;
+            text: LocalizedText.option(AppState.transparency-label);
             color: Theme.muted;
             font-size: 11px;
             horizontal-stretch: 1;
         }
         Text {
-            text: AppState.normal-label;
+            text: LocalizedText.option(AppState.normal-label);
             color: Theme.muted;
             font-size: 11px;
             horizontal-alignment: center;
             horizontal-stretch: 1;
         }
         Text {
-            text: AppState.noise-canceling-label;
+            text: LocalizedText.option(AppState.noise-canceling-label);
             color: Theme.muted;
             font-size: 11px;
             horizontal-alignment: right;

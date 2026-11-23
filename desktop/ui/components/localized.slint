@@ -1,0 +1,58 @@
+// Translations for the names and values that come from the device model rather
+// than from static Slint text. Keeping them here means the UI can localize a
+// setting row without changing the protocol ids or the Rust model.
+export global LocalizedText {
+    public pure function setting-label(id: string, fallback: string) -> string {
+        if id == "singlePress" { return @tr("Single press"); }
+        if id == "doublePress" { return @tr("Double press"); }
+        if id == "sideTone" { return @tr("Side tone"); }
+        if id == "limitHighVolume" { return @tr("Limit high volume"); }
+        if id == "limitHighVolumeDbLimit" { return @tr("dB limit"); }
+        if id == "limitHighVolumeRefreshRate" { return @tr("Refresh rate"); }
+        if id == "autoPowerOff" { return @tr("Auto power off"); }
+        if id == "lowBatteryPrompt" { return @tr("Low battery prompt"); }
+        if id == "voicePrompt" { return @tr("Voice prompt"); }
+        if id == "dualConnections" { return @tr("Dual connections"); }
+        if id == "ldac" { return @tr("LDAC"); }
+        if id == "dolbyAudio" { return @tr("Dolby audio"); }
+        if id == "dualDevices" { return @tr("Paired devices"); }
+        if id == "isCharging" { return @tr("Is charging"); }
+        if id == "batteryLevel" { return @tr("Battery level"); }
+        if id == "firmwareVersion" { return @tr("Firmware version"); }
+        return fallback;
+    }
+
+    public pure function setting-text(id: string, fallback: string) -> string {
+        if id == "singlePress" { return @tr("Ambient sound mode"); }
+        if id == "isCharging" {
+            return fallback == "Charging" ? @tr("Charging") : @tr("Not charging");
+        }
+        return fallback;
+    }
+
+    public pure function option(value: string) -> string {
+        if value == "None" { return @tr("None"); }
+        if value == "Bass Up" { return @tr("Bass up"); }
+        if value == "Disabled" { return @tr("Disabled"); }
+        if value == "30 minutes" { return @tr("30 minutes"); }
+        if value == "60 minutes" { return @tr("60 minutes"); }
+        if value == "90 minutes" { return @tr("90 minutes"); }
+        if value == "120 minutes" { return @tr("120 minutes"); }
+        if value == "Real time" { return @tr("Real time"); }
+        if value == "10 seconds" { return @tr("10 seconds"); }
+        if value == "1 minute" { return @tr("1 minute"); }
+        if value == "Unknown device" { return @tr("Unknown device"); }
+        if value == "Noise canceling" { return @tr("Noise canceling"); }
+        if value == "Transparency" { return @tr("Transparency"); }
+        if value == "Normal" { return @tr("Normal"); }
+        return value;
+    }
+
+    public pure function mode-label(value: string, fallback: string) -> string {
+        if value == "NoiseCanceling" { return @tr("Noise canceling"); }
+        if value == "Transparency" { return @tr("Transparency"); }
+        if value == "Normal" { return @tr("Normal"); }
+        if value == "AirplaneMode" { return @tr("Airplane mode"); }
+        return fallback;
+    }
+}
