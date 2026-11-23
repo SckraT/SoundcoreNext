@@ -79,6 +79,23 @@ visual language. It does not introduce a third-party UI framework.
   including accessible labels and the existing edited/accepted behavior.
 - `components/settings.slint`: action and dual-connection row controls use layout
   alignment instead of manual child `y` coordinates managed by the parent.
+- Accessibility state coverage: `Button`, `Chip`, `Toggle`, `CheckRow`,
+  `RangeSlider`, the `Segmented` options, the Settings palette `Swatch`, the
+  `Select` popup rows and the sound-mode tiles now bind `accessible-enabled`
+  and/or `accessible-checkable` next to their existing labels and checked state.
+  Slint only exposes a disabled state when it is bound, and only exposes a
+  checked state on an item marked checkable, so without these bindings an
+  assistive-technology client saw disabled actions as available and switches,
+  check rows and selected options as stateless. No visual, callback or device
+  behavior changed.
+- `app.slint`: the section (device-settings) pages choose their two-column
+  arrangement with `860px * Theme.content-scale`, like the Overview and
+  Diagnostics, so a raised content scale stacks the aside instead of squeezing
+  the main column.
+- `components/settings.slint`: a dual-connections list row's remembered-device
+  name elides (with `min-width: 0px`) before the Connect/Disconnect/Forget
+  actions, so a long name or a large content scale cannot push an action out of
+  the panel. No callback or device behavior changed.
 - `pages/devices.slint`: the connected saved-device card adds a non-destructive
   Disconnect ghost action beside Open; the card remains available for reconnect.
 - `UI_KIT.md`: records the reusable component, state, responsive, persistence

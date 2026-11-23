@@ -96,7 +96,9 @@ export component AppWindow inherits Window {
                     }
                     if root.device-page && (AppState.connection == Connection.connected || AppState.connection == Connection.recovering) && !root.own-page: SectionPage {
                         page: AppState.page;
-                        wide: root.width - sidebar.width > 860px;
+                        // The aside is a second column, so it needs the same scaled
+                        // room as the Overview: below this width the page stacks.
+                        wide: root.width - sidebar.width > 860px * Theme.content-scale;
                     }
                     if AppState.page == Page.settings: SettingsPage {
                         wide: root.width - sidebar.width > 900px;

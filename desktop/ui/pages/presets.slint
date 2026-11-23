@@ -276,6 +276,7 @@ component FieldRowView inherits Rectangle {
     background: touch.has-hover ? Theme.hover : transparent;
     accessible-role: checkbox;
     accessible-label: field.label;
+    accessible-checkable: true;
     accessible-checked: field.enabled;
     accessible-action-default => { Actions.preset-toggle(AppState.editing-preset, field.id, !field.enabled); }
     touch := TouchArea {

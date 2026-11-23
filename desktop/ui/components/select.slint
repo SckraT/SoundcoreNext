@@ -146,6 +146,7 @@ export component Select inherits Rectangle {
                         background: option-touch.has-hover || index == root.highlighted ? Theme.hover : transparent;
                         accessible-role: button;
                         accessible-label: value;
+                        accessible-checkable: true;
                         accessible-checked: index == root.current-index;
                         accessible-action-default => {
                             root.choose(index);

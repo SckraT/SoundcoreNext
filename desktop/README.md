@@ -10,7 +10,11 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
 
 ## Status
 
-- The shell compiles and opens; the window title still says OpenSCL4.
+- The Windows shell runs against the committed UI kit. With no Bluetooth
+  hardware at all, the app can still be exercised end to end through the
+  built-in **Demo mode** (see below): every page, Settings choice, Overview
+  preference and notification-area switch is reachable and persists, while all
+  device data stays simulated.
 - The app is built as crate version `2.0.0`, and `AppState.app-version` is
   filled from that crate version, so the About section says
   “OpenSCL4 2.0.0”.
@@ -152,21 +156,22 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   `0B` frame and keeps the Connections page without the list.
 - **Demo mode** is available in the Add Device dialog's paired-device step: switching
   it on replaces the Windows paired-device list with one simulated Space One Pro
-  (A3062, address `00:00:00:00:00:01`, name “soundcore Space One Pro · Demo”).
-  Connecting to it needs no pairing, no RFCOMM link and no device worker: the state
-  is parsed from the committed sanitized A3062 capture
+  (A3062, a neutral all-zero placeholder address, name “soundcore Space One Pro · Demo”).
+  Connecting to it needs no pairing, no RFCOMM link, no session and no Windows
+  device lookup: the state is parsed from the committed sanitized A3062 capture
   (`core/data/a3062-state.json`), and every page and control is served on the same
   event and command path a real device uses, so the UI wiring is the same. Sound
   mode, equalizer presets, custom bands, the settings rows and the
   dual-connections list update only the simulated state; the app never writes a
   frame, never looks up a Windows device for it and never produces diagnostics from
   it. The Diagnostics page is marked unavailable with a demo-mode explanation
-  because there is no radio to probe. My Devices keeps the card marked
-  “Demo device”, and Disconnect / Connect work without hardware; each connect
-  starts from the captured state again, so demo writes do not persist
-  (demo-only behaviour). Demo mode is offered for the Space One Pro only, the one
-  model with a committed demo capture; choosing another model keeps the real
-  paired-device list and says demo data is not available.
+  because there is no radio to probe. My Devices keeps the saved demo card —
+  marked “Demo device · Not connected” while disconnected — and Disconnect /
+  Connect work without hardware; each connect starts from the captured state
+  again, so demo writes do not persist (demo-only behaviour). Demo mode is offered
+  for the Space One Pro only, the one model with a committed demo capture;
+  choosing another model keeps the real paired-device list and says demo data is
+  not available.
 - The **notification-area tray** uses the vendored `ui/tray.slint` component and
   Slint's Windows `SystemTrayIcon`: the OpenSCL4 icon with a tooltip naming the
   device and, while connected, its battery (“OpenSCL4 · soundcore Space One Pro”
@@ -186,6 +191,30 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   profiles. They load before the icon is created; missing fields use defaults,
   missing/malformed files start safely, and saves use a flushed temporary file
   and rename.
+- The **Settings** page owns the app's own appearance, language and quick access.
+  **Theme** is Follow system, Light or Dark: Follow system resolves Windows' app
+  mode once the native window exists, keeps re-reading it while it is chosen and
+  follows a system light/dark switch without a restart. **Palette** chooses the
+  Purple, Sage or Rose accent, **Content scale** sets 100 %, 110 % or 125 %
+  (theme tokens already include it) and **Device color in pictures** draws the
+  current device, every saved card, the Add Device model list and the chosen
+  model as the theme's color, Silver or Black. **App language** offers Follow
+  system plus the 16 bundled languages by their own names; the choice is applied
+  to the running window immediately and a code Slint does not bundle falls back
+  to English instead of failing. **Copy logs** puts the recent application log
+  lines on the Windows clipboard (a clipboard failure is logged, not fatal).
+  Controls the connected device cannot use are not offered: the one-earbud badge
+  needs a TWS pair (the single-battery A3062 never shows it) and the sound-mode
+  view choice needs a device whose core reports the 1–11 scale (the A3062 has
+  only its three modes). Every choice applies to the running window at once and
+  is saved through the same flushed temporary file and rename into
+  `%APPDATA%\OpenSCL4\desktop-preferences.json`, the one document that also
+  holds the notification-area choices. On the next start the saved theme,
+  palette, content scale, art color, language, badge and tray choices come back;
+  a missing or malformed document starts from the defaults. The bundled
+  translation documents predate the Diagnostics panel and the Demo-mode copy, so
+  those few newer strings are shown in English in every language; the language
+  choice itself is applied to the whole window.
 - The P20i (A3949) equalizer is deliberately deferred in this slice: the
   committed A3949 state carries an equalizer block at body 32..44, but no A3949
   `03 87` write body is verified, so the page stays hidden and no equalizer
@@ -253,6 +282,42 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   lights or alarms page and this shell does not implement them.
 
 ## Screenshots
+
+The real-device captures in this section were taken during the earlier RFCOMM
+acceptance slices. The three Demo-mode captures come from the current build with
+no Bluetooth hardware: their device values are simulated, so they document the
+interface only and are not a hardware-acceptance result. No Bluetooth address or
+serial number appears in any of them.
+
+![Demo mode Overview](demo-overview.png)
+
+The Overview of the **simulated** Space One Pro (A3062) in Demo mode, captured
+from the running app on Windows. The hero names the simulated device
+(“soundcore Space One Pro · Demo”) and shows the capture's battery (20 %), the
+Quick settings panel holds the saved LDAC chip, the Sound mode and Your sound
+panels follow the simulated state, and the four shortcut cards are the saved
+Standard layout. Every value is parsed from the sanitized committed A3062
+capture; no RFCOMM link is opened, no session or device worker exists and no
+frame is written anywhere.
+
+![Demo mode Diagnostics](demo-diagnostics.png)
+
+The Diagnostics page after a Demo-mode connect. The banner says “Demo mode cannot
+collect diagnostics. No probes are run and no archive is written.”, **Start
+capture** is disabled, and no **Save ZIP** or **Open GitHub issue** action is
+offered, because a simulated device has no radio to probe. The page still shows
+the device summary it last read (A3062, firmware 04.39, battery 20 %); nothing
+was captured or written.
+
+![Settings](demo-settings.png)
+
+The **Settings** page from the running demo app. Every appearance choice has been
+applied and saved: Light theme (Follow system/Light/Dark works the same way),
+Purple palette, 100 % content scale, As the theme device color, English language,
+the notification-area icon and its sections, and Quick presets off. The
+one-earbud badge switch and the sound-mode view choice are absent because the
+connected A3062 is a single-battery, three-mode device. These choices live in
+`%APPDATA%\OpenSCL4\desktop-preferences.json` and come back after a restart.
 
 ![Tray menu with a connected Space One Pro](tray.png)
 
