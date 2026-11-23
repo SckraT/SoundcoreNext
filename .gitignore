@@ -20,3 +20,5 @@ local.properties
 .scratch/reference-*/
 .scratch/feedback/
 /dist/
+# Generated UI screenshot runs
+/artifacts/ui-screenshots/

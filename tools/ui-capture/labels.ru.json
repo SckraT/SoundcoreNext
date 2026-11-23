@@ -1,0 +1,137 @@
+{
+  "language": "ru",
+  "themeLabels": {
+    "light": "Светлая",
+    "dark": "Тёмная"
+  },
+  "pages": [
+    {
+      "id": "devices",
+      "label": "Мои устройства",
+      "area": "app",
+      "flow": 0
+    },
+    {
+      "id": "overview",
+      "label": "Обзор",
+      "area": "app",
+      "flow": 2
+    },
+    {
+      "id": "sound",
+      "label": "Режим звука",
+      "area": "sound",
+      "flow": 3
+    },
+    {
+      "id": "equalizer",
+      "label": "Эквалайзер",
+      "area": "sound",
+      "flow": 4
+    },
+    {
+      "id": "effects",
+      "label": "Звук и эффекты",
+      "area": "sound",
+      "flow": 5
+    },
+    {
+      "id": "controls",
+      "label": "Управление",
+      "area": "device",
+      "flow": 6
+    },
+    {
+      "id": "comfort",
+      "label": "Комфорт",
+      "area": "device",
+      "flow": 7
+    },
+    {
+      "id": "power",
+      "label": "Питание и подсказки",
+      "area": "device",
+      "flow": 8
+    },
+    {
+      "id": "connections",
+      "label": "Подключения",
+      "area": "device",
+      "flow": 9
+    },
+    {
+      "id": "about",
+      "label": "Об устройстве",
+      "area": "device",
+      "flow": 10
+    },
+    {
+      "id": "diagnostics",
+      "label": "Диагностика",
+      "area": "app",
+      "flow": 1
+    },
+    {
+      "id": "settings",
+      "label": "Настройки",
+      "area": "app",
+      "flow": 11
+    }
+  ],
+  "areas": {
+    "app": "Приложение и обзор",
+    "sound": "Звук",
+    "device": "Устройство",
+    "dialogs": "Диалоги"
+  },
+  "dialogs": [
+    {
+      "id": "add-model",
+      "label": "Добавление: выбор модели",
+      "area": "dialogs",
+      "flow": 1
+    },
+    {
+      "id": "add-demo",
+      "label": "Добавление: деморежим",
+      "area": "dialogs",
+      "flow": 2
+    },
+    {
+      "id": "layout",
+      "label": "Редактор главного экрана",
+      "area": "dialogs",
+      "flow": 3
+    },
+    {
+      "id": "quick-toggles",
+      "label": "Быстрые настройки",
+      "area": "dialogs",
+      "flow": 4
+    },
+    {
+      "id": "save-profile",
+      "label": "Сохранение профиля",
+      "area": "dialogs",
+      "flow": 5
+    },
+    {
+      "id": "import-profiles",
+      "label": "Импорт профилей",
+      "area": "dialogs",
+      "flow": 6
+    }
+  ],
+  "buttons": {
+    "addDevice": "Добавить устройство",
+    "demoMode": "Деморежим",
+    "demoDevice": "soundcore Space One Pro · Demo",
+    "editLayout": "Изменить главный экран",
+    "addQuickSettings": "Добавить быстрые настройки",
+    "saveProfile": "Сохранить профиль",
+    "paste": "Вставить",
+    "close": "Закрыть",
+    "cancel": "Отменить",
+    "chooseQuickSettings": "Выбор быстрых настроек"
+  }
+}

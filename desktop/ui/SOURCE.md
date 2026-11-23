@@ -129,3 +129,18 @@ Overview preferences and the separate desktop/tray preferences documents do not
 contain device state. The desktop controller restores tray choices before icon
 creation and performs serial read-only idle heartbeats without automatic
 reconnect. No hardware acceptance claim is implied by this source record.
+
+- `components/localized.slint` (screenshot-tool follow-up): the setting-row names,
+  option values, About values and sound-mode names that the Rust model supplies
+  as English data are translated in the UI layer through `LocalizedText`, keyed
+  by the stable setting id or protocol value. This keeps protocol identifiers
+  and the Rust command tables untouched while letting the Russian UI show
+  `Однократное нажатие`, `Шумоподавление`, `Прошивка` and similar. `Select`
+  translates only values it knows, so native language names in Settings remain
+  in their own language. The Diagnostics demo banner, status and firmware/battery
+  meta line are localized in the controller because they are composed from live
+  values.
+- `tools/ui-capture/` (outside the vendored tree): a reusable PowerShell + UIA
+  capture runner and Pillow contact-sheet tool for the Russian demo matrix. It
+  does not change the UI; `desktop/translations/ru/...po` gained the strings the
+  screens exposed as untranslated.

@@ -3390,7 +3390,8 @@ fn drain_events(inner: &Rc<Inner>) {
                         // and say why, after the card was filled.
                         let state = window.global::<AppState>();
                         state.set_diagnostic_available(false);
-                        state.set_diagnostic_error(demo::DEMO_DIAGNOSTICS_UNAVAILABLE.into());
+                        let language = inner.settings.borrow().language.clone().unwrap_or_default();
+                        state.set_diagnostic_error(demo::diagnostics_unavailable(&language).into());
                     }
                     // A connected A3062 shows the Saved profiles panel, so the
                     // loaded rows and their Applied tags are filled here.
@@ -4632,7 +4633,7 @@ fn apply_outcome(window: &AppWindow, inner: &Rc<Inner>, outcome: ConnectOutcome)
             );
             show_device_pages(&state, has_settings);
             show_equalizer(&state, &equalizer);
-            show_diagnostics_device(&state, model, &device_state);
+            show_diagnostics_device(&state, model, &device_state, inner);
             state.set_connection(Connection::Connected);
             state.set_connection_reason("".into());
             state.set_failure_kind(FailureKind::None);
@@ -4684,7 +4685,12 @@ fn apply_connection_lost(inner: &Rc<Inner>, state: &AppState<'_>, failure: Conne
 /// Fills the diagnostics card for a connected model. The page keeps the last
 /// capture while the device stays connected; a new connection starts at the
 /// Device step again.
-fn show_diagnostics_device(state: &AppState<'_>, model: DeviceModel, device_state: &DeviceState) {
+fn show_diagnostics_device(
+    state: &AppState<'_>,
+    model: DeviceModel,
+    device_state: &DeviceState,
+    inner: &Rc<Inner>,
+) {
     let firmware = device_state
         .single_battery
         .as_ref()
@@ -4697,8 +4703,34 @@ fn show_diagnostics_device(state: &AppState<'_>, model: DeviceModel, device_stat
         .unwrap_or_else(|| "unknown".to_owned());
     state.set_diagnostic_device_name(state.get_device_name());
     state.set_diagnostic_device_code(model.code.into());
-    state.set_diagnostic_device_meta(format!("Firmware {firmware} · Battery {battery}").into());
-    state.set_diagnostic_status("Supported".into());
+    state.set_diagnostic_device_meta(
+        if inner
+            .settings
+            .borrow()
+            .language
+            .as_deref()
+            .is_some_and(|language| language.starts_with("ru"))
+        {
+            format!("Прошивка {firmware} · Заряд {battery}%")
+        } else {
+            format!("Firmware {firmware} · Battery {battery}")
+        }
+        .into(),
+    );
+    state.set_diagnostic_status(
+        if inner
+            .settings
+            .borrow()
+            .language
+            .as_deref()
+            .is_some_and(|language| language.starts_with("ru"))
+        {
+            "Поддерживается"
+        } else {
+            "Supported"
+        }
+        .into(),
+    );
     state.set_diagnostic_available(true);
 }
 

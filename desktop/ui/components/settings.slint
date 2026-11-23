@@ -1,6 +1,7 @@
 // A setting as a row of a section page, in the control its kind needs.
 import { SpinBox } from "std-widgets.slint";
 import { Select } from "select.slint";
+import { LocalizedText } from "localized.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { AppState, Actions, RowKind, SettingRow, SettingsPanel, PanelKind } from "../types.slint";
@@ -239,7 +240,7 @@ export component SettingRowView inherits Rectangle {
     in property <bool> first;
     // information with a copy button, as serial numbers are
     in property <bool> copyable;
-    private property <string> label: SettingText.short-label(setting.id) != "" ? SettingText.short-label(setting.id) : setting.label;
+    private property <string> label: SettingText.short-label(setting.id) != "" ? SettingText.short-label(setting.id) : LocalizedText.setting-label(setting.id, setting.label);
     private property <string> description: SettingText.description(setting.id, AppState.device-is-speaker);
     // the rows of a list; empty for every other kind
     private property <[string]> devices: root.setting.kind == RowKind.list ? root.setting.options : [];
@@ -326,7 +327,7 @@ export component SettingRowView inherits Rectangle {
         if root.setting.kind == RowKind.info: HorizontalLayout {
             spacing: 4px;
             Text {
-                text: root.setting.text;
+                text: LocalizedText.setting-text(root.setting.id, root.setting.text);
                 color: Theme.text;
                 font-size: 13px;
                 vertical-alignment: center;

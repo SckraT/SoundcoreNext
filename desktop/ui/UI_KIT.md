@@ -168,6 +168,25 @@ transition the page to the existing **Connection lost / Connect again** state.
 The view must not start reconnects, invent recovered state or optimistically
 restore controls; Retry remains an explicit user action.
 
+### Runtime labels
+
+Static UI copy uses `@tr`. Names and values that come from the device model are
+English data at the protocol/controller boundary; the UI translates the ones it
+knows through `components/localized.slint` (`LocalizedText.setting-label`,
+`setting-text`, `option`, `mode-label`), keyed by the stable setting id or
+protocol value. Add a mapping there when a new row, option or mode label is
+introduced, and add the `@tr` strings to the locale documents. Do not translate
+protocol identifiers (`NoiseCanceling`, `ldac`, `dualDevices`) or product names.
+The language picker intentionally shows each language in its own language.
+
+### Capture tool
+
+`tools/ui-capture/capture-ui.ps1` drives the demo device through Windows UI
+Automation, captures every page and the core dialogs at 100/110/125/150 % in
+light and dark, and writes raw PNGs, contact sheets and an HTML index under
+`artifacts/ui-screenshots/<timestamp>/`. Run it with `-Build` after changing
+Slint or translations. It uses an isolated `APPDATA`, so it never touches the
+user's OpenSCL4 documents.
 ## 5. Future Android mapping
 
 Share behavior and semantics, not Slint source or desktop pixel values. Compose
