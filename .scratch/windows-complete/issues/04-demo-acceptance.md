@@ -226,6 +226,8 @@ From `core` (untouched by this ticket, run for the slice):
 ## Integration
 
 The ticket branch is based on the `integration/windows-complete` tip
-`eec50dc`; after committing, `git merge integration/windows-complete` was run
-and the gates were repeated on the merged tip (the merge is a fast-forward/no-op
-unless the tip moved). Details are in the ticket branch's merge commit.
+`eec50dc`. The work is committed as `25717bb` (“Accept the Windows client on the
+demo device and fix what it found”). The tip had not moved when the ticket
+finished, so `git merge integration/windows-complete` reported “Already up to
+date” and there is no merge commit to make; the gates were re-run on the
+committed tree afterwards and are the results recorded above.
