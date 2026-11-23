@@ -121,3 +121,20 @@ output; the live UI captures are unchanged from ticket 03.
   `cargo test --workspace` **195 passed / 0 failed / 0 ignored**.
 - The release merge of `feature/a3954-buttons-case` into `master` is the next
   release step, reported from the release worktree.
+
+### Release result
+
+`feature/a3954-buttons-case` was merged into `master` as `2f0fcf5` ("Add Liberty
+4 Pro buttons and case"). The final master tree was re-gated from the release
+worktree: desktop `cargo fmt --all -- --check` clean, `cargo build` clean,
+`cargo clippy --all-targets -- -D warnings` clean, `cargo test` **292 passed /
+0 failed / 15 ignored**; core `cargo fmt --all -- --check` clean,
+`cargo build --workspace` clean,
+`cargo clippy --workspace --all-targets -- -D warnings` clean,
+`cargo test --workspace` **195 passed / 0 failed / 0 ignored**.
+
+The real Liberty 4 Pro was left as found: the review re-run's final poll matched
+every parsed field of the connect state. Deferred: case-display
+brightness/color/style/text, air-pressure writes, HearID editing, and a live
+TWS-connected slot run (the device stayed TWS-down for every run, so that branch
+is unit-tested only). The live UI captures are unchanged from ticket 03.
