@@ -1,7 +1,7 @@
 # 04 — Review and release
 
-**Status:** ready-for-agent
-**Blocked by:** 03
+**Status:** done
+**Blocked by:** 03 (done)
 
 ## Goal
 
@@ -100,3 +100,24 @@ was left as found.
 
 No Bluetooth address or serial number is recorded in this file or in the test
 output; the live UI captures are unchanged from ticket 03.
+
+### Merge and final gates
+
+- Ticket branch: `ticket/a3954-buttons-review` @ `96d9e8b` "Show the slide None
+  choice in the A3954 UI preview" on top of `a5e90c2` "Fix the A3954 buttons/case
+  review findings" (parent `04b89dd`, the feature tip). The second commit aligns
+  the offline preview harness with the new slide choices.
+- Merge commits on `feature/a3954-buttons-case`: `b37b3e4` "Merge the A3954
+  buttons/case review fixes", then `e05ce9c` of the same title for the preview
+  harness update; both were made with `--no-ff`, and `e05ce9c` is the feature
+  tip.
+- Gates rerun on the merged `feature/a3954-buttons-case` tree (`e05ce9c`, the
+  second run is a no-op for the source rewrite): desktop
+  `cargo fmt --all -- --check` clean, `cargo build` clean,
+  `cargo clippy --all-targets -- -D warnings` clean, `cargo test` **292 passed /
+  0 failed / 15 ignored** (the ignored are the manual hardware checks); core
+  `cargo fmt --all -- --check` clean, `cargo build --workspace` clean,
+  `cargo clippy --workspace --all-targets -- -D warnings` clean,
+  `cargo test --workspace` **195 passed / 0 failed / 0 ignored**.
+- The release merge of `feature/a3954-buttons-case` into `master` is the next
+  release step, reported from the release worktree.
