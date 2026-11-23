@@ -134,7 +134,7 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   once only keeps the newest write. A failed write shows the readable page
   banner (“Could not change …”, with **Retry** to reconnect) instead of leaving
   a stale value. The banner means the write or its confirmation poll failed, not
-  that the device kept the old value: the vendored second sentence is fixed
+  that the device kept the old value: the banner's second sentence is fixed
   wording, so the device's state is unknown until **Retry** re-polls it.
 - **Dual connections** is implemented for the A3062: after connecting, while the
   device reports dual connections on, the app reads the earbuds' remembered-device
@@ -220,9 +220,9 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   (`ui/messages.slint`) and the `.po` documents; only technical values (the OS
   transport detail, an archive error, firmware/battery readings, file names,
   URLs, protocol ids) travel as arguments. `desktop/tests/translations.rs`
-  enforces a non-empty translation for every `@tr` source in every required
-  locale (`ru` today) and every `messages.rs` key, and the screenshot capture
-  preflight uses the same rule. The native notification-area menu is worded in
+  enforces a non-empty translation for every `@tr` source, every plural form its
+  `Plural-Forms:` header declares, and every `messages.rs` key in every required
+  locale (`ru` today), and the screenshot capture preflight uses the same rule. The native notification-area menu is worded in
   tray data outside the Slint catalog, so its static items stay English; the same
   applies to the native file-dialog titles and filter names, which are created on
   worker threads for the import, export and Diagnostics save dialogs. These
@@ -655,6 +655,72 @@ device's ambient cycle (Noise canceling and Transparency on, Normal off).
 The real **Case** page: the four measured case-screen feature toggles (all off),
 the case language (English) and the read-only Status panel with case battery
 60 % and case firmware 01.58. The case serial never reaches the page.
+
+### UI polish and translated runtime copy (ticket 06, 2026-11-24)
+
+These captures come from the finished build run with the Russian UI in an
+isolated `APPDATA` profile, so they did not touch `%APPDATA%\OpenSCL4`. The
+device pages use the paired soundcore Liberty 4 Pro (A3954, firmware 04.29;
+left/right/case **54/61/60 %**) which the app found in its one-earbud state, so
+the quick-toggle reason and the disabled spatial-audio rows could be checked on
+real state. The app only polled the read-only `01 01` state there; no device
+setting was written. The Settings capture uses the simulated Space One Pro
+(A3062, Demo mode). No Bluetooth address or serial number appears in any of the
+captures.
+
+![Settings in Russian](settings-ru.png)
+
+The **Settings** page of the demo A3062 in Russian: the aside holds only the
+Showcase, Home screen and About cards — the Diagnostics card is gone, the
+sidebar's **Диагностика** item is the single route, and no button or label
+overflows the aside at 1280×820. **Copy logs** now lives at the foot of the
+Diagnostics page instead (next capture).
+
+![Diagnostics with the Copy logs action](diagnostics-copy-logs-ru.png)
+
+The real-device **Diagnostics** page: the redaction notice, the device summary
+(A3954, firmware 04.29, battery 54 %) and the support action **Скопировать
+логи** at the foot of the page, on every step. Clicking it put the recent
+application log on the Windows clipboard (the header read
+`OpenSCL4 2.0.0 (windows, x86_64)`, followed by the run's log lines) and showed
+the **Скопировано** toast. The page itself uploads nothing.
+
+![Breadcrumb at 100, 125 and 150 percent](breadcrumb-100-125-150-ru.png)
+
+The **Sound and effects** breadcrumb (`soundcore Space One Pro · Demo › Звук`)
+at 100 %, 125 % and 150 % content scale, top to bottom. The chevron is centred
+on the same line as the device name and the section name at every scale; the
+UIA rectangles measured a maximum 0.5 px difference between the three line
+centres.
+
+![One-earbud LDAC reason in Russian](quick-settings-one-earbud-ru.png)
+
+The real A3954's **Quick settings** panel while only one earbud is active: the
+saved **LDAC** chip is disabled and the reason is Russian —
+“Изменение доступно, когда подключены оба наушника” (changing is available
+when both earbuds are connected). The reason is a message key from the
+controller, resolved through `Messages.text` and the `.po` document.
+
+![One-earbud LDAC reason in English](quick-settings-one-earbud-en.png)
+
+The same panel after switching **App language** to English in Settings: the
+reason follows the UI and reads “Changing is available when both earbuds are
+connected”. No restart was needed — the running window switched.
+
+![Wrapped disabled spatial rows at 800x700 and 150 percent](effects-long-rows-ru-800x700-150.png)
+
+The real A3954's **Sound and effects** page in its one-earbud state at the
+800×700 minimum window with 150 % content scale. The long labels and the
+disabled spatial-audio rows' reason (“Сначала включите пространственный звук”)
+wrap onto two lines; each row grows with its text and the divider stays below
+the whole row, so no text crosses a divider and none of the controls is
+clipped horizontally.
+
+![Wrapped disabled spatial rows at 1280x820 and 150 percent](effects-long-rows-ru-1280x820-150.png)
+
+The same state at the preferred 1280×820 window and 150 % content scale; the
+same divider and wrapping behavior. The 100 % captures at both window sizes
+were checked too.
 
 ## Adaptive layout checks
 

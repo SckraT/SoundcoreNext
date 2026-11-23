@@ -22,8 +22,8 @@ From the repository root:
 # Full matrix, rebuild first, generate sheets:
 pwsh tools/ui-capture/capture-ui.ps1 -Build -Offline
 
-# Quick smoke run:
-pwsh tools/ui-capture/capture-ui.ps1 -NoBuild -Themes light -Scales 100 -Pages overview,equalizer -Dialogs none
+# Quick smoke run against an already-built executable:
+pwsh tools/ui-capture/capture-ui.ps1 -Themes light -Scales 100 -Pages overview,equalizer -Dialogs none
 ```
 
 Useful parameters:

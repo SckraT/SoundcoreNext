@@ -113,7 +113,8 @@ function Read-PoTranslations([string]$Path) {
             else {
                 $msgstr.Trim() -ne ''
             }
-            $translations[$msgid] = @{ translated = $translated; plural = $msgidPlural }
+            $forms = @($pluralMsgstr | ForEach-Object { "$_" })
+            $translations[$msgid] = @{ translated = $translated; plural = $msgidPlural; forms = $forms }
         }
     }
     $lines = @(Get-Content $Path -Encoding UTF8)
@@ -182,17 +183,34 @@ function Read-SlintTranslatables {
     return $sources
 }
 
+# The number of plural forms a `.po` header declares (`nplurals`). A plural
+# `@tr` source needs one non-empty translation per form; this is the same rule as
+# `desktop/tests/translations.rs`.
+function Get-PoPluralForms([string]$Path) {
+    $raw = Get-Content $Path -Raw -Encoding UTF8
+    $match = [regex]::Match($raw, 'Plural-Forms:[^"\r\n]*nplurals=(\d+)')
+    if (-not $match.Success) { Fail "missing Plural-Forms nplurals in $Path" }
+    return [int]$match.Groups[1].Value
+}
+
 function Assert-RussianTranslations {
     $poPaths = New-Object System.Collections.Generic.List[string]
+    $pluralForms = @{}
     foreach ($locale in $requiredTranslations) {
         $poPath = Join-Path $repo "desktop\translations\$locale\LC_MESSAGES\soundcore-desktop.po"
         if (-not (Test-Path $poPath)) { Fail "missing $poPath" }
         $poPaths.Add($poPath)
+        $pluralForms[$locale] = Get-PoPluralForms $poPath
     }
     $translations = @{}
     foreach ($poPath in $poPaths) {
+        $locale = $requiredTranslations[$poPaths.IndexOf($poPath)]
         foreach ($entry in (Read-PoTranslations $poPath).GetEnumerator()) {
-            if (-not $translations.ContainsKey($entry.Key)) { $translations[$entry.Key] = $entry.Value }
+            if (-not $translations.ContainsKey($entry.Key)) {
+                $value = $entry.Value
+                $value.nplurals = $pluralForms[$locale]
+                $translations[$entry.Key] = $value
+            }
         }
     }
     $sources = Read-SlintTranslatables
@@ -200,9 +218,24 @@ function Assert-RussianTranslations {
     foreach ($source in $sources) {
         if (-not $translations.ContainsKey($source)) {
             [void]$problems.Add("missing msgid: $source")
+            continue
         }
-        elseif (-not $translations[$source].translated) {
+        $entry = $translations[$source]
+        if (-not $entry.translated) {
             [void]$problems.Add("empty msgstr: $source")
+            continue
+        }
+        if ($null -ne $entry.plural) {
+            $forms = @($entry.forms)
+            $complete = $forms.Count -ge $entry.nplurals
+            if ($complete) {
+                for ($i = 0; $i -lt $entry.nplurals; $i++) {
+                    if ("$($forms[$i])".Trim() -eq '') { $complete = $false }
+                }
+            }
+            if (-not $complete) {
+                [void]$problems.Add("incomplete plural msgstr: $source (needs $($entry.nplurals) non-empty forms)")
+            }
         }
     }
     if ($problems.Count -gt 0) {

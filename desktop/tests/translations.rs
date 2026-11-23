@@ -7,8 +7,9 @@
 //!
 //! 1. every `@tr` source in every `desktop/ui/**/*.slint` file (static pages,
 //!    `messages.slint` and `localized.slint` alike) has a `.po` entry;
-//! 2. that entry's translation is non-empty (`msgstr` for a plain source,
-//!    `msgstr[0]` for a plural one, and the plural msgid's own forms);
+//! 2. that entry's translation is non-empty (`msgstr` for a plain source, and
+//!    every `msgstr[i]` for a plural one, with `i` covering the `nplurals` the
+//!    document's `Plural-Forms:` header declares);
 //! 3. every message key declared in `desktop/src/messages.rs` exists in the
 //!    `Messages` / `MessageParts` catalog (`desktop/ui/messages.slint`), and the
 //!    source that catalog returns for the key has a non-empty translation.
@@ -474,6 +475,40 @@ fn po_path(locale: &str) -> PathBuf {
         .join("soundcore-desktop.po")
 }
 
+/// The number of plural forms a required locale's `.po` header declares.
+///
+/// A plural `@tr` source must have one non-empty translation per form; without
+/// this number the test would accept a Russian document that dropped `msgstr[2]`
+/// and let the runtime fall back to English for some counts. The header's
+/// `Plural-Forms: nplurals=N; ...` is the gettext source of truth for `N`.
+fn required_plural_forms(path: &Path) -> usize {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    let Some(header) = text.find("Plural-Forms:") else {
+        panic!(
+            "{}: the translation header has no Plural-Forms line",
+            path.display()
+        );
+    };
+    let header = &text[header..];
+    let Some(start) = header.find("nplurals=") else {
+        panic!("{}: Plural-Forms has no nplurals", path.display());
+    };
+    let digits: String = header[start + "nplurals=".len()..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    let forms = digits
+        .parse::<usize>()
+        .unwrap_or_else(|error| panic!("{}: broken nplurals {digits:?}: {error}", path.display()));
+    assert!(
+        forms > 0,
+        "{}: the header declares no plural forms",
+        path.display()
+    );
+    forms
+}
+
 /// Every `@tr` source in the UI.
 fn ui_translatables() -> Vec<Translatable> {
     let mut all = Vec::new();
@@ -515,6 +550,7 @@ fn required_translations_have_a_non_empty_translation_for_every_ui_string() {
             "the required locale {locale} has no translation document at {}",
             path.display()
         );
+        let plural_forms = required_plural_forms(&path);
         let entries = parse_po(&path);
         for translatable in &translatables {
             let file = translatable
@@ -538,13 +574,11 @@ fn required_translations_have_a_non_empty_translation_for_every_ui_string() {
             if let Some(plural) = &translatable.plural {
                 match &entry.msgid_plural {
                     Some(msgid_plural) if msgid_plural == plural => {
-                        if entry.plural_msgstr.len() < 2 {
+                        if !entry.plural_forms_are_complete(plural_forms) {
                             problems.push(format!(
-                                "{locale}: {file}: missing plural forms for {plural:?}"
-                            ));
-                        } else if entry.plural_msgstr.iter().any(String::is_empty) {
-                            problems.push(format!(
-                                "{locale}: {file}: empty plural msgstr for {plural:?}"
+                                "{locale}: {file}: missing or empty plural msgstr for {plural:?} \
+                                 (the header declares {plural_forms} forms, the document has {})",
+                                entry.plural_msgstr.len()
                             ));
                         }
                     }
@@ -698,6 +732,48 @@ fn the_po_scanner_handles_continuations_escapes_and_plurals() {
     let plural = &entries["one file"];
     assert_eq!(plural.msgid_plural.as_deref(), Some("{} files"));
     assert!(plural.has_translation() && plural.plural_forms_are_complete(3));
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn the_plural_form_count_comes_from_the_po_header() {
+    // The count is what makes "all forms translated" checkable: a document that
+    // drops `msgstr[2]` still looks translated form by form, so the header's
+    // `nplurals` is the requirement the completeness test enforces.
+    let directory = std::env::temp_dir().join(format!(
+        "openscl4-po-plurals-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time is after the epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).expect("a temporary directory is created");
+    let path = directory.join("plurals.po");
+    std::fs::write(
+        &path,
+        "msgid \"\"\n\
+         msgstr \"\"\n\
+         \"Language: ru\\n\"\n\
+         \"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : 2);\\n\"\n\
+         \n\
+         msgid \"one file\"\n\
+         msgid_plural \"{} files\"\n\
+         msgstr[0] \"один файл\"\n\
+         msgstr[1] \"{} файла\"\n",
+    )
+    .expect("the fixture is written");
+    assert_eq!(required_plural_forms(&path), 3);
+    let entries = parse_po(&path);
+    let entry = &entries["one file"];
+    assert!(
+        entry.has_translation(),
+        "the first form alone still looks like a translation"
+    );
+    assert!(
+        !entry.plural_forms_are_complete(required_plural_forms(&path)),
+        "the completeness check catches the missing third form"
+    );
     let _ = std::fs::remove_dir_all(directory);
 }
 
