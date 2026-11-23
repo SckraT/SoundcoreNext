@@ -1,16 +1,8 @@
 // My devices: the saved devices, adding one, and what is shown while no device is connected.
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
-import { AppState, Actions, Page, Connection, DeviceCard, FailureKind, SystemPage } from "../types.slint";
-
-// what went wrong, in words
-export global FailureText {
-    public pure function describe(kind: FailureKind, details: string) -> string {
-        if kind == FailureKind.not-found { return @tr("The device was not found. Make sure it is turned on and nearby."); }
-        if kind == FailureKind.timed-out { return @tr("The device did not answer in time. Try again."); }
-        return details;
-    }
-}
+import { AppState, Actions, Page, Connection, DeviceCard, SystemPage } from "../types.slint";
+import { Messages } from "../messages.slint";
 import { Icon, Button, ButtonKind, IconButton } from "../components/basics.slint";
 import { PageHeading } from "../shell.slint";
 
@@ -248,19 +240,19 @@ export component ConnectionState inherits VerticalLayout {
         horizontal-alignment: center;
         color: Theme.muted;
         wrap: word-wrap;
-        text: AppState.connection == Connection.recovering ? (AppState.connection-reason == "" ? @tr("The device is still nearby. Settings will return when it reconnects.") : AppState.connection-reason)
+        text: AppState.connection == Connection.recovering ? (AppState.connection-reason.key == "" ? @tr("The device is still nearby. Settings will return when it reconnects.") : Messages.text(AppState.connection-reason))
             : AppState.connection == Connection.connecting ? (root.speaker ? @tr("Turn on your speaker. Controls will appear once connected.") : @tr("Open the case or turn on your headphones. Controls will appear once connected."))
             : AppState.connection == Connection.lost ? (root.speaker ? @tr("Check that your speaker is nearby and connected to this computer by Bluetooth.") : @tr("Check that your headphones are nearby and connected to this computer by Bluetooth."))
             : AppState.connection == Connection.bluetooth-off ? (AppState.linux ? @tr("Turn on Bluetooth in the system settings, then try connecting again.") : @tr("Turn on Bluetooth in Windows settings, then try connecting again."))
-            : AppState.connection == Connection.failed ? FailureText.describe(AppState.failure-kind, AppState.failure-text)
+            : AppState.connection == Connection.failed ? Messages.text(AppState.failure-text)
             : @tr("Connect to see battery levels and change settings.");
     }
-    if AppState.connection == Connection.lost && AppState.connection-reason != "": Text {
+    if AppState.connection == Connection.lost && AppState.connection-reason.key != "": Text {
         horizontal-alignment: center;
         color: Theme.muted;
         font-size: Theme.font-small;
         wrap: word-wrap;
-        text: AppState.connection-reason;
+        text: Messages.text(AppState.connection-reason);
     }
     HorizontalLayout {
         alignment: center;

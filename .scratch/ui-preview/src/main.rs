@@ -628,13 +628,15 @@ fn populate(ui: &AppWindow) {
     state.set_diagnostic_available(true);
     state.set_diagnostic_device_name("soundcore Space One Pro · Demo".into());
     state.set_diagnostic_device_code("SOUNDCORE · A3062".into());
-    state.set_diagnostic_device_meta("Demo data · no Bluetooth connection".into());
-    state.set_diagnostic_status("Demo".into());
+    // The Diagnostics card's sentence fields are catalog messages; the preview
+    // sends the real keys with demo readings (ticket 04).
+    state.set_diagnostic_device_meta(message("diagnostics.meta", "04.39", "80%"));
+    state.set_diagnostic_status(message("diagnostics.supported", "", ""));
     state.set_diagnostic_probes(ModelRc::new(VecModel::from(vec![
         DiagnosticProbe {
             label: "Device state".into(),
             command: "01 01".into(),
-            status: "Answered".into(),
+            status: message("diagnostics.probe.done", "", ""),
             detail: "128 ms".into(),
             ok: true,
             failed: false,
@@ -642,7 +644,7 @@ fn populate(ui: &AppWindow) {
         DiagnosticProbe {
             label: "Battery and charging".into(),
             command: "01 03".into(),
-            status: "Answered".into(),
+            status: message("diagnostics.probe.done", "", ""),
             detail: "94 ms".into(),
             ok: true,
             failed: false,
@@ -650,7 +652,7 @@ fn populate(ui: &AppWindow) {
         DiagnosticProbe {
             label: "Charging state".into(),
             command: "01 04".into(),
-            status: "Timed out".into(),
+            status: message("diagnostics.probe.no-answer", "", ""),
             detail: "10 s".into(),
             ok: false,
             failed: true,

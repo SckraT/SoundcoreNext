@@ -26,25 +26,6 @@ pub const DEMO_NAME: &str = "soundcore Space One Pro · Demo";
 /// committed capture supplies.
 pub const DEMO_MODEL_CODE: &str = "A3062";
 
-/// Shown in the Add Device dialog when Demo mode is switched on for a catalog
-/// model whose state the capture does not describe.
-pub const DEMO_UNAVAILABLE: &str = "Demo mode is available for Space One Pro";
-
-/// Shown on the Diagnostics page after a demo connection: the page's probes are
-/// never run against simulated data, so the Start capture button stays disabled.
-pub const DEMO_DIAGNOSTICS_UNAVAILABLE: &str =
-    "Demo mode cannot collect diagnostics. No probes are run and no archive is written.";
-
-/// The demo Diagnostics explanation in the app language; the fallback is the
-/// English constant above.
-pub fn diagnostics_unavailable(language: &str) -> &'static str {
-    if language.starts_with("ru") {
-        "Деморежим не собирает диагностику. Пробы не запускаются, архив не создаётся."
-    } else {
-        DEMO_DIAGNOSTICS_UNAVAILABLE
-    }
-}
-
 /// The neutral address bytes of the simulated remembered desktop, in the reply
 /// order the Connections page's list uses.
 pub const DEMO_DESKTOP_MAC: [u8; 6] = [0, 0, 0, 0, 0, 2];
@@ -109,12 +90,6 @@ mod tests {
     use super::*;
     use crate::transport_windows::parse_mac;
     use soundcore_models::{BatteryScale, SoundMode};
-
-    #[test]
-    fn the_demo_diagnostics_message_follows_the_app_language() {
-        assert!(diagnostics_unavailable("ru").contains("Деморежим"));
-        assert_eq!(diagnostics_unavailable("en"), DEMO_DIAGNOSTICS_UNAVAILABLE);
-    }
 
     #[test]
     fn the_committed_capture_parses_into_the_demo_state() {

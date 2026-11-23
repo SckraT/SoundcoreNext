@@ -10,8 +10,9 @@ device and never reads the user's OpenSCL4 profile.
 - PowerShell 7.
 - Rust toolchain and a built `desktop/target/debug/soundcore-desktop.exe`.
 - Python 3 with Pillow (`python -c "import PIL"`).
-- `desktop/translations/ru/.../soundcore-desktop.po` must cover every `@tr`
-  string; the script checks this before launching the app.
+- `desktop/translations/ru/.../soundcore-desktop.po` must give every `@tr`
+  string a **non-empty** translation; the script checks this before launching the
+  app (the same rule as `desktop/tests/translations.rs`, not just msgid presence).
 
 ## Run
 
@@ -42,7 +43,9 @@ Useful parameters:
 
 Screenshots are **Russian only**: the isolated profile starts with
 `language: "ru"` and a Russian window title. If the UI were English because of a
-missing translation, the run fails in the preflight.
+missing or empty translation, the run fails in the preflight. The preflight
+reports every missing or empty source in one list, so a newly added runtime
+message is visible before the app can start.
 
 ## Output
 
