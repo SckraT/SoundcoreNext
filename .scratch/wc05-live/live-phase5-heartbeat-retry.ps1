@@ -3,6 +3,10 @@
 # Requires the app connected to the real A3062.
 . "$PSScriptRoot\..\wc04-uia\session.ps1"
 Connect-Ui | Out-Null
+# A minimized window has no client area to capture; restore it before the run.
+[void][W32]::ShowWindow($hwnd, 9)
+Start-Sleep -Milliseconds 700
+[void][W32]::SetForegroundWindow($hwnd)
 $script:ShotsDir = "$PSScriptRoot\shots"
 New-Item -ItemType Directory -Force $script:ShotsDir | Out-Null
 $failures = New-Object System.Collections.Generic.List[string]
@@ -20,6 +24,39 @@ function Find-ButtonNamed([string]$Name, [int]$TimeoutSec = 10) {
     return $null
 }
 function Save-PhaseShot([string]$Name) { Save-WindowClientPng -Handle $hwnd -Path "$script:ShotsDir\$Name.png" | Out-Null }
+function Get-LdacSwitch {
+    Find-AllByType -Root $win -ControlType 'Button' | Where-Object { $_.Current.Name -eq 'LDAC' -and [int]$_.Current.BoundingRectangle.Width -eq 48 } | Select-Object -First 1
+}
+function Get-ToggleStateOf($element) {
+    if (-not $element) { return $null }
+    $p = $null
+    if ($element.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$p)) { return $p.Current.ToggleState }
+    return $null
+}
+function Wait-Connected([int]$Seconds) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    do {
+        $texts = Get-VisibleTexts
+        if (($texts -contains 'Connected') -and -not ($texts | Where-Object { $_ -match 'Connection lost' })) { return $true }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+function Wait-Lost([int]$Seconds) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    do {
+        $texts = Get-VisibleTexts
+        if ($texts | Where-Object { $_ -match 'Connection lost|Could not change' }) { return $true }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+function Retry-Connection {
+    $button = Find-AllByType -Root $win -ControlType 'Button' | Where-Object { $_.Current.Name -match 'Connect again|Retry' } | Select-Object -First 1
+    if (-not $button) { return $false }
+    [void](Invoke-Element $button)
+    return (Wait-Connected 70)
+}
 
 "== Idle heartbeat past one interval =="
 Click-Tab 'Overview'; Start-Sleep -Milliseconds 800
@@ -42,40 +79,40 @@ Save-PhaseShot 'live-overview-after-heartbeat' | Out-Null
 # behaviour), which is a real way to reach the app's Lost state without touching
 # the radio or the pairing.
 Click-Tab 'Sound and effects'; Start-Sleep -Milliseconds 1200
-$ldac = Find-AllByType -Root $win -ControlType 'Button' | Where-Object { $_.Current.Name -eq 'LDAC' -and [int]$_.Current.BoundingRectangle.Width -eq 48 } | Select-Object -First 1
-if (-not $ldac) { $ldac = Find-ButtonNamed 'LDAC' 6 }
+$ldac = Get-LdacSwitch
 Check 'the Effects page offers the real LDAC switch' ([bool]$ldac)
+$initialLdac = Get-ToggleStateOf $ldac
+"  LDAC state found on connect: $initialLdac"
 $lost = $false
 if ($ldac) {
-    [void](Invoke-Element $ldac)
-    $deadline = (Get-Date).AddSeconds(40)
-    do {
-        $texts = Get-VisibleTexts
-        if ($texts | Where-Object { $_ -match 'Connection lost' }) { $lost = $true; break }
-        if ($texts | Where-Object { $_ -match 'Could not change' }) { $lost = $true; break }
-        Start-Sleep -Milliseconds 600
-    } while ((Get-Date) -lt $deadline)
+    $pattern = $null
+    [void]$ldac.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$pattern)
+    $pattern.Toggle()
+    $lost = Wait-Lost 45
 }
 Check 'writing LDAC reaches the readable Lost/banner state (documented link reset)' $lost
 Save-PhaseShot 'live-connection-lost' | Out-Null
-$connectAgain = Find-ButtonNamed 'Connect again' 6
-if (-not $connectAgain) { $connectAgain = Find-ButtonNamed 'Retry' 2 }
-Check 'the Lost banner offers Connect again/Retry' ([bool]$connectAgain)
-if ($connectAgain) { [void](Invoke-Element $connectAgain) }
-$reconnected = $false
-$deadline = (Get-Date).AddSeconds(60)
-do {
-    if ((Get-WindowTitle) -match 'Overview' -and (Find-Text 'Connected' -TimeoutSec 1)) { $reconnected = $true; break }
-    Start-Sleep -Milliseconds 500
-} while ((Get-Date) -lt $deadline)
+$reconnected = Retry-Connection
 Check 'Retry reconnects the real device' $reconnected
 if ($reconnected) {
-    "  reconnected after Retry; device state re-polled"
-    # The LDAC write changed a real setting: restore it through the same page.
     Click-Tab 'Sound and effects'; Start-Sleep -Milliseconds 1200
-    $ldac = Find-AllByType -Root $win -ControlType 'Button' | Where-Object { $_.Current.Name -eq 'LDAC' -and [int]$_.Current.BoundingRectangle.Width -eq 48 } | Select-Object -First 1
-    if ($ldac) { [void](Invoke-Element $ldac); Start-Sleep -Seconds 3 }
-    "  LDAC restored by the same write path"
+    $now = Get-ToggleStateOf (Get-LdacSwitch)
+    "  LDAC after Retry: $now (found $initialLdac)"
+    if ($now -ne $initialLdac) {
+        # Restoring the setting writes LDAC again, which resets the link once
+        # more: the same Lost -> Retry cycle restores it.
+        $ldac = Get-LdacSwitch
+        if ($ldac) {
+            $pattern = $null
+            [void]$ldac.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$pattern)
+            $pattern.Toggle()
+            [void](Wait-Lost 45)
+            Check 'the restoring LDAC write is re-polled after a second Retry' (Retry-Connection)
+            Click-Tab 'Sound and effects'; Start-Sleep -Milliseconds 1200
+            $restored = Get-ToggleStateOf (Get-LdacSwitch)
+            Check 'the LDAC value found on connect is restored' ($restored -eq $initialLdac) "found=$initialLdac restored=$restored"
+        }
+    }
 }
 
 "== Disconnect and leave the app as found =="

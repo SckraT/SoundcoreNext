@@ -86,6 +86,69 @@ fn malformed_frames_are_kept_as_errors() {
 }
 
 #[test]
+fn redacts_the_a3062_serial_in_the_manifest_probe_response() {
+    // `redact_text` cannot see into the space-separated hex of a probe response;
+    // the session must mask the state body before the manifest is written.
+    let model = soundcore_models::model_by_code("A3062").expect("model");
+    let mut body = vec![0u8; 95];
+    body[..7].copy_from_slice(&[2, 0xFF, b'0', b'4', b'.', b'3', b'9']);
+    body[7..23].copy_from_slice(b"0123456789ABCDEF");
+    let response = encode(Direction::Inbound, Command::STATE, &body);
+    let mut session = DiagnosticSession::new(model);
+    session.record_probe(ProbeResult {
+        id: ProbeId::State,
+        request_hex: "08 EE 00 00 00 01 01 0A 00 02".to_owned(),
+        response_hex: Some(soundcore_diagnostics::hex(&response)),
+        status: ProbeStatus::Ok,
+        elapsed_ms: 12,
+    });
+
+    let bytes = export_zip(&session).expect("export");
+    let manifest = read_zip(&bytes, "manifest.json");
+    let value: serde_json::Value = serde_json::from_str(&manifest).expect("manifest json");
+    let stored = value["probes"][0]["responseHex"]
+        .as_str()
+        .expect("probe response hex");
+    let raw: Vec<u8> = stored
+        .split_whitespace()
+        .map(|byte| u8::from_str_radix(byte, 16).expect("hex"))
+        .collect();
+    let frame = parse(&raw).expect("the redacted response is still a frame");
+    assert!(
+        frame.body[7..23].iter().all(|byte| *byte == 0),
+        "the serial bytes are masked in the manifest"
+    );
+    assert!(
+        !manifest.contains("0123456789ABCDEF"),
+        "the serial never appears in the manifest"
+    );
+}
+
+#[test]
+fn a_redacted_state_probe_keeps_its_status_and_timing() {
+    let model = soundcore_models::model_by_code("A3062").expect("model");
+    let mut body = vec![0u8; 95];
+    body[7..23].copy_from_slice(b"0123456789ABCDEF");
+    let response = encode(Direction::Inbound, Command::STATE, &body);
+    let mut session = DiagnosticSession::new(model);
+    let stored = session.record_probe(ProbeResult {
+        id: ProbeId::State,
+        request_hex: "08 EE 00 00 00 01 01 0A 00 02".to_owned(),
+        response_hex: Some(soundcore_diagnostics::hex(&response)),
+        status: ProbeStatus::Ok,
+        elapsed_ms: 12,
+    });
+    assert_eq!(stored.status, ProbeStatus::Ok);
+    assert_eq!(stored.elapsed_ms, 12);
+    let unredacted = soundcore_diagnostics::hex(&response);
+    assert_ne!(
+        stored.response_hex.as_deref(),
+        Some(unredacted.as_str()),
+        "the stored response is redacted"
+    );
+}
+
+#[test]
 fn redacts_the_a3062_serial_before_export() {
     let model = soundcore_models::model_by_code("A3062").expect("model");
     let mut body = vec![0u8; 95];

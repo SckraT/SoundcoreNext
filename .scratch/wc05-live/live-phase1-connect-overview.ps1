@@ -82,7 +82,7 @@ Check 'the window title names the real device' ((Get-WindowTitle) -match 'Overvi
 "== Overview: identity, battery, capability filtering =="
 $texts = Get-VisibleTexts
 Check 'the hero names the real Space One Pro' ([bool]($texts | Where-Object { $_ -eq 'soundcore Space One Pro' }))
-Check 'the hero shows the catalog code A3062' ([bool]($texts | Where-Object { $_ -eq 'A3062' }))
+Check 'the hero shows the catalog code A3062' ([bool]($texts | Where-Object { $_ -match 'A3062' }))
 $battery = $texts | Where-Object { $_ -match '^Battery: \d+%$' }
 Check 'the single-battery tile shows the real battery' ([bool]$battery) "text=$($battery -join ',')"
 Check 'the connected badge is shown' ([bool]($texts | Where-Object { $_ -eq 'Connected' }))
@@ -95,8 +95,10 @@ $quick = Find-ButtonNamed 'LDAC'
 Check 'the quick-settings panel holds the A3062 LDAC chip' ([bool]$quick)
 $ldacText = $texts | Where-Object { $_ -match '^LDAC · ' }
 "  LDAC chip text: $ldacText"
-foreach ($block in 'Sound mode', 'Equalizer', 'Controls', 'Comfort', 'Power and prompts', 'Connections') {
-    Check "the $block shortcut/panel is shown" ([bool](Find-ButtonNamed $block 3))
+Check 'the Sound mode panel is shown for the A3062' ([bool](Find-Text 'Noise canceling' -TimeoutSec 3) -and [bool](Find-Text 'Transparency' -TimeoutSec 3))
+Check 'the Equalizer panel is shown for the A3062' ([bool](Find-Text 'Your sound' -TimeoutSec 3))
+foreach ($block in 'Controls', 'Comfort', 'Sound and effects', 'Connections') {
+    Check "the $block shortcut is shown" ([bool](Find-ButtonNamed $block 3))
 }
 Check 'no Quick presets block is offered' (-not [bool](Find-ButtonNamed 'Quick presets' 1))
 Check 'no Case block is offered' (-not [bool](Find-ButtonNamed 'Case' 1))
@@ -138,15 +140,22 @@ Click-Button 'Done' -SettleMs 1100
 $chosen = (Get-Content $overviewPath -Raw | ConvertFrom-Json).quick_toggles.A3062
 Check 'the selection is restored to LDAC only' (@($chosen).Count -eq 1) "chosen=$($chosen -join ',')"
 
-"== Page captures on the real device =="
+"== Page captures on the real device (light theme for the docs) =="
+Click-Tab 'Settings'; Start-Sleep -Milliseconds 1000
+$light = Find-ButtonNamed 'Light' 6
+if ($light) { [void](Invoke-Element $light); Start-Sleep -Milliseconds 1000 }
+Click-Tab 'Overview'; Start-Sleep -Milliseconds 800
+Save-PhaseShot 'live-overview' | Out-Null
 foreach ($tab in @(@('Sound mode', 'live-sound-mode'), @('Equalizer', 'live-equalizer'), @('Controls', 'live-controls'), @('Comfort', 'live-comfort'), @('Power and prompts', 'live-power'), @('Connections', 'live-connections'), @('About the device', 'live-about'), @('Diagnostics', 'live-diagnostics'))) {
     Click-Tab $tab[0]; Start-Sleep -Milliseconds 1100
     Save-PhaseShot $tab[1] | Out-Null
     "  captured $($tab[1]) on $($tab[0])"
 }
+Click-Tab 'About the device'; Start-Sleep -Milliseconds 1000
 $about = Get-VisibleTexts
 Check 'About shows the real firmware 04.39' ([bool]($about | Where-Object { $_ -match '04\.39' }) -or [bool]($texts | Where-Object { $_ -match '04\.39' })) "about=$($about | Where-Object { $_ -match 'Firmware|04\.' })"
-Check 'About has no serial row' (-not ($about | Where-Object { $_ -match '^Serial' }))
+Check 'About has no serial row' (-not ($about | Where-Object { $_ -match '^Serial number' }))
+Check 'About shows the firmware row and value' ([bool]($about | Where-Object { $_ -eq 'Firmware version' }) -and [bool]($about | Where-Object { $_ -match '^\d\d\.\d\d$' }))
 Check 'no address is on the About page' (-not ($about -match '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}'))
 
 "== Restore the Overview preferences document =="

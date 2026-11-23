@@ -278,7 +278,9 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   arrives, builds a local ZIP with `manifest.json`, `frames.jsonl` and
   `README.txt`, saves it through the native dialog and opens a prefilled GitHub
   issue. The A3062 serial and Bluetooth addresses are redacted by the core
-  before the archive is written; nothing is uploaded by the app. The page also
+  before the archive is written, including the state serial inside the
+  manifest's probe responses (not only in `frames.jsonl`); nothing is uploaded
+  by the app. The page also
   opens without a device and shows an empty state. Its device summary, panels,
   progress, probe states and metric tiles use the internal UI kit; wide layouts
   place supporting information in an aside, while narrow layouts stack content
@@ -287,6 +289,22 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   Equalizer, Sound and effects and the five A3062 device pages still open in
   their placeholder state, which is expected: the A3062 has no case, sleep,
   lights or alarms page and this shell does not implement them.
+- The finished client is **accepted on the real Space One Pro (A3062, firmware
+  04.39)** on Windows: the app connects through Add Device over real RFCOMM (no
+  Demo mode) and the run covered the Overview, every implemented sound and
+  device page, sound mode and equalizer preset/custom writes with their
+  `01 01` re-polls and restores, equalizer profile save/apply plus the import
+  and export roundtrip, one settings write per section page with re-poll and
+  restore, the Settings appearance/language/tray choices and their restart
+  persistence, **Copy logs**, the notification-area icon with its real battery
+  tooltip, close-to-tray and Quit, the three Diagnostics probes with a real
+  **Save ZIP** whose archive carries no serial or Bluetooth address and the
+  prefilled GitHub issue, and the idle heartbeat with the Lost/Retry path. The
+  device settings found on connect were restored and the app's preference
+  documents were put back. The acceptance also found and fixed a redaction
+  defect: a probe's `responseHex` in `manifest.json` still carried the A3062
+  serial; the diagnostics session now masks a state probe response before it is
+  stored/exported.
 
 ## Screenshots
 
@@ -477,6 +495,44 @@ The same page at the 800×700 minimum window: the sidebar is compact (68 px),
 the diagnostics cards are one column and no content is clipped horizontally;
 **Start capture** stays reachable by scrolling. This is the adaptive check
 described below.
+
+### Live A3062 acceptance captures (ticket 05, 2026-11-23)
+
+These three captures are from the finished build during the **real-device**
+acceptance run on a paired soundcore Space One Pro (A3062, firmware 04.39,
+battery 30 % during the run), connected over Windows RFCOMM through Add Device
+with Demo mode off. They document the current build's real state; no Bluetooth
+address or serial number is visible. The run behind them is recorded in
+`.scratch/windows-complete/issues/05-live-acceptance.md`.
+
+![Overview with a connected Space One Pro](live-overview.png)
+
+The real **Overview**: the hero shows “SOUNDCORE · A3062”, the device name, the
+connected badge and the single-battery tile at the device's 30 %; Quick settings
+holds the saved LDAC chip; the Sound mode panel reports the device's current
+mode (Normal) and the Your sound panel its profile (Soundcore Signature, 8 bands,
+−12.0…+13.4 dB); the four shortcut cards are the Standard layout. This fills the
+gap of having no A3062 Overview capture from the current shell.
+
+![Equalizer with a connected Space One Pro](live-equalizer.png)
+
+The **Equalizer** page while that device is connected: the 22 catalog preset
+chips with Soundcore Signature selected, the eight editable bands and chart at
+the re-polled device curve, Reset, Save profile, and the **My profiles** panel.
+The acceptance changed presets, typed a custom band, reset, saved/applied a
+profile, and imported/exported the transfer JSON, restoring the preset found on
+connect afterwards.
+
+![Settings with a connected Space One Pro](live-settings.png)
+
+The **Settings** page from the same run, with the real device connected: Light
+theme, Purple palette, 100 % content scale (100/110/125/150 %), As the theme
+device color, English language, the notification-area icon and its sections, and
+Quick presets off. The one-earbud badge switch and the sound-mode view choice
+are absent because the A3062 is a single-battery, three-mode device. The run
+verified these choices apply immediately, survive a quit and relaunch, and that
+the tray icon's tooltip reads “OpenSCL4 · soundcore Space One Pro” over
+“Battery 30 %” while connected.
 
 ## Adaptive layout checks
 

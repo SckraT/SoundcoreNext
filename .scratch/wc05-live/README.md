@@ -1,9 +1,11 @@
 # wc05 live-acceptance tooling
 
 Scripts used for ticket 05 (real A3062 acceptance) of the Windows-complete
-feature. The real device was powered off for the acceptance window, so these
-scripts are the prepared harness for the rerun; the flow itself was validated
-end to end against the built-in Demo device (which is not acceptance evidence).
+feature. They were prepared during a first attempt when the headphones were
+powered off, validated against the built-in Demo device (not acceptance
+evidence), and then used for the successful live acceptance run on 2026-11-23
+against the paired soundcore Space One Pro (A3062, firmware 04.39). The run and
+its results are recorded in `.scratch/windows-complete/issues/05-live-acceptance.md`.
 
 ## Reachability
 

@@ -5,6 +5,10 @@ param([switch]$SkipReconnect)
 # Requires the app already connected (phase 1) and the English baseline.
 . "$PSScriptRoot\..\wc04-uia\session.ps1"
 Connect-Ui | Out-Null
+# Another window state (e.g. minimized) has no client area to capture.
+[void][W32]::ShowWindow($hwnd, 9)
+Start-Sleep -Milliseconds 700
+[void][W32]::SetForegroundWindow($hwnd)
 $script:ShotsDir = "$PSScriptRoot\shots"
 New-Item -ItemType Directory -Force $script:ShotsDir | Out-Null
 $prefsPath = "$env:APPDATA\OpenSCL4\desktop-preferences.json"
@@ -31,15 +35,39 @@ function Find-ButtonNamed([string]$Name, [int]$TimeoutSec = 10) {
     return $null
 }
 function Save-PhaseShot([string]$Name) { Save-WindowClientPng -Handle $hwnd -Path "$script:ShotsDir\$Name.png" | Out-Null }
-function Find-NotificationIcon([int]$TimeoutSec = 6) {
+# The Settings page is taller than the 1280x820 window at 125 % content scale;
+# grow the window so the bottom controls (tray switches, Quit) are in the
+# accessibility tree instead of relying on wheel scrolling.
+function Set-TallWindow([bool]$Tall) {
+    if ($Tall) { Set-ClientSize -Handle $hwnd -Width 1600 -Height 1500 } else { Set-ClientSize -Handle $hwnd -Width 1600 -Height 1025 }
+    Start-Sleep -Milliseconds 700
+}
+function Find-NotificationIcon([int]$TimeoutSec = 8) {
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $trayCond = New-Object System.Windows.Automation.PropertyCondition($script:UIA::ClassNameProperty, 'Shell_TrayWnd')
+    $tray = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $trayCond)
+    if (-not $tray) { return $null }
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $overflow = $null
     do {
-        $root = [System.Windows.Automation.AutomationElement]::RootElement
+        $buttons = Find-AllByType -Root $tray -ControlType 'Button'
+        $overflow = $buttons | Where-Object { $_.Current.Name -match 'скрытые|hidden' } | Select-Object -First 1
+        if (-not $overflow) { break }
+        [void](Invoke-Element $overflow)
+        Start-Sleep -Milliseconds 800
         $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
         foreach ($element in $all) {
-            if ($element.Current.Name -match '^OpenSCL4') { return $element }
+            try {
+                $name = $element.Current.Name
+                if ($name -match 'OpenSCL4.*Space One Pro' -and $element.Current.ControlType.ProgrammaticName -eq 'ControlType.Button') {
+                    # close the flyout again
+                    [void](Invoke-Element $overflow)
+                    Start-Sleep -Milliseconds 500
+                    return $element
+                }
+            } catch {}
         }
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds 400
     } while ((Get-Date) -lt $deadline)
     return $null
 }
@@ -68,7 +96,7 @@ Set-Clipboard -Value ''
 Click-Button 'Copy logs' -TimeoutSec 8 -SettleMs 1200
 $clip = Get-Clipboard -Raw
 Check 'Copy logs put the application log on the clipboard' ([bool]($clip -and $clip.Length -gt 20 -and $clip -match 'OpenSCL4')) "length=$($clip.Length)"
-Check 'the copied log mentions the real device connection' ([bool]($clip -match 'RFCOMM|connected|Bluetooth|worker')) "first=$(($clip -split "`r?`n")[0..2] -join ' / ')"
+Check 'the copied log holds the recent application lines' ([bool]($clip -match 'Application started')) "first=$(($clip -split "`r?`n")[0..2] -join ' / ')"
 
 "== Settings: language round trip (Russian then back) =="
 $script:StateDir = "$PSScriptRoot\state"
@@ -81,6 +109,7 @@ Check 'English is applied back' ((Get-WindowTitle) -match 'Settings') "title=$(G
 Check 'English is saved' ("$(Get-Pref 'language')" -eq 'en')
 
 "== Settings: tray choices persist in the same document =="
+Set-TallWindow $true
 Scroll-Content -Notches 8 | Out-Null; Start-Sleep -Milliseconds 400
 foreach ($name in 'Battery', 'LDAC') {
     $check = Find-Check -Name $name -TimeoutSec 8
@@ -97,6 +126,7 @@ foreach ($name in 'Battery', 'LDAC') {
     Start-Sleep -Milliseconds 700
 }
 Check 'the tray choices are restored' ((Get-Pref 'battery') -eq $true -and (Get-Pref 'ldac') -eq $true)
+Set-TallWindow $false
 
 "== Restart persistence: Dark, Sage, 125 %, Russian, then back =="
 Click-Option 'Dark' 1000
@@ -104,6 +134,7 @@ Click-Option 'Sage' 1000
 Click-Option '125%' 1400
 Set-AppLanguage 'Русский'
 Check 'the restart choices are saved before quitting' ((Get-Pref 'theme') -eq 'dark' -and (Get-Pref 'accent') -eq 'sage' -and (Get-Pref 'contentScale') -eq '125' -and (Get-Pref 'language') -eq 'ru')
+Set-TallWindow $true
 Scroll-Content -Notches 14 | Out-Null; Start-Sleep -Milliseconds 500; if ("$(Get-Pref 'language')" -eq 'ru') { Click-Button 'Выйти из OpenSCL4' -TimeoutSec 8 -SettleMs 1500 } else { Click-Button 'Quit OpenSCL4' -TimeoutSec 8 -SettleMs 1500 }
 Start-Sleep -Seconds 2
 Check 'Quit ends the process' (-not [bool](Get-Process -Name soundcore-desktop -ErrorAction SilentlyContinue))
@@ -120,28 +151,44 @@ Click-Option 'Purple' 1000
 Click-Option '100%' 1400
 Check 'the baseline appearance is restored' ((Get-Pref 'theme') -eq 'light' -and (Get-Pref 'accent') -eq 'purple' -and (Get-Pref 'contentScale') -eq '100' -and (Get-Pref 'language') -eq 'en')
 
+"== Tray icon and close-to-tray with the real device connected =="
+. "$PSScriptRoot\connect-real.ps1"
+Check 'the app reconnects the real A3062 for the tray checks' (Connect-RealDevice)
+Click-Tab 'Settings'; Start-Sleep -Milliseconds 1000
+
 "== Notification-area icon and close-to-tray =="
-$icon = Find-NotificationIcon 4
+$icon = Find-NotificationIcon 8
 if ($icon) {
     "  notification-area element: $($icon.Current.Name)"
     Check 'the notification-area icon names the app and the real device' ([bool]($icon.Current.Name -match 'OpenSCL4' -and $icon.Current.Name -match 'Space One Pro')) "name=$($icon.Current.Name)"
+    Check 'the notification-area tooltip carries the real battery' ([bool]($icon.Current.Name -match 'Battery\s*\d+%')) "name=$($icon.Current.Name)"
 } else {
     "  the shell did not expose a notification-area element to UIA in this session (icon hosted by Slint)"
 }
-[void][W32]::ShowWindow($hwnd, 0)  # hide, as a close-to-tray close would
-Start-Sleep -Milliseconds 900
+# Closing the window with close-to-tray on hides it and keeps the process.
+$windowPattern = $null
+if ($win.TryGetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern, [ref]$windowPattern)) {
+    $windowPattern.Close()
+    Start-Sleep -Milliseconds 1200
+}
 $proc = Get-Process -Name soundcore-desktop -ErrorAction SilentlyContinue
-Check 'with close-to-tray on, hiding the window keeps the process alive' ([bool]$proc)
-[void][W32]::ShowWindow($hwnd, 5)  # SW_SHOW
-Start-Sleep -Milliseconds 800
+Check 'with close-to-tray on, closing the window keeps the process alive' ([bool]$proc)
+Check 'the closed window is hidden to the notification area' (-not [W32]::IsWindowVisible($hwnd))
 # A second start asks the running instance to show its window and exits.
 $exe = (Resolve-Path "$PSScriptRoot\..\..\desktop\target\debug\soundcore-desktop.exe").Path
 $second = Start-Process -FilePath $exe -PassThru
 Start-Sleep -Seconds 2
 Check 'a second start exits instead of opening a second window' ($second.HasExited) "exited=$($second.HasExited)"
-[void][W32]::ShowWindow($hwnd, 5)
+$shown = $false
+$deadline = (Get-Date).AddSeconds(10)
+do {
+    if ([W32]::IsWindowVisible($hwnd)) { $shown = $true; break }
+    Start-Sleep -Milliseconds 300
+} while ((Get-Date) -lt $deadline)
+Check 'the second start shows the hidden window again' $shown
 
 "== Quit from Settings removes the icon and ends the app =="
+Set-TallWindow $true
 Click-Tab 'Settings'; Start-Sleep -Milliseconds 900
 Scroll-Content -Notches 14 | Out-Null; Start-Sleep -Milliseconds 500; if ("$(Get-Pref 'language')" -eq 'ru') { Click-Button 'Выйти из OpenSCL4' -TimeoutSec 8 -SettleMs 1500 } else { Click-Button 'Quit OpenSCL4' -TimeoutSec 8 -SettleMs 1500 }
 Start-Sleep -Seconds 2

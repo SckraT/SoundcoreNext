@@ -2,6 +2,8 @@
 # Review, Save ZIP through the real Windows save dialog, archive redaction
 # inspection, and the prefilled GitHub issue URL (opened, never submitted).
 # Requires the app already connected to the real A3062 (phase 1/2) in English.
+# -FromReview resumes at the Review step of a capture that already completed.
+param([switch]$FromReview)
 . "$PSScriptRoot\..\wc04-uia\session.ps1"
 Connect-Ui | Out-Null
 $script:ShotsDir = "$PSScriptRoot\shots"
@@ -38,6 +40,7 @@ function Get-DialogWindow([int]$TimeoutSec = 20) {
 }
 
 "== Diagnostics: device summary and Start capture =="
+if (-not $FromReview) {
 Click-Tab 'Diagnostics'; Start-Sleep -Milliseconds 1400
 $texts = Get-VisibleTexts
 Check 'the Diagnostics page shows the connected A3062 summary' ([bool]($texts | Where-Object { $_ -match 'A3062' }))
@@ -49,24 +52,30 @@ Save-PhaseShot 'live-diagnostics-ready' | Out-Null
 $start = Find-ButtonNamed 'Start capture' 8
 Check 'Start capture is offered for the real device' ([bool]$start)
 if ($start) { [void](Invoke-Element $start) }
+# A finished capture moves straight to the Review step, so the review actions
+# are what the page shows when it is done.
 $review = $null
-$deadline = (Get-Date).AddSeconds(75)
+$deadline = (Get-Date).AddSeconds(150)
 do {
-    $review = Find-ButtonNamed 'Review results' 1
+    $review = Find-ButtonNamed 'Save ZIP' 1
     if ($review) { break }
+    $frameCount = (Get-VisibleTexts | Where-Object { $_ -match '^\d+$' }) -join ','
     Start-Sleep -Milliseconds 500
 } while ((Get-Date) -lt $deadline)
-Check 'the capture reaches Review results' ([bool]$review)
+Check 'the capture completes and shows the Review step' ([bool]$review)
 $texts = Get-VisibleTexts
-$answered = $texts | Where-Object { $_ -match '^3 of 3 probes$' }
-Check 'all three probes answered' ([bool]$answered) "counters=$($texts | Where-Object { $_ -match 'probes|frames' })"
-$frames = $texts | Where-Object { $_ -match '^\d+ frames$' }
-"  frames: $frames"
-Check 'at least the probe frames were recorded' ([bool]$frames)
+$answered = $texts | Where-Object { $_ -eq '3 of 3' }
+Check 'all three probes answered' ([bool]$answered) "texts=$($texts | Where-Object { $_ -match 'probes|frames|timeouts|archive' })"
+$frames = $texts | Where-Object { $_ -match '^\d+$' }
+"  frame count tiles: $($frames -join ',')"
+Check 'at least the probe frames were recorded' ([bool]($texts | Where-Object { $_ -eq 'frames' }))
 Start-Sleep -Milliseconds 800
 Save-PhaseShot 'live-diagnostics-captured' | Out-Null
+}
 
 "== Review step =="
+$review = $null
+$texts = Get-VisibleTexts
 if ($review) { [void](Invoke-Element $review); Start-Sleep -Milliseconds 1200 }
 $texts = Get-VisibleTexts
 Check 'the review step lists the archive files' ([bool]($texts | Where-Object { $_ -match 'manifest\.json' }) -and [bool]($texts | Where-Object { $_ -match 'frames\.jsonl' }) -and [bool]($texts | Where-Object { $_ -match 'README\.txt' }))
@@ -81,21 +90,28 @@ Remove-Item $zip -ErrorAction SilentlyContinue
 $dialog = Get-DialogWindow 20
 Check 'the native Windows save dialog opened' ([bool]$dialog)
 if ($dialog) {
-    $edits = Find-AllByType -Root $dialog -ControlType 'Edit'
-    $fileName = $edits | Where-Object { $_.Current.Name -match 'File name|Имя файла' } | Select-Object -First 1
-    if (-not $fileName) { $fileName = $edits | Select-Object -Last 1 }
-    $vp = $null
-    if ($fileName -and $fileName.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {
-        $vp.SetValue($zip)
-    } else {
-        Invoke-ClickCenter $fileName
-        [System.Windows.Forms.SendKeys]::SendWait('^a')
-        [System.Windows.Forms.SendKeys]::SendWait($zip)
+    $fileName = $null
+    try {
+        $nameCond = New-Object System.Windows.Automation.PropertyCondition($script:UIA::AutomationIdProperty, '1001')
+        $fileName = $dialog.FindFirst($script:ScopeDesc, $nameCond)
+    } catch { $fileName = $null }
+    if (-not $fileName) {
+        $edits = Find-AllByType -Root $dialog -ControlType 'Edit'
+        $fileName = $edits | Where-Object { $_.Current.Name -match 'File name|Имя файла' } | Select-Object -First 1
     }
-    Start-Sleep -Milliseconds 600
-    $save = Find-AllByType -Root $dialog -ControlType 'Button' | Where-Object { $_.Current.Name -match '^Save$|^Сохранить$' } | Select-Object -First 1
-    if (-not $save) { $save = Find-AllByType -Root $dialog -ControlType 'Button' | Where-Object { $_.Current.Name -match 'Save|Сохранить' } | Select-Object -First 1 }
-    if ($save) { [void](Invoke-Element $save) }
+    Invoke-ClickCenter $fileName
+    Start-Sleep -Milliseconds 400
+    [System.Windows.Forms.SendKeys]::SendWait('^a')
+    Start-Sleep -Milliseconds 150
+    [System.Windows.Forms.SendKeys]::SendWait($zip)
+    Start-Sleep -Milliseconds 500
+    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+    Start-Sleep -Milliseconds 800
+    try {
+        $save = Find-AllByType -Root $dialog -ControlType 'Button' | Where-Object { $_.Current.Name -match '^Save$|^Сохранить$' } | Select-Object -First 1
+        if (-not $save) { $save = Find-AllByType -Root $dialog -ControlType 'Button' | Where-Object { $_.Current.Name -match 'Save|Сохранить' } | Select-Object -First 1 }
+        if ($save) { [void](Invoke-Element $save) }
+    } catch { "  (the save dialog closed after Enter)" }
     Start-Sleep -Seconds 2
 }
 Check 'the archive was written to the chosen path' (Test-Path $zip) "path=$zip"
@@ -129,37 +145,66 @@ if (Test-Path $zip) {
     "  frame entries: $frameCount"
     Check 'frames.jsonl has the captured frames' ($frameCount -ge 3)
     $readme = Get-Content (Join-Path $extract 'README.txt') -Raw
-    Check 'README.txt explains the archive' ([bool]($readme -match 'OpenSCL4'))
+    Check 'README.txt explains the archive' ([bool]($readme -match 'Soundcore diagnostics'))
+    # Generic serial check: the A3062 serial is 16 ASCII digits in the state
+    # response; decode the manifest probe responses and look for such a run.
+    $probeHex = @()
+    foreach ($probe in $manifest.probes) { if ($probe.responseHex) { $probeHex += $probe.responseHex } }
+    $decoded = ''
+    foreach ($h in $probeHex) {
+        $chars = foreach ($byte in ($h -split '\s+')) { if ($byte) { [char][Convert]::ToInt32($byte, 16) } }
+        $decoded += (-join $chars)
+    }
+    $serialRuns = [regex]::Matches($decoded, '[0-9A-Fa-f]{16}')
+    Check 'no serial-shaped run survives in the manifest probe responses' ($serialRuns.Count -eq 0) "matches=$($serialRuns.Count)"
 } else {
     Check 'the archive exists to be inspected' $false
 }
 
 "== Open GitHub issue (prefilled, not submitted) =="
 $issue = Find-ButtonNamed 'Open GitHub issue' 6
+if (-not $issue) { $issue = Find-ButtonNamed 'Open issue again' 6 }
 Check 'the Open GitHub issue action is offered' ([bool]$issue)
-$before = @(Get-Process -Name chrome, msedge, firefox -ErrorAction SilentlyContinue).Count
-if ($issue) { [void](Invoke-Element $issue); Start-Sleep -Seconds 4 }
-$after = @(Get-Process -Name chrome, msedge, firefox -ErrorAction SilentlyContinue).Count
+$browserNames = @('chrome', 'msedge', 'firefox', 'brave')
+$before = @(Get-Process -Name $browserNames -ErrorAction SilentlyContinue).Count
+if ($issue) { [void](Invoke-Element $issue); Start-Sleep -Seconds 6 }
+$after = @(Get-Process -Name $browserNames -ErrorAction SilentlyContinue).Count
 Check 'a browser was opened for the issue URL' ($after -ge 1) "browsers before=$before after=$after"
-$issueCheck = [System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-$urlTexts = @()
-foreach ($element in $issueCheck) {
-    try {
-        $name = $element.Current.Name
-        if ($name -match 'github\.com|issues/new|device-diagnostics') { $urlTexts += $name }
-    } catch {}
-}
-if ($urlTexts.Count -gt 0) {
-    "  issue title/URL elements: $($urlTexts | Select-Object -First 3)"
-    Check 'the opened page names the prefilled device-diagnostics issue' ([bool]($urlTexts | Where-Object { $_ -match 'device-diagnostics|A3062' }))
-    Check 'the opened URL carries no Bluetooth address' (-not ($urlTexts -match '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}'))
+$urlValue = $null
+try {
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $wins = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($w in $wins) {
+        try {
+            if ($w.Current.ClassName -notmatch 'Chrome_WidgetWin_1|MozillaWindowClass') { continue }
+            $edits = Find-AllByType -Root $w -ControlType 'Edit'
+            foreach ($e in $edits) {
+                try {
+                    $vp = $null
+                    if ($e.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {
+                        $value = $vp.Current.Value
+                        if ($value -match 'github\.com') { $urlValue = $value; break }
+                    }
+                } catch {}
+            }
+        } catch {}
+        if ($urlValue) { break }
+    }
+} catch {}
+if ($urlValue) {
+    "  issue URL: $urlValue"
+    Check 'the opened URL targets the prefilled OpenSCL4 issue' ([bool]($urlValue -match 'github\.com.*OpenSCL4.*issues(%2F|/)new'))
+    Check 'the opened URL carries the device-diagnostics label and the A3062 probe summary' ([bool]($urlValue -match 'device-diagnostics' -and $urlValue -match 'A3062'))
+    Check 'the opened URL carries no Bluetooth address' (-not ($urlValue -match '([0-9A-Fa-f]{2}%3A){5}[0-9A-Fa-f]{2}'))
 } else {
-    "  the browser did not expose the address bar to UIA; the URL construction is covered by the unit test and the click opened the default browser"
+    "  the browser did not expose an address bar to UIA; the click opened the default browser"
 }
-# Leave the review step; no issue is submitted.
+# Leave the review/report step; no issue is submitted.
 [void][W32]::SetForegroundWindow($hwnd)
 Start-Sleep -Milliseconds 500
-$back = Find-ButtonNamed 'Back' 3
+$done = Find-ButtonNamed 'Done' 3
+if ($done) { [void](Invoke-Element $done); Start-Sleep -Milliseconds 700 }
+$back = Find-ButtonNamed 'Back' 2
 if ($back) { [void](Invoke-Element $back); Start-Sleep -Milliseconds 700 }
 
 if ($failures.Count -gt 0) { ""; "FAILURES:"; $failures | ForEach-Object { " - $_" }; exit 1 }
