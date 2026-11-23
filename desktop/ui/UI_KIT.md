@@ -138,10 +138,16 @@ actually supports and produces `AppState.overview-rows`, `quick-toggles`,
   Every gesture row names its side and writes exactly one measured `04 81`
   frame on change; it edits the action byte's live slot (the `01 01` TWS flag
   names it: the low nibble while the earbuds are TWS-connected, the high nibble
-  while they are not) and keeps the other nibble, then re-polls `01 01`. The
+  while they are not) and keeps the other nibble, then re-polls `01 01`. Each
+  row offers `None` (the measured `0x0F` no-action value) plus its measured
+  action catalog; the A3954 accepts `IndividualDisable` for all twelve
+  gestures, so the four slide rows offer `None` next to the two volume actions
+  too. A failed gesture write names its row. The
   case-page toggles write `07 87` with the other three measured flags kept, and
-  the language row writes `07 8A`; the `07 87` body is in the Soundcore app's
-  command order (`[remote camera, find device, case spatial audio,
+  the language row writes `07 8A`; a failed case-screen toggle names the flag
+  row it changed (e.g. `Find device`), not the panel title, and a failed
+  language write names `Case language`. The `07 87` body is in the Soundcore
+  app's command order (`[remote camera, find device, case spatial audio,
   atmospheric]`), which is not the state's flag order and is handled by the
   core command body. The case status (battery and firmware) is read-only and
   never shows the case serial.
@@ -229,8 +235,13 @@ battery/firmware ids), its option values (`5/10/15 seconds`,
 `Chinese`), and the panel titles `Presses`, `Slides` and `Case screen`. The
 gesture row ids stay side-specific on this page because both earbuds are shown
 together; do not strip the side to the A3062 page's shorter `Single press`
-wording.
-The language picker intentionally shows each language in its own language.
+wording. Do not translate protocol identifiers (`NoiseCanceling`, `ldac`,
+`dualDevices`, the `04 81` gesture/action ids) or product names.
+The app-language picker on the Settings page intentionally shows each language
+in its own language (`Русский`, `English`, …). The case-language select is a
+device value, not the app language: it uses the same runtime-label mapping as
+its row, so the Russian UI shows localized language names
+(`Японский`/`Английский`/`Китайский`).
 
 ### Capture tool
 

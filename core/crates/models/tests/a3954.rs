@@ -1456,6 +1456,22 @@ fn builds_the_exact_a3954_button_frames() {
         assert_eq!(frame.len(), 13, "one 04 81 gesture is a 13-byte frame");
     }
 
+    // Every gesture kind, slides included, accepts the measured "no action"
+    // value (OpenSCL4's `IndividualDisable` for all twelve A3954 gestures), so a
+    // slide row can be disabled even though `A3954_SLIDE_ACTIONS` names only the
+    // two volume actions.
+    let disabled_slide = model()
+        .a3954_button_frame(
+            A3954Button::LeftSlideUp,
+            A3954ButtonActionByte::from_byte(A3954_NO_BUTTON_ACTION),
+        )
+        .expect("the A3954 builds a disabled slide frame");
+    assert_eq!(
+        frame_hex(&disabled_slide),
+        "08 EE 00 00 00 04 81 0D 00 00 06 0F 9D",
+        "a disabled left slide up writes 0x0F in the action byte"
+    );
+
     // The two action bytes of the app's own button writes in the capture
     // (right double press, connected action 1 and 2).
     for (action, expected) in [

@@ -1452,6 +1452,13 @@ pub const A3954_COMMON_ACTIONS: &[A3954ButtonAction] = &[
 /// The actions the app offers for the two A3954 slides: volume up and volume
 /// down only (`0` and `1`). The six common actions are not available on a
 /// slide, and both slide gestures share these two ids.
+///
+/// The catalog is the measured *action* set; it is not the set of writable
+/// slots. OpenSCL4's A3954 table sets `ButtonDisableMode::IndividualDisable` for
+/// all twelve gestures, slides included, so [`A3954_NO_BUTTON_ACTION`] is a
+/// valid value for a slide row as well (a caller builds that through
+/// [`A3954ButtonActionValue::Disabled`]/[`A3954ButtonActionByte`], not through
+/// this catalog).
 pub const A3954_SLIDE_ACTIONS: &[A3954ButtonAction] =
     &[A3954ButtonAction::VolumeUp, A3954ButtonAction::VolumeDown];
 

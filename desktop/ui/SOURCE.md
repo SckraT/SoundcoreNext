@@ -182,3 +182,16 @@ reconnect. No hardware acceptance claim is implied by this source record.
   when the earbuds are TWS-connected, high when they are not) and keeps the
   other nibble; the core's `07 87` command body uses the Soundcore app's flag
   order, which differs from the state order.
+- A3954 controls/case review (ticket 04): each Controls gesture row now offers
+  `None` (the measured `0x0F` no-action value) plus its measured action catalog,
+  and the four slide rows gain that choice too because the A3954 accepts
+  `IndividualDisable` for all twelve gestures. A failed case-screen write's
+  banner names the flag row the user toggled (`Find device`) instead of the
+  panel title, and the case-language select follows the runtime-label mapping
+  like its row (localized names in the Russian UI), unlike the Settings page's
+  app-language picker, which keeps each language's own name. `UI_KIT.md` records
+  the restored "do not translate protocol identifiers or product names" rule and
+  scopes the own-language rule to the app-language picker. No layout, callback
+  or device behavior changed beyond the extra `None` choice and the banner
+  wording; the controller still derives every row from state and owns every
+  device write.

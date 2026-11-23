@@ -276,13 +276,14 @@ pub fn sound_pages(
 
 /// The sidebar device pages of a state with a settings surface: the A3062's
 /// settings block or the A3954's own settings block. Both models expose the same
-/// device pages, and only the A3954 adds the Case page: its state always parses
-/// the measured case features and language, so the presence of its block is the
-/// presence of the case blocks. The rows and commands behind the pages differ per
-/// model. A model without either (the A3949 and the rest of the catalog) has no
-/// pages and no write path.
-pub fn device_pages(has_settings: bool, has_a3954: bool) -> Vec<Page> {
-    if !has_settings && !has_a3954 {
+/// device pages, and only the state with the measured case blocks adds the Case
+/// page: an A3954 state always parses the case features and language (both are
+/// non-optional fields), so `has_case` is the presence of that state, not a
+/// generic model flag. The rows and commands behind the pages differ per model.
+/// A model without either (the A3949 and the rest of the catalog) has no pages
+/// and no write path.
+pub fn device_pages(has_settings: bool, has_case: bool) -> Vec<Page> {
+    if !has_settings && !has_case {
         return Vec::new();
     }
     let mut pages = vec![
@@ -293,7 +294,7 @@ pub fn device_pages(has_settings: bool, has_a3954: bool) -> Vec<Page> {
     ];
     // The Case page follows Connections and precedes About, the order the
     // Android app groups the settings in.
-    if has_a3954 {
+    if has_case {
         pages.push(Page::Case);
     }
     pages.push(Page::About);
@@ -1367,13 +1368,14 @@ impl SettingFailure {
     /// The `AppState.error-label` of a failed write, naming the setting the row
     /// names; the vendored banner wraps it as "Could not change “{}”.".
     pub fn label(self, setting: SettingCommand) -> String {
-        format!("{} ({})", setting_label(setting), self.reason())
+        self.row_label(setting_label(setting))
     }
 
-    /// The `AppState.error-label` of a failed A3954 write, naming the setting
-    /// the row names; worded like [`Self::label`].
-    pub fn a3954_label(self, setting: A3954SettingCommand) -> String {
-        format!("{} ({})", a3954_setting_label(setting), self.reason())
+    /// The `AppState.error-label` of a failed write whose row name is already
+    /// resolved, e.g. a gesture or a case-screen flag; worded like
+    /// [`Self::label`].
+    pub fn row_label(self, row: &str) -> String {
+        format!("{row} ({})", self.reason())
     }
 }
 
@@ -1539,6 +1541,38 @@ pub fn change_a3954_button<T: Transport>(
 /// changed; the vendored banner wraps it as "Could not change “{}”.".
 pub fn a3954_button_failure_label(failure: SettingFailure, button: A3954Button) -> String {
     format!("{} ({})", a3954_button_label(button), failure.reason())
+}
+
+/// The row name a failed A3954 write's banner shows, matching the setting the
+/// row names. A case-screen write changes one of four flags, so it names the
+/// specific flag row the user toggled (relative to the state the command was
+/// built from) instead of the panel title; the other settings name their own row.
+pub fn a3954_setting_row_label(setting: A3954SettingCommand, current: &A3954State) -> &'static str {
+    if let A3954SettingCommand::CaseFeatures(changed) = setting {
+        let before = current.case_features;
+        return if changed.atmospheric != before.atmospheric {
+            "Atmospheric"
+        } else if changed.remote_camera != before.remote_camera {
+            "Remote camera"
+        } else if changed.find_device != before.find_device {
+            "Find device"
+        } else if changed.case_spatial_audio != before.case_spatial_audio {
+            "Spatial audio on case"
+        } else {
+            a3954_setting_label(setting)
+        };
+    }
+    a3954_setting_label(setting)
+}
+
+/// The `AppState.error-label` of a failed A3954 settings write, naming the row
+/// the user changed; worded like [`SettingFailure::label`].
+pub fn a3954_setting_failure_label(
+    failure: SettingFailure,
+    setting: A3954SettingCommand,
+    current: &A3954State,
+) -> String {
+    failure.row_label(a3954_setting_row_label(setting, current))
 }
 
 /// The row name a failed A3954 write's banner shows, matching the setting the
@@ -5817,9 +5851,13 @@ fn a3954_mode_rows(wind_noise_suppression: bool) -> Vec<SettingRow> {
 fn show_device_pages(state: &AppState<'_>, device: Option<&DeviceState>) {
     let has_settings = device.is_some_and(|device| device.settings.is_some());
     let a3954 = device.and_then(|device| device.a3954.as_ref());
+    // The A3954 state always parses the measured case features and language, so
+    // its presence is what makes the Case page available; the A3062 has no case
+    // block and no Case page.
+    let has_case = a3954.is_some();
     state.set_device_pages(ModelRc::new(VecModel::from(device_pages(
         has_settings,
-        a3954.is_some(),
+        has_case,
     ))));
     // Neither model has per-earbud control surfaces in this slice, and only the
     // A3954 reports spatial audio. The A3954 reports its case battery on the
@@ -6306,10 +6344,12 @@ pub const A3954_PRESS_ACTION_OPTIONS: [&str; 8] = [
     "Play/pause",
 ];
 
-/// The action choices of the two A3954 slide gestures: exactly the measured
-/// [`A3954_SLIDE_ACTIONS`] catalog (volume up and volume down). The measured
-/// slide catalog has no "none" action, so the page offers no disabled choice.
-pub const A3954_SLIDE_ACTION_OPTIONS: [&str; 2] = ["Volume up", "Volume down"];
+/// The action choices of the two A3954 slide gestures: no action, then the
+/// measured [`A3954_SLIDE_ACTIONS`] catalog (volume up and volume down). The
+/// measured slide catalogs name no other action, but OpenSCL4's A3954 table sets
+/// `IndividualDisable` for every gesture, so the slides accept the measured
+/// "no action" value exactly like the presses do.
+pub const A3954_SLIDE_ACTION_OPTIONS: [&str; 3] = ["None", "Volume up", "Volume down"];
 
 /// The case-display language choices, in [`A3954CaseLanguage`] value order.
 pub const A3954_CASE_LANGUAGE_OPTIONS: [&str; 3] = ["Japanese", "English", "Chinese"];
@@ -6359,8 +6399,8 @@ pub const fn a3954_button_label(button: A3954Button) -> &'static str {
     }
 }
 
-/// The option strings of one gesture row: the eight press choices for a press,
-/// the two volume choices for a slide.
+/// The option strings of one gesture row: "None" then the eight press choices for
+/// a press, or "None" then the two volume choices for a slide.
 pub const fn a3954_button_options(button: A3954Button) -> &'static [&'static str] {
     if button.is_slide() {
         &A3954_SLIDE_ACTION_OPTIONS
@@ -6370,10 +6410,10 @@ pub const fn a3954_button_options(button: A3954Button) -> &'static [&'static str
 }
 
 /// The index of the action a gesture currently performs, in
-/// [`a3954_button_options`]: a press row's `0` is "None", then the measured
-/// action order; a slide row's `0` and `1` are the two volume actions. A nibble
-/// the measured catalogs do not name is kept unselected (`-1`) rather than shown
-/// as an action the device did not report.
+/// [`a3954_button_options`]: `0` is "None" (the measured `0x0F` no-action value),
+/// then the gesture's measured action order. A nibble the measured catalogs do
+/// not name is kept unselected (`-1`) rather than shown as an action the device
+/// did not report.
 pub fn a3954_button_action_index(button: A3954Button, value: A3954ButtonActionValue) -> i32 {
     let position = |action| {
         button
@@ -6381,12 +6421,6 @@ pub fn a3954_button_action_index(button: A3954Button, value: A3954ButtonActionVa
             .iter()
             .position(|candidate| *candidate == action)
     };
-    if button.is_slide() {
-        return match value.action().and_then(position) {
-            Some(index) => index as i32,
-            None => -1,
-        };
-    }
     match value {
         A3954ButtonActionValue::Disabled => 0,
         A3954ButtonActionValue::Action(action) => match position(action) {
@@ -6398,30 +6432,21 @@ pub fn a3954_button_action_index(button: A3954Button, value: A3954ButtonActionVa
 }
 
 /// The action value a gesture row's option index names, or `None` outside the
-/// row's choices. A press row's `0` is the measured "no action" value; a slide
-/// row has no such choice because the measured slide catalog has none.
+/// row's choices. Index `0` is the measured "no action" value for every row,
+/// then the gesture's measured action catalog; no other index is a choice.
 pub fn a3954_button_action_for_index(
     button: A3954Button,
     index: i32,
 ) -> Option<A3954ButtonActionValue> {
-    let actions = button.available_actions();
-    if button.is_slide() {
-        let index = usize::try_from(index).ok()?;
-        return actions
-            .get(index)
-            .copied()
-            .map(A3954ButtonActionValue::from);
+    if index == 0 {
+        return Some(A3954ButtonActionValue::Disabled);
     }
-    match index {
-        0 => Some(A3954ButtonActionValue::Disabled),
-        index => {
-            let index = usize::try_from(index - 1).ok()?;
-            actions
-                .get(index)
-                .copied()
-                .map(A3954ButtonActionValue::from)
-        }
-    }
+    let index = usize::try_from(index - 1).ok()?;
+    button
+        .available_actions()
+        .get(index)
+        .copied()
+        .map(A3954ButtonActionValue::from)
 }
 
 /// The eight press gesture rows of the Controls page, in measured state order,
@@ -7226,9 +7251,20 @@ fn apply_a3954_setting_outcome(
         }
         Err(failure) => {
             // The worker closes the session after a failed write; Retry in the
-            // banner opens a fresh connection.
+            // banner opens a fresh connection. The banner names the row the user
+            // changed; a case-screen toggle names its specific flag.
             inner.stop_worker();
-            state.set_error_label(failure.a3954_label(setting).into());
+            let label = {
+                let device = inner.device.borrow();
+                match device.as_ref().and_then(|device| device.a3954.as_ref()) {
+                    Some(current) => a3954_setting_failure_label(failure, setting, current),
+                    // The connected state is always present on this path; keep a
+                    // generic row name if it is not, so the banner still explains
+                    // the failure instead of panicking.
+                    None => failure.row_label(a3954_setting_label(setting)),
+                }
+            };
+            state.set_error_label(label.into());
         }
     }
     refresh_tray(inner, &state);
@@ -7447,7 +7483,7 @@ fn answer_a3954_setting(
     if state.get_connection() != Connection::Connected {
         return;
     }
-    let setting = {
+    let (setting, label) = {
         let device = inner.device.borrow();
         let Some(a3954) = device
             .as_ref()
@@ -7455,16 +7491,18 @@ fn answer_a3954_setting(
         else {
             return;
         };
-        command(a3954)
-    };
-    let Some(setting) = setting else {
-        return;
+        let Some(setting) = command(a3954) else {
+            return;
+        };
+        // Resolve the banner row while the pre-write state is borrowed: a
+        // case-screen toggle names the flag it changes.
+        (setting, a3954_setting_row_label(setting, a3954))
     };
     let sent = inner.send_queued(&inner.setting_change, |request| {
         DeviceCommand::SetA3954Setting { request, setting }
     });
     if !sent {
-        state.set_error_label(SettingFailure::Disconnected.a3954_label(setting).into());
+        state.set_error_label(SettingFailure::Disconnected.row_label(label).into());
     }
 }
 
@@ -14316,9 +14354,9 @@ mod tests {
             "the connect easy chat is restored"
         );
 
-        // The case display language is read-only in this slice: the case display
-        // has no page and its `07 8A` write was removed from the app's API as
-        // out of scope. The parsed field is compared with the connect state in
+        // The case display language is not written by this settings check: the
+        // buttons/case acceptance (`manual_a3954_buttons_and_case`) owns its
+        // `07 8A` write. The parsed field is compared with the connect state in
         // the final poll below, like the other untouched fields.
 
         // LDAC may reset the RFCOMM link; the helper reconnects and retries.
@@ -14534,12 +14572,17 @@ mod tests {
             } else {
                 original.with_non_tws(target.into())
             };
-            let after = live.set_button_until(label, button, written, |byte| byte == written);
+            let after = live.set_button_until(label, button, written, tws_connected, |byte| {
+                byte == written
+            });
             let after_byte = a3954_of(&after).button_action_byte(button);
-            let restored =
-                live.set_button_until(&format!("{label} restore"), button, original, |byte| {
-                    byte == original
-                });
+            let restored = live.set_button_until(
+                &format!("{label} restore"),
+                button,
+                original,
+                tws_connected,
+                |byte| byte == original,
+            );
             let restored_byte = a3954_of(&restored).button_action_byte(button);
             let after_value = if tws_connected {
                 after_byte.tws()
@@ -14686,9 +14729,10 @@ mod tests {
             "the connect case language is restored"
         );
 
-        // --- The final poll must equal the connect state for every field this
-        // check wrote; the air pressure (deferred in this slice) and the
-        // firmware must be unchanged.
+        // --- The final poll must equal the connect state in every parsed A3954
+        // field, not only the ones this check wrote: the twelve buttons, the
+        // four case features, the case language, the air pressure (read-only in
+        // this slice) and everything else the state carries.
         let final_state = live.poll();
         let final_a3954 = a3954_of(&final_state).clone();
         println!("  final state:");
@@ -14714,8 +14758,16 @@ mod tests {
             final_state.firmware, initial_firmware,
             "the earbud firmware is unchanged"
         );
+        // Compare the whole parsed block too, so a field this check never names
+        // also has to match. `assert!` is used instead of `assert_eq!` because
+        // the parsed state carries the case serial, and a failing Debug dump
+        // would put it in the test output.
+        assert!(
+            final_a3954 == initial,
+            "the final poll equals the connect state in every parsed A3954 field"
+        );
         println!(
-            "  restored: all 12 action bytes, the four case features and the case language equal the connect state; {} reconnect(s); pairing untouched",
+            "  restored: every parsed A3954 field equals the connect state; {} reconnect(s); pairing untouched",
             live.reconnects
         );
         drop(live);
@@ -14847,13 +14899,16 @@ mod tests {
 
         /// Writes one A3954 `04 81` gesture frame and polls until `expected`
         /// holds, with the same spacing and retry as
-        /// [`Self::set_setting_until`]. The caller passes the whole action byte,
-        /// so the nibble it does not edit is preserved and a restore is exact.
+        /// [`Self::set_setting_until`]. The caller passes the whole action byte
+        /// and whether the live connection slot is the TWS (low) nibble, so the
+        /// retry log prints the slot the write edits, the nibble it does not
+        /// edit is preserved and a restore is exact.
         fn set_button_until(
             &mut self,
             what: &str,
             button: A3954Button,
             action: A3954ButtonActionByte,
+            live_tws: bool,
             expected: impl Fn(A3954ButtonActionByte) -> bool,
         ) -> DeviceState {
             for attempt in 1..=A3954_WRITE_ATTEMPTS {
@@ -14865,9 +14920,14 @@ mod tests {
                 if expected(reported) {
                     return state;
                 }
+                let shown = if live_tws {
+                    reported.tws()
+                } else {
+                    reported.non_tws()
+                };
                 println!(
                     "  {what}: the device still reports {}; retrying ({attempt}/{A3954_WRITE_ATTEMPTS})",
-                    a3954_action_label(reported.tws())
+                    a3954_action_label(shown)
                 );
             }
             self.poll()
@@ -19998,13 +20058,13 @@ mod tests {
         let slides: Vec<SettingRow> = controls[1].rows.iter().collect();
         assert_eq!(
             slides.iter().map(|row| row.index).collect::<Vec<_>>(),
-            [0, 0, 1, 1],
-            "the measured TWS action of each slide"
+            [1, 1, 2, 2],
+            "the measured TWS action of each slide, after the None choice"
         );
         assert_eq!(
             select_options(&controls[1], 0),
-            ["Volume up", "Volume down"],
-            "the measured slide catalog has only the two volume actions"
+            ["None", "Volume up", "Volume down"],
+            "the measured slide catalog plus the measured no-action value"
         );
         assert_eq!(
             row_ids(&controls[2]),
@@ -20261,7 +20321,7 @@ mod tests {
             // Every measured option index round-trips to the action value the
             // row writes back; no index outside the row's choices names one.
             let actions = button.available_actions();
-            let expected_len = actions.len() + usize::from(!button.is_slide());
+            let expected_len = actions.len() + 1;
             assert_eq!(a3954_button_options(button).len(), expected_len);
             for index in 0..i32::try_from(expected_len).expect("a small row") {
                 let value = a3954_button_action_for_index(button, index)
@@ -20280,13 +20340,11 @@ mod tests {
                 -1,
                 "{id}: an unmeasured nibble is left unselected"
             );
-            if !button.is_slide() {
-                assert_eq!(
-                    a3954_button_action_index(button, A3954ButtonActionValue::Disabled),
-                    0,
-                    "{id}: a disabled press is the page's None"
-                );
-            }
+            assert_eq!(
+                a3954_button_action_index(button, A3954ButtonActionValue::Disabled),
+                0,
+                "{id}: the measured no-action value is the page's None"
+            );
 
             // The row shows the measured action of the live connection slot.
             let measured = state.button_action_byte(button);
@@ -20484,6 +20542,50 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_a3954_case_toggle_names_the_row_it_toggled() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            state.set_device_name("Liberty 4 Pro".into());
+            state.set_device_code("A3954".into());
+            apply_outcome(
+                ui,
+                &inner,
+                ConnectOutcome::Connected(a3954_model(), Box::new(a3954_state())),
+            );
+            let current = a3954_state().a3954.expect("the A3954 block");
+            // The find-device row toggled off: the banner names that row, not the
+            // panel title ("Case screen").
+            let find_device_off = A3954CaseFeatures {
+                find_device: false,
+                ..current.case_features
+            };
+            apply_a3954_setting_outcome(
+                ui,
+                &inner,
+                A3954SettingCommand::CaseFeatures(find_device_off),
+                Err(SettingFailure::TimedOut),
+            );
+            assert_eq!(
+                state.get_error_label().as_str(),
+                "Find device (no answer)",
+                "the banner names the toggled case row"
+            );
+            // The case-language row keeps its own name.
+            apply_a3954_setting_outcome(
+                ui,
+                &inner,
+                A3954SettingCommand::CaseLanguage(A3954CaseLanguage::Chinese),
+                Err(SettingFailure::Disconnected),
+            );
+            assert_eq!(
+                state.get_error_label().as_str(),
+                "Case language (connection lost)"
+            );
+        });
+    }
+
+    #[test]
     fn a3954_row_ids_name_only_measured_setting_commands() {
         let state = a3954_state().a3954.expect("the A3954 block");
         let toggle = |id, on| a3954_toggle_command(id, on, &state);
@@ -20661,26 +20763,73 @@ mod tests {
         );
         assert_eq!(a3954_number_command("sideTone", 80, &state), None);
 
-        // The banner names the setting that failed.
+        // The banner names the row that failed. A case-screen write changes one
+        // of four flags, so it names the specific flag row the control toggled,
+        // like a gesture write names its gesture, not the panel title.
         assert_eq!(a3954_setting_label(A3954SettingCommand::Ldac(true)), "LDAC");
         assert_eq!(
             a3954_setting_label(A3954SettingCommand::CaseFeatures(state.case_features)),
-            "Case screen"
+            "Case screen",
+            "the panel name stays the fallback for a command that changes no flag"
         );
         assert_eq!(
-            a3954_setting_label(A3954SettingCommand::CaseLanguage(
-                A3954CaseLanguage::English
-            )),
-            "Case language"
+            a3954_setting_failure_label(
+                SettingFailure::TimedOut,
+                A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                    atmospheric: true,
+                    ..state.case_features
+                }),
+                &state,
+            ),
+            "Atmospheric (no answer)"
         );
         assert_eq!(
-            SettingFailure::Disconnected.a3954_label(A3954SettingCommand::WearingDetection(false)),
+            a3954_setting_failure_label(
+                SettingFailure::Disconnected,
+                A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                    remote_camera: true,
+                    ..state.case_features
+                }),
+                &state,
+            ),
+            "Remote camera (connection lost)"
+        );
+        assert_eq!(
+            a3954_setting_failure_label(
+                SettingFailure::TimedOut,
+                A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                    find_device: false,
+                    ..state.case_features
+                }),
+                &state,
+            ),
+            "Find device (no answer)"
+        );
+        assert_eq!(
+            a3954_setting_failure_label(
+                SettingFailure::Disconnected,
+                A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                    case_spatial_audio: true,
+                    ..state.case_features
+                }),
+                &state,
+            ),
+            "Spatial audio on case (connection lost)"
+        );
+        assert_eq!(
+            a3954_setting_failure_label(
+                SettingFailure::Disconnected,
+                A3954SettingCommand::WearingDetection(false),
+                &state,
+            ),
             "Wearing detection (connection lost)"
         );
         assert_eq!(
-            SettingFailure::TimedOut.a3954_label(A3954SettingCommand::CaseLanguage(
-                A3954CaseLanguage::English
-            )),
+            a3954_setting_failure_label(
+                SettingFailure::TimedOut,
+                A3954SettingCommand::CaseLanguage(A3954CaseLanguage::English),
+                &state,
+            ),
             "Case language (no answer)"
         );
         // A failed gesture write names the row it changed.
@@ -20986,10 +21135,10 @@ mod tests {
                 other => panic!("unexpected command: {other:?}"),
             }
 
-            // A slide row offers only the two measured volume actions; the
+            // A slide row offers None plus the two measured volume actions; the
             // measured `0x11` slide changed to volume up keeps its `1` high
             // nibble and becomes `0x10`.
-            actions.invoke_set_option("rightSlideDown".into(), 0);
+            actions.invoke_set_option("rightSlideDown".into(), 1);
             match next("right slide down") {
                 DeviceCommand::SetA3954Button {
                     request,
@@ -21003,12 +21152,30 @@ mod tests {
                 other => panic!("unexpected command: {other:?}"),
             }
 
+            // Choosing None on a slide writes the measured no-action value and
+            // keeps the other nibble too: the measured `0x00` slide changes only
+            // its live slot.
+            actions.invoke_set_option("leftSlideUp".into(), 0);
+            match next("left slide up disabled") {
+                DeviceCommand::SetA3954Button {
+                    request,
+                    button,
+                    action,
+                } => {
+                    assert_eq!(request, 6);
+                    assert_eq!(button, A3954Button::LeftSlideUp);
+                    assert_eq!(action.byte(), 0x0F);
+                    assert_eq!(action.tws(), A3954ButtonActionValue::Disabled);
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+
             // A case-screen toggle writes the four measured flags with one
             // changed and the other three kept.
             actions.invoke_set_toggle("findDevice".into(), false);
             match next("case screen") {
                 DeviceCommand::SetA3954Setting { request, setting } => {
-                    assert_eq!(request, 6);
+                    assert_eq!(request, 7);
                     assert_eq!(
                         setting,
                         A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
@@ -21023,7 +21190,7 @@ mod tests {
             actions.invoke_set_option("caseLanguage".into(), 2);
             match next("case language") {
                 DeviceCommand::SetA3954Setting { request, setting } => {
-                    assert_eq!(request, 7);
+                    assert_eq!(request, 8);
                     assert_eq!(
                         setting,
                         A3954SettingCommand::CaseLanguage(A3954CaseLanguage::Chinese)
@@ -21040,7 +21207,7 @@ mod tests {
             // An option outside a gesture row's measured choices, and ids that
             // are not gesture rows, write no `04 81` frame.
             actions.invoke_set_option("leftSinglePress".into(), 9);
-            actions.invoke_set_option("leftSlideUp".into(), 2);
+            actions.invoke_set_option("leftSlideUp".into(), 3);
             actions.invoke_set_option("singlePress".into(), 1);
             assert!(queued.try_recv().is_err(), "no invented A3062 write");
 
