@@ -164,3 +164,34 @@ reconnect. No hardware acceptance claim is implied by this source record.
   view still renders state only. The A3954's sound-mode block is optional: when
   the device reports an unmeasured value for it, the controller hides the scale
   and the page, so `modes.slint` only ever renders a measured scale.
+- A3954 controls and case pages: the vendored `PanelKind.presses`,
+  `PanelKind.gestures`, `PanelKind.case-screen` and `PanelKind.case-status` had
+  no controller producing them, so the controller now fills the Presses,
+  Slides and Case panels with the existing `SettingRowView` row kinds. The only
+  vendored-component changes are additive: `components/settings.slint`'s
+  `PanelText` gains the `Slides` title and its wave icon for
+  `PanelKind.gestures`, and `SettingText.short-label` no longer shortens the
+  side-specific gesture ids (`leftSinglePress`, `rightSlideUp`, …) to the
+  A3062's side-less `Single press` wording: this app shows both earbuds in the
+  one panel, so the side stays in the row label and the twelve names live in
+  `components/localized.slint` with the rest of the runtime labels (the case
+  feature and language ids, the gesture actions, `Japanese`/`English`/`Chinese`).
+  `desktop/translations/ru/...po` gained their Russian translations. No visible
+  layout, token, callback or A3062 behaviour changed. The controller edits the
+  gesture action byte's live connection slot (the `01 01` TWS flag: low nibble
+  when the earbuds are TWS-connected, high when they are not) and keeps the
+  other nibble; the core's `07 87` command body uses the Soundcore app's flag
+  order, which differs from the state order.
+- A3954 controls/case review (ticket 04): each Controls gesture row now offers
+  `None` (the measured `0x0F` no-action value) plus its measured action catalog,
+  and the four slide rows gain that choice too because the A3954 accepts
+  `IndividualDisable` for all twelve gestures. A failed case-screen write's
+  banner names the flag row the user toggled (`Find device`) instead of the
+  panel title, and the case-language select follows the runtime-label mapping
+  like its row (localized names in the Russian UI), unlike the Settings page's
+  app-language picker, which keeps each language's own name. `UI_KIT.md` records
+  the restored "do not translate protocol identifiers or product names" rule and
+  scopes the own-language rule to the app-language picker. No layout, callback
+  or device behavior changed beyond the extra `None` choice and the banner
+  wording; the controller still derives every row from state and owns every
+  device write.

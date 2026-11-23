@@ -13,8 +13,8 @@
 //!   prompts and effects) for models that have a settings block;
 //! - write the measured `03 87` equalizer preset and custom frames for models
 //!   that have one;
-//! - write the measured A3954 scale, equalizer and setting frames for the
-//!   Liberty 4 Pro, whose bodies differ from the A3062 ones.
+//! - write the measured A3954 scale, equalizer, button and setting frames for
+//!   the Liberty 4 Pro, whose bodies differ from the A3062 ones.
 //!
 //! Nothing here knows about Windows, sockets, threads or timers.
 //!
@@ -35,12 +35,13 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use soundcore_models::{
-    A3954_EQUALIZER_COMMAND_BODY_LEN, A3954EqualizerState, A3954SettingCommand, A3954SoundMode,
-    DUAL_CONNECTIONS_LIST, DeviceModel, DeviceState, DualConnectionDevice, DualConnectionsError,
-    DualConnectionsList, EQUALIZER_COMMAND_BODY_LEN, EqualizerPreset, EqualizerState,
-    SettingCommand, SoundMode, StateError, VISIBLE_EQ_BANDS, dual_connections_connect_frame,
-    dual_connections_disconnect_frame, dual_connections_forget_frame, dual_connections_request,
-    parse_dual_connections_body, parse_state_frame,
+    A3954_EQUALIZER_COMMAND_BODY_LEN, A3954Button, A3954ButtonActionByte, A3954EqualizerState,
+    A3954SettingCommand, A3954SoundMode, DUAL_CONNECTIONS_LIST, DeviceModel, DeviceState,
+    DualConnectionDevice, DualConnectionsError, DualConnectionsList, EQUALIZER_COMMAND_BODY_LEN,
+    EqualizerPreset, EqualizerState, SettingCommand, SoundMode, StateError, VISIBLE_EQ_BANDS,
+    dual_connections_connect_frame, dual_connections_disconnect_frame,
+    dual_connections_forget_frame, dual_connections_request, parse_dual_connections_body,
+    parse_state_frame,
 };
 use soundcore_protocol::{
     Command, Direction, INBOUND_PREFIX, MIN_FRAME_LEN, ParseError, encode, parse, request,
@@ -144,6 +145,9 @@ pub enum SessionError {
     /// The model's dual-connections list and writes were not measured in this
     /// slice, so nothing is read or written (for example the A3949).
     UnsupportedDualConnections,
+    /// The model has no measured A3954 button configuration, so there is no
+    /// `04 81` frame to write.
+    UnsupportedButtonConfiguration,
 }
 
 impl std::fmt::Display for SessionError {
@@ -176,6 +180,12 @@ impl std::fmt::Display for SessionError {
                     "dual connections are not supported for this model"
                 )
             }
+            Self::UnsupportedButtonConfiguration => {
+                write!(
+                    formatter,
+                    "button configuration is not supported for this model"
+                )
+            }
         }
     }
 }
@@ -190,7 +200,8 @@ impl std::error::Error for SessionError {
             | Self::UnsupportedSoundMode
             | Self::UnsupportedEqualizer
             | Self::UnsupportedSetting
-            | Self::UnsupportedDualConnections => None,
+            | Self::UnsupportedDualConnections
+            | Self::UnsupportedButtonConfiguration => None,
         }
     }
 }
@@ -550,6 +561,39 @@ impl<T: Transport> DeviceSession<T> {
             .model
             .a3954_setting_frame(setting)
             .ok_or(SessionError::UnsupportedSetting)?;
+        self.transport.write_all(&frame)?;
+        Ok(())
+    }
+
+    /// Write one A3954 `04 81` button configuration frame and return once
+    /// every byte of it is written.
+    ///
+    /// The body is the measured three bytes `[side, button_id, action]`; see
+    /// [`A3954Button::command_body`](soundcore_models::A3954Button::command_body).
+    /// The action is the whole TwsLowBits byte
+    /// ([`A3954ButtonActionByte`](soundcore_models::A3954ButtonActionByte)), so
+    /// a caller replaces the nibble it edits and keeps the other one, which
+    /// makes a state read followed by a write restore exactly what the device
+    /// reported. The A3954 has no set-all button packet: one call is one
+    /// gesture and one frame.
+    ///
+    /// This method never reads. The device acknowledges with an empty inbound
+    /// `04 81` frame and may push notifications; neither is a state response.
+    /// Call [`Self::poll_state`] afterwards to read the action the device now
+    /// reports, and it will skip those frames.
+    ///
+    /// Fails with [`SessionError::UnsupportedButtonConfiguration`] when the
+    /// model has no measured A3954 state blocks, and writes nothing in that
+    /// case.
+    pub fn set_a3954_button(
+        &mut self,
+        button: A3954Button,
+        action: A3954ButtonActionByte,
+    ) -> Result<(), SessionError> {
+        let frame = self
+            .model
+            .a3954_button_frame(button, action)
+            .ok_or(SessionError::UnsupportedButtonConfiguration)?;
         self.transport.write_all(&frame)?;
         Ok(())
     }

@@ -232,7 +232,10 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
 - The only device writes are the read-only `01 01` state request, the `06 81`
   sound-mode frame, the `03 87` equalizer frames (a built-in preset, the custom
   bands, and an applied saved profile's custom curve), the measured one-frame
-  settings writes behind the section pages, and the dual-connections writes
+  settings writes behind the section pages, the measured A3954 `04 81`
+  button-configuration frames (one per gesture, editing the action byte's live
+  TWS slot and keeping the other nibble), the A3954 `07 87` case-screen feature
+  and `07 8A` case-language frames, and the dual-connections writes
   (`0B 84` for the setting, `0B 82`/`0B 81`/`0B 83` for a list row); its `0B 01`
   list request is the only other read. In Demo mode these same requests and
   commands are answered in-process by the demo worker against its simulated
@@ -594,6 +597,46 @@ UI shows “Сначала включите пространственный з�
 The **About the device** page: left/right/case battery (69/69/80 %), both earbud
 firmwares 04.29 and the case firmware 01.58. The serial row is deliberately
 absent; the capture carries no address or serial.
+
+### Live A3954 buttons/case acceptance captures (ticket 03, 2026-11-23)
+
+These three captures are from the finished build during the **real-device**
+acceptance run on the paired soundcore Liberty 4 Pro (A3954, firmware 04.29,
+case firmware 01.58; case battery 60 % during the run), connected over Windows
+RFCOMM through Add Device with Demo mode off. They show the buttons/case pages;
+no Bluetooth address or serial number appears on any page or capture. The
+protocol run behind them (the ignored `manual_a3954_buttons_and_case` test)
+changed and restored all twelve gesture action bytes, toggled each case-screen
+feature and walked the case language, re-polling after every write to a
+byte-for-byte match; the run is recorded in
+`.scratch/a3954-buttons-case/issues/03-live-acceptance.md`. The device reported
+its TWS link down during the run (only the left earbud active), so the Controls
+page shows the disconnected-state actions the device actually applies. **Live
+limitation:** that TWS-down state means only the disconnected-state (high) action
+nibble was written on hardware; the TWS-connected (low-nibble) write path and
+the `01 01` TWS flag's connected branch are covered by the unit tests against the
+captured state, not by this live run. The ticket-04 review re-ran the ignored
+test on 2026-11-23 (1 passed / 0 reconnects, whole parsed state restored) and the
+device was still TWS-down, so the limitation stands. Re-run the ignored test
+with both earbuds active to exercise that branch on hardware.
+
+![Controls with a connected Liberty 4 Pro](live-a3954-controls.png)
+
+The real **Controls** page: the Presses panel with all eight press rows and the
+device-reported actions (singles Play/pause, doubles Next song, triples None,
+longs Ambient sound mode).
+
+![Slides and ambient cycle with a connected Liberty 4 Pro](live-a3954-controls-slides.png)
+
+The same page scrolled to the **Slides** panel (left/right slide up Volume up,
+left/right slide down Volume down) and the **Switching modes** panel with the
+device's ambient cycle (Noise canceling and Transparency on, Normal off).
+
+![Case with a connected Liberty 4 Pro](live-a3954-case.png)
+
+The real **Case** page: the four measured case-screen feature toggles (all off),
+the case language (English) and the read-only Status panel with case battery
+60 % and case firmware 01.58. The case serial never reaches the page.
 
 ## Adaptive layout checks
 

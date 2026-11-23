@@ -11,10 +11,12 @@ use std::rc::Rc;
 
 use soundcore_models::{
     A3954AirplaneMode, A3954AmbientSoundMode, A3954AutoPowerOff, A3954AutoPowerOffDuration,
-    A3954EasyChat, A3954EasyChatWaitTime, A3954SettingCommand, A3954SoundMode,
-    A3954SoundModeSlider, A3954SpatialAudio, A3954SpatialAudioMode, A3954SpatialAudioMusicMode,
-    AmbientSoundModeCycle, DbLimit, DecibelReadingRefreshRate, VISIBLE_EQ_BANDS,
-    a3954_equalizer_preset, model_by_code, parse_state_frame,
+    A3954Button, A3954ButtonAction, A3954ButtonActionByte, A3954ButtonActionValue,
+    A3954CaseFeatures, A3954CaseLanguage, A3954EasyChat, A3954EasyChatWaitTime,
+    A3954SettingCommand, A3954SoundMode, A3954SoundModeSlider, A3954SpatialAudio,
+    A3954SpatialAudioMode, A3954SpatialAudioMusicMode, AmbientSoundModeCycle, DbLimit,
+    DecibelReadingRefreshRate, VISIBLE_EQ_BANDS, a3954_equalizer_preset, model_by_code,
+    parse_state_frame,
 };
 use soundcore_protocol::{Command, Direction, encode, request};
 use soundcore_session::{DeviceSession, SessionError, Transport};
@@ -444,6 +446,19 @@ fn writes_the_exact_a3954_setting_frames_once() {
             }),
             "08 EE 00 00 00 10 9D 0C 00 00 02 B1",
         ),
+        (
+            A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                atmospheric: false,
+                remote_camera: false,
+                find_device: true,
+                case_spatial_audio: false,
+            }),
+            "08 EE 00 00 00 07 87 0E 00 00 01 00 00 93",
+        ),
+        (
+            A3954SettingCommand::CaseLanguage(A3954CaseLanguage::Chinese),
+            "08 EE 00 00 00 07 8A 0B 00 02 94",
+        ),
     ];
 
     for (setting, expected) in cases {
@@ -455,6 +470,142 @@ fn writes_the_exact_a3954_setting_frames_once() {
             .expect("write the setting");
         assert_eq!(transport.writes(), vec![hex(expected)], "{setting:?}");
     }
+}
+
+#[test]
+fn writes_the_exact_a3954_button_frames_once() {
+    // The action bytes are the real fixture's, so each frame pins the measured
+    // side and button id as well as the one-gesture body.
+    let cases: &[(A3954Button, u8, &str)] = &[
+        (
+            A3954Button::LeftSingle,
+            0x66,
+            "08 EE 00 00 00 04 81 0D 00 00 02 66 F0",
+        ),
+        (
+            A3954Button::RightSingle,
+            0x66,
+            "08 EE 00 00 00 04 81 0D 00 01 02 66 F1",
+        ),
+        (
+            A3954Button::LeftDouble,
+            0x32,
+            "08 EE 00 00 00 04 81 0D 00 00 00 32 BA",
+        ),
+        (
+            A3954Button::RightDouble,
+            0x33,
+            "08 EE 00 00 00 04 81 0D 00 01 00 33 BC",
+        ),
+        (
+            A3954Button::LeftTriple,
+            0xFF,
+            "08 EE 00 00 00 04 81 0D 00 00 05 FF 8C",
+        ),
+        (
+            A3954Button::RightTriple,
+            0xFF,
+            "08 EE 00 00 00 04 81 0D 00 01 05 FF 8D",
+        ),
+        (
+            A3954Button::LeftLong,
+            0x44,
+            "08 EE 00 00 00 04 81 0D 00 00 01 44 CD",
+        ),
+        (
+            A3954Button::RightLong,
+            0x44,
+            "08 EE 00 00 00 04 81 0D 00 01 01 44 CE",
+        ),
+        (
+            A3954Button::LeftSlideUp,
+            0x00,
+            "08 EE 00 00 00 04 81 0D 00 00 06 00 8E",
+        ),
+        (
+            A3954Button::RightSlideUp,
+            0x00,
+            "08 EE 00 00 00 04 81 0D 00 01 06 00 8F",
+        ),
+        (
+            A3954Button::LeftSlideDown,
+            0x11,
+            "08 EE 00 00 00 04 81 0D 00 00 07 11 A0",
+        ),
+        (
+            A3954Button::RightSlideDown,
+            0x11,
+            "08 EE 00 00 00 04 81 0D 00 01 07 11 A1",
+        ),
+        (
+            A3954Button::LeftSingle,
+            0x7A,
+            "08 EE 00 00 00 04 81 0D 00 00 02 7A 04",
+        ),
+    ];
+
+    for (button, action, expected) in cases {
+        // No reads are scripted: the write must not try to read the ack.
+        let transport = FakeTransport::default();
+        let mut session = DeviceSession::new(model(), transport.clone());
+        session
+            .set_a3954_button(*button, A3954ButtonActionByte::from_byte(*action))
+            .expect("write the button frame");
+        assert_eq!(transport.writes(), vec![hex(expected)], "{button:?}");
+    }
+
+    // The app's own captured writes: right double press, connected action 1
+    // and 2 (the high nibble 1 is the disconnected-state action).
+    for (action, expected) in [
+        (0x11, "08 EE 00 00 00 04 81 0D 00 01 00 11 9A"),
+        (0x12, "08 EE 00 00 00 04 81 0D 00 01 00 12 9B"),
+    ] {
+        let transport = FakeTransport::default();
+        let mut session = DeviceSession::new(model(), transport.clone());
+        session
+            .set_a3954_button(
+                A3954Button::RightDouble,
+                A3954ButtonActionByte::from_byte(action),
+            )
+            .expect("write the button frame");
+        assert_eq!(transport.writes(), vec![hex(expected)]);
+    }
+}
+
+#[test]
+fn writes_the_parsed_a3954_button_actions_and_case_settings_back() {
+    // The read-then-write path a controller uses: decode the real state, edit
+    // one gesture, write the exact frame and the parsed case flags/language.
+    let transport = FakeTransport::default();
+    let mut session = DeviceSession::new(model(), transport.clone());
+
+    let state = parse_state_frame(model(), &a3954_frame()).expect("the real A3954 state");
+    let a3954 = state.a3954.expect("the A3954 block");
+    let left_double = a3954.button_action_byte(A3954Button::LeftDouble);
+    let edited = left_double.with_tws(A3954ButtonActionValue::Action(A3954ButtonAction::PlayPause));
+    session
+        .set_a3954_button(A3954Button::LeftDouble, edited)
+        .expect("write the edited button");
+    session
+        .set_a3954_setting(A3954SettingCommand::CaseFeatures(a3954.case_features))
+        .expect("write the parsed case features");
+    session
+        .set_a3954_setting(A3954SettingCommand::CaseLanguage(a3954.case_language))
+        .expect("write the parsed case language");
+
+    assert_eq!(
+        transport.writes(),
+        vec![
+            // Left double press, button id 0, action (nonTws=3, tws=6).
+            hex("08 EE 00 00 00 04 81 0D 00 00 00 36 BE"),
+            // The fixture's case flags: only find device on; the `07 87` body
+            // is in the app's order, so find device is the second byte.
+            hex("08 EE 00 00 00 07 87 0E 00 00 01 00 00 93"),
+            // The fixture's language: English.
+            hex("08 EE 00 00 00 07 8A 0B 00 01 93"),
+        ],
+        "one frame per write and no read"
+    );
 }
 
 #[test]
@@ -501,6 +652,16 @@ fn a_non_a3954_model_writes_nothing_through_the_a3954_apis() {
         .set_a3954_setting(A3954SettingCommand::Ldac(true))
         .expect_err("the P20i has no A3954 settings");
     assert!(matches!(error, SessionError::UnsupportedSetting), "{error}");
+    let error = session
+        .set_a3954_button(
+            A3954Button::LeftSingle,
+            A3954ButtonActionByte::from_byte(0x66),
+        )
+        .expect_err("the P20i has no A3954 buttons");
+    assert!(
+        matches!(error, SessionError::UnsupportedButtonConfiguration),
+        "{error}"
+    );
     assert!(transport.writes().is_empty(), "nothing may be written");
 }
 

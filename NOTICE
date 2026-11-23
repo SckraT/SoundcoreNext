@@ -76,16 +76,24 @@ project, under GPL-3.0-or-later:
   audio, easy chat, sound leak, case language and wearing detection), the
   sound-mode `06 81` `[mode, position, airplane, wind, 0xFF]` body layout, the
   114-byte `03 87` equalizer preset/custom body layout (two ten-band channels
-  with the HearID block) and the measured settings command bodies (`01 FF`,
+  with the HearID block), the measured settings command bodies (`01 FF`,
   `0B 84`, `01 86`, `20 82`, `20 81`, `10 82`, `06 82`, `01 81`, `10 9A`,
-  `10 81`, `10 9D`), adapted from
+  `10 81`, `10 9D`), the button configuration `04 81` three-byte
+  `[side, button_id, (non_tws << 4) | tws]` body with the measured button ids
+  and action catalogs, and the case-features `07 87` four-flag and
+  case-language `07 8A` one-byte bodies, adapted from
   `lib/src/devices/soundcore/a3954/state.rs`,
   `lib/src/devices/soundcore/a3954/structures.rs`,
   `lib/src/devices/soundcore/a3954/packets/outbound.rs`,
   `lib/src/devices/soundcore/a3954/packets/inbound/state_update.rs`,
   `lib/src/devices/soundcore/a3954/modules/` (sound modes, equalizer, spatial
-  audio, easy chat and the remaining settings handlers) and the A3954 device
-  setup in `lib/src/devices/soundcore/a3954.rs`;
+  audio, easy chat, case features, case language and the remaining settings
+  handlers), the A3954 device setup in
+  `lib/src/devices/soundcore/a3954.rs` and the shared button configuration
+  module and packet in
+  `lib/src/devices/soundcore/common/modules/button_configuration.rs`,
+  `lib/src/devices/soundcore/common/structures/button_configuration.rs` and
+  `lib/src/devices/soundcore/common/packet/outbound/set_button_configuration.rs`;
 - the A3954 twenty-two-preset equalizer catalog (ids, English names and
   ten-band curves), adapted from the shared
   `common_settings_type_2()` table in
@@ -100,5 +108,6 @@ project, under GPL-3.0-or-later:
 
 The Rust implementations in `core/` are this project's own; the adapted data and
 its evidence are recorded in `.scratch/windows-eq-presets/`,
-`.scratch/windows-settings-import/`, `.scratch/windows-dual-tray/` and
-`.scratch/a3954-settings/`, and in the commits that introduce them.
+`.scratch/windows-settings-import/`, `.scratch/windows-dual-tray/`,
+`.scratch/a3954-settings/` and `.scratch/a3954-buttons-case/`, and in the commits
+that introduce them.
