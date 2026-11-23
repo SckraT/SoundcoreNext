@@ -102,6 +102,14 @@ content, not in duplicated action or state logic.
   the main column narrower than its rows. A row's label shrinks and elides
   before its actions do: a long device or setting name must never push a button
   out of its panel.
+- A settings row (`components/settings.slint`) is a flow, not a fixed-height
+  rectangle: the divider is the row's first layout child, the content row
+  follows, and the row's height comes from that content. Never place a divider
+  at an absolute offset and never give a non-list row a fixed minimum height to
+  line controls up: a wrapped label, description or device reason then grows its
+  row instead of running over the next divider. The same rule applies to composed
+  rows elsewhere: centre controls with `cross-axis-alignment` rather than a
+  manual child `y`.
 - On Windows, quick settings occupy a separate panel below the device hero (and
   the one-earbud notice when present), not the sage device card. Their grid uses
   the compact control height, left-aligned rows and cell widths clamped to

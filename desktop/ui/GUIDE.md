@@ -84,6 +84,16 @@ dialog-local name, pass `name.text` to the action as above.
   `cross-axis-alignment` instead of assigning a child's `y`/`x` manually. Manual
   coordinates in a managed layout can be overridden and produce compiler
   warnings.
+- Keep a row's divider in normal flow with its content, and take the row's height
+  from that content. A divider at a fixed offset, or a fixed row height for
+  visual alignment, is only correct until a description wraps: then the text
+  runs over the next divider, or two rows overlap. `SettingRowView` is the
+  reference row (`VerticalLayout`, divider first, content row after, controls
+  centred with `cross-axis-alignment`) and the preview's `settings-rows-long`
+  captures are the fixture that shows the wrapped case.
+- Add new long-string cases to the preview's capture states rather than
+  eyeballing the normal ones: the failure appears only at narrow widths, 150 %
+  scale and long translated text.
 - Give grid children explicit cell dimensions and derive column counts from the
   available width. Long labels elide or wrap inside the cell; they must not widen
   the window.

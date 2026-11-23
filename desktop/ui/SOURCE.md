@@ -195,3 +195,38 @@ reconnect. No hardware acceptance claim is implied by this source record.
   or device behavior changed beyond the extra `None` choice and the banner
   wording; the controller still derives every row from state and owns every
   device write.
+- UI-polish layout tickets 01 and 02 (breadcrumb, one Diagnostics entry point,
+  flow-based setting rows):
+  - `shell.slint`: the `PageHeading` breadcrumb is a normal horizontal layout
+    child; `cross-axis-alignment: center` centres the device-name `TextLink`,
+    the chevron `Icon` and the section name, and the chevron no longer carries a
+    manual `y`. The chevron is therefore centred by the layout at every content
+    scale instead of being positioned with an offset the layout also manages.
+  - `pages/settings.slint`: the Settings aside's `AsidePanel` "Diagnostics" card
+    is removed, so Settings no longer duplicates the sidebar's Diagnostics route
+    or its Copy logs action; imports that only that card used are dropped. The
+    page keeps the Showcase, Home screen and About cards.
+  - `pages/diagnostics.slint`: a compact support `Row` at the bottom of
+    `DiagnosticsPage` offers **Copy logs** through the existing
+    `Actions.copy-logs()` on every step, so Diagnostics is the one entry point
+    for the app log. No callback, controller or translation document changed:
+    the label reuses the existing `Copy logs` message.
+  - `components/settings.slint`: `SettingRowView` is a `VerticalLayout` in normal
+    flow instead of a `Rectangle` with an absolutely placed divider and a fixed
+    non-list `min-height: 64px`. The divider (`Divider`, drawn only for
+    non-first rows) is the first child, the content row follows it, and the
+    row's height comes from its content, so a wrapped label, description or
+    device reason pushes the next divider down instead of drawing over it.
+    Toggle, select, range/hue, info/copy, action and time controls keep their
+    behavior and are centred with `cross-axis-alignment: center` in the content
+    row (and in the small groups that used to position them with manual `y`);
+    the list row keeps its device cards and stays an unconditional (empty when
+    not a list row) flow child. No row kind, callback or device write changed.
+  - `.scratch/ui-preview`: a `settings-rows-long` capture state renders every row
+    kind with a wrapped label and a wrapped device reason at 800×700 and
+    1280×820, 100 % and 150 %, plus a list row after a normal one; it is the
+    fixture for the "text never crosses a divider" acceptance. `make_ui_sheets.py`
+    groups those captures into their own sheet.
+  - `UI_KIT.md` records the flow-divider/auto-height rule; `GUIDE.md` records the
+    same rule as the way to change row layout and points at the long-string
+    preview fixture; `README.md` no longer places Copy logs on Settings.

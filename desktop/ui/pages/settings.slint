@@ -1,9 +1,9 @@
-// The app's own settings: how it looks and speaks, the home screen, and help with problems.
+// The app's own settings: how it looks and speaks, and the home screen.
 import { Select } from "../components/select.slint";
-import { Theme, PaletteChoice } from "../theme.slint";
+import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { AppState, Actions, Page, Connection } from "../types.slint";
-import { Icon, Button, ButtonKind, Toggle, CheckRow, Panel, PanelHeading, Divider } from "../components/basics.slint";
+import { Button, ButtonKind, Toggle, CheckRow, Panel, PanelHeading, Divider } from "../components/basics.slint";
 import { Segmented } from "../components/settings.slint";
 import { PageHeading } from "../shell.slint";
 import { Showcase } from "sections.slint";
@@ -277,23 +277,6 @@ component AsideColumn inherits VerticalLayout {
             has-icon: true;
             icon: Icons.external;
             clicked => { Actions.open-uri("https://github.com/SckraT/OpenSCL4"); }
-        }
-    }
-    AsidePanel {
-        title: @tr("Diagnostics");
-        icon: Icons.shield;
-        text: @tr("Collect read-only answers, a local ZIP and a prefilled issue.");
-        Button {
-            text: @tr("Open diagnostics");
-            has-icon: true;
-            icon: Icons.shield;
-            clicked => { Actions.navigate(Page.diagnostics); }
-        }
-        Button {
-            text: @tr("Copy logs");
-            has-icon: true;
-            icon: Icons.copy;
-            clicked => { Actions.copy-logs(); }
         }
     }
 }
