@@ -3697,11 +3697,13 @@ fn run_diagnostics<T: Transport>(
             status,
             elapsed_ms,
         };
-        diagnostic.record_probe(result.clone());
+        // The session redacts a state response before storing it, so the page
+        // shows exactly what the exported manifest will carry.
+        let stored = diagnostic.record_probe(result);
         let _ = events.send(Event::DiagnosticProbe {
             attempt,
             request: request_id,
-            result,
+            result: stored,
         });
     }
     diagnostic

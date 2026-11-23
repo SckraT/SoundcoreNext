@@ -102,8 +102,34 @@ impl DiagnosticSession {
         }
     }
 
-    pub fn record_probe(&mut self, result: ProbeResult) {
-        self.probes.push(result);
+    /// Record a probe result, redacting a state probe's response first.
+    ///
+    /// `redact_text` cannot see into the space-separated hex of a response, so
+    /// the byte-level state redaction is applied here, before the result can
+    /// reach the manifest. Returns the stored (redacted) result so callers can
+    /// show the same value they will export.
+    pub fn record_probe(&mut self, result: ProbeResult) -> ProbeResult {
+        let result = self.redacted_probe(result);
+        self.probes.push(result.clone());
+        result
+    }
+
+    /// The probe result with its state response masked like a recorded frame.
+    fn redacted_probe(&self, mut result: ProbeResult) -> ProbeResult {
+        if result.id != ProbeId::State {
+            return result;
+        }
+        let (Some(model), Some(text)) = (self.model, result.response_hex.as_deref()) else {
+            return result;
+        };
+        let Some(raw) = unhex(text) else {
+            return result;
+        };
+        let Some(redacted) = redact::redact_state_frame(&raw, model) else {
+            return result;
+        };
+        result.response_hex = Some(hex(&redacted));
+        result
     }
 
     /// Record a raw frame. The caller parses it; a broken frame is recorded by
@@ -158,4 +184,11 @@ pub fn hex(bytes: &[u8]) -> String {
         write!(&mut out, "{byte:02X} ").expect("write to string");
     }
     out.trim_end().to_owned()
+}
+
+/// Parse the space-separated uppercase hex format [`hex`] produces.
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    text.split_whitespace()
+        .map(|byte| u8::from_str_radix(byte, 16).ok())
+        .collect()
 }

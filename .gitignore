@@ -10,6 +10,13 @@ local.properties
 .scratch/wc04-uia/shots/
 .scratch/wc04-uia/state/
 .scratch/ui-validation/
+# Ticket 05 live-acceptance automation output (generated captures and state)
+.scratch/wc05-live/shots/
+.scratch/wc05-live/state/
+.scratch/wc05-live/diagnostics/
+.scratch/wc05-live/appdata-backup/
+.scratch/wc05-live/poll-last-cycle.txt
+.scratch/wc05-live/tree*.txt
 .scratch/reference-*/
 .scratch/feedback/
 /dist/
