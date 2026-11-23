@@ -4,11 +4,6 @@
 //! meaning and the version-tolerant JSON document, so an unknown index cannot
 //! silently reset a preference.
 
-// Ticket 02 wires the Settings controls to the validated mappings below; until
-// then the binary uses only the document load/save, and the mappings are
-// exercised by this module's tests.
-#![allow(dead_code)]
-
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -359,6 +354,14 @@ pub fn system_language() -> &'static Language {
         .unwrap_or(&LANGUAGES[0])
 }
 
+/// The bundled language the window should show: the saved choice when it is one
+/// of [`LANGUAGES`], otherwise the system's language.
+pub fn preferred_language(language: Option<&str>) -> &'static Language {
+    language
+        .and_then(find_language)
+        .unwrap_or_else(system_language)
+}
+
 /// Reads the real Windows app-mode preference used by Follow system.
 #[cfg(windows)]
 pub fn system_prefers_dark() -> bool {
@@ -458,6 +461,18 @@ mod tests {
         assert_eq!(choose_language(&["pt-PT"]).code, "pt-BR");
         assert_eq!(choose_language(&["iw-IL"]).code, "he");
         assert_eq!(choose_language(&["unknown"]).code, "en");
+    }
+
+    #[test]
+    fn the_preferred_language_is_the_choice_or_the_system() {
+        assert_eq!(preferred_language(Some("ru")).code, "ru");
+        assert_eq!(preferred_language(Some("RU")).code, "ru");
+        // A stale or hand-edited code cannot stick: Follow system takes over.
+        assert_eq!(
+            preferred_language(Some("not-a-language")).code,
+            system_language().code
+        );
+        assert_eq!(preferred_language(None).code, system_language().code);
     }
 
     #[test]
