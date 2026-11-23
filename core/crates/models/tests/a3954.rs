@@ -8,15 +8,17 @@
 //! `analysis/capabilities/a3954-eq-presets.json`.
 
 use soundcore_models::{
-    A3954_EQ_BANDS, A3954_EQUALIZER_COMMAND_BODY_LEN, A3954_EQUALIZER_PRESETS,
-    A3954_SOUND_MODE_COMMAND_BODY_LEN, A3954_STATE_BODY_LEN, A3954AirplaneMode,
-    A3954AmbientSoundMode, A3954AutoPowerOff, A3954AutoPowerOffDuration, A3954CaseFeatures,
-    A3954CaseLanguage, A3954EasyChat, A3954EasyChatWaitTime, A3954EqualizerState,
-    A3954SettingCommand, A3954SoundMode, A3954SoundModeSlider, A3954SpatialAudio,
-    A3954SpatialAudioMode, A3954SpatialAudioMusicMode, A3954State, AmbientSoundModeCycle,
-    CUSTOM_EQUALIZER_PRESET_ID, DbLimit, DecibelReadingRefreshRate, EqualizerPreset,
-    LimitHighVolume, SoundMode, StateError, VISIBLE_EQ_BANDS, a3954_equalizer_preset,
-    model_by_code, parse_state_body, parse_state_frame,
+    A3954_BUTTON_CONFIGURATION, A3954_COMMON_ACTIONS, A3954_EQ_BANDS,
+    A3954_EQUALIZER_COMMAND_BODY_LEN, A3954_EQUALIZER_PRESETS, A3954_NO_BUTTON_ACTION,
+    A3954_SLIDE_ACTIONS, A3954_SOUND_MODE_COMMAND_BODY_LEN, A3954_STATE_BODY_LEN,
+    A3954AirplaneMode, A3954AmbientSoundMode, A3954AutoPowerOff, A3954AutoPowerOffDuration,
+    A3954Button, A3954ButtonAction, A3954ButtonActionByte, A3954ButtonActionValue,
+    A3954ButtonPressKind, A3954ButtonSide, A3954CaseFeatures, A3954CaseLanguage, A3954EasyChat,
+    A3954EasyChatWaitTime, A3954EqualizerState, A3954SettingCommand, A3954SoundMode,
+    A3954SoundModeSlider, A3954SpatialAudio, A3954SpatialAudioMode, A3954SpatialAudioMusicMode,
+    A3954State, AmbientSoundModeCycle, CUSTOM_EQUALIZER_PRESET_ID, DbLimit,
+    DecibelReadingRefreshRate, EqualizerPreset, LimitHighVolume, SoundMode, StateError,
+    VISIBLE_EQ_BANDS, a3954_equalizer_preset, model_by_code, parse_state_body, parse_state_frame,
 };
 use soundcore_protocol::{Command, Direction, encode, request};
 
@@ -1140,6 +1142,46 @@ fn builds_the_exact_a3954_setting_frames() {
             }),
             "08 EE 00 00 00 10 9D 0C 00 00 02 B1",
         ),
+        (
+            A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                atmospheric: false,
+                remote_camera: false,
+                find_device: false,
+                case_spatial_audio: false,
+            }),
+            "08 EE 00 00 00 07 87 0E 00 00 00 00 00 92",
+        ),
+        (
+            // The real fixture's flags: only find device is on.
+            A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                atmospheric: false,
+                remote_camera: false,
+                find_device: true,
+                case_spatial_audio: false,
+            }),
+            "08 EE 00 00 00 07 87 0E 00 00 00 01 00 93",
+        ),
+        (
+            A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                atmospheric: true,
+                remote_camera: true,
+                find_device: true,
+                case_spatial_audio: true,
+            }),
+            "08 EE 00 00 00 07 87 0E 00 01 01 01 01 96",
+        ),
+        (
+            A3954SettingCommand::CaseLanguage(A3954CaseLanguage::Japanese),
+            "08 EE 00 00 00 07 8A 0B 00 00 92",
+        ),
+        (
+            A3954SettingCommand::CaseLanguage(A3954CaseLanguage::English),
+            "08 EE 00 00 00 07 8A 0B 00 01 93",
+        ),
+        (
+            A3954SettingCommand::CaseLanguage(A3954CaseLanguage::Chinese),
+            "08 EE 00 00 00 07 8A 0B 00 02 94",
+        ),
     ];
 
     for (setting, expected) in cases {
@@ -1148,6 +1190,432 @@ fn builds_the_exact_a3954_setting_frames() {
             .expect("the A3954 builds a setting frame");
         assert_eq!(frame_hex(&frame), *expected, "{setting:?}");
     }
+}
+
+#[test]
+fn maps_the_measured_a3954_gestures() {
+    assert_eq!(
+        A3954Button::ALL.map(A3954Button::index),
+        [0_usize, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "the measured order is left/right single, double, triple, long, slide up, slide down"
+    );
+    assert_eq!(
+        A3954Button::ALL.map(A3954Button::button_id),
+        [2_u8, 2, 0, 0, 5, 5, 1, 1, 6, 6, 7, 7],
+        "the measured ids: single 2, double 0, triple 5, long 1, slide up 6, slide down 7"
+    );
+    assert_eq!(
+        A3954Button::ALL.map(A3954Button::side),
+        [
+            A3954ButtonSide::Left,
+            A3954ButtonSide::Right,
+            A3954ButtonSide::Left,
+            A3954ButtonSide::Right,
+            A3954ButtonSide::Left,
+            A3954ButtonSide::Right,
+            A3954ButtonSide::Left,
+            A3954ButtonSide::Right,
+            A3954ButtonSide::Left,
+            A3954ButtonSide::Right,
+            A3954ButtonSide::Left,
+            A3954ButtonSide::Right,
+        ]
+    );
+    assert_eq!(
+        A3954Button::ALL.map(A3954Button::press_kind),
+        [
+            A3954ButtonPressKind::Single,
+            A3954ButtonPressKind::Single,
+            A3954ButtonPressKind::Double,
+            A3954ButtonPressKind::Double,
+            A3954ButtonPressKind::Triple,
+            A3954ButtonPressKind::Triple,
+            A3954ButtonPressKind::Long,
+            A3954ButtonPressKind::Long,
+            A3954ButtonPressKind::SlideUp,
+            A3954ButtonPressKind::SlideUp,
+            A3954ButtonPressKind::SlideDown,
+            A3954ButtonPressKind::SlideDown,
+        ]
+    );
+    assert_eq!(
+        A3954ButtonPressKind::ALL.map(A3954ButtonPressKind::button_id),
+        [2_u8, 0, 5, 1, 6, 7]
+    );
+    for (index, button) in A3954Button::ALL.into_iter().enumerate() {
+        assert_eq!(A3954Button::from_index(index), Some(button));
+    }
+    assert_eq!(A3954Button::from_index(12), None);
+
+    assert_eq!(A3954ButtonSide::Left.value(), 0);
+    assert_eq!(A3954ButtonSide::Right.value(), 1);
+    for side in [A3954ButtonSide::Left, A3954ButtonSide::Right] {
+        assert_eq!(A3954ButtonSide::from_value(side.value()), Some(side));
+    }
+    assert_eq!(A3954ButtonSide::from_value(2), None);
+
+    for button in A3954Button::ALL {
+        assert_eq!(button.is_slide(), button.press_kind().is_slide());
+        assert_eq!(
+            button.available_actions(),
+            button.press_kind().available_actions()
+        );
+    }
+    assert_eq!(
+        A3954Button::LeftSingle.available_actions(),
+        A3954_COMMON_ACTIONS,
+        "the six presses offer the measured common actions"
+    );
+    assert_eq!(
+        A3954Button::LeftLong.available_actions(),
+        A3954_COMMON_ACTIONS
+    );
+    assert_eq!(
+        A3954Button::LeftSlideUp.available_actions(),
+        A3954_SLIDE_ACTIONS
+    );
+    assert_eq!(
+        A3954Button::RightSlideDown.available_actions(),
+        A3954_SLIDE_ACTIONS
+    );
+}
+
+#[test]
+fn maps_the_measured_a3954_button_actions() {
+    assert_eq!(
+        A3954ButtonAction::ALL.map(A3954ButtonAction::value),
+        [0_u8, 1, 2, 3, 4, 5, 6]
+    );
+    for action in A3954ButtonAction::ALL {
+        assert_eq!(A3954ButtonAction::from_value(action.value()), Some(action));
+    }
+    assert_eq!(A3954ButtonAction::from_value(7), None);
+    assert_eq!(
+        A3954ButtonAction::from_value(A3954_NO_BUTTON_ACTION),
+        None,
+        "the disabled value is not an action"
+    );
+    assert_eq!(A3954_NO_BUTTON_ACTION, 0x0F);
+    assert_eq!(A3954_COMMON_ACTIONS, A3954ButtonAction::ALL.as_slice());
+    assert_eq!(
+        A3954_SLIDE_ACTIONS,
+        [A3954ButtonAction::VolumeUp, A3954ButtonAction::VolumeDown].as_slice(),
+        "the slides offer the two measured volume ids only"
+    );
+}
+
+#[test]
+fn decodes_the_measured_a3954_button_action_byte() {
+    let both_play_pause = A3954ButtonActionByte::from_byte(0x66);
+    assert_eq!(
+        both_play_pause.tws(),
+        A3954ButtonActionValue::Action(A3954ButtonAction::PlayPause)
+    );
+    assert_eq!(
+        both_play_pause.non_tws(),
+        A3954ButtonActionValue::Action(A3954ButtonAction::PlayPause)
+    );
+    assert_eq!(both_play_pause.byte(), 0x66);
+
+    let split = A3954ButtonActionByte::from_byte(0x32);
+    assert_eq!(
+        split.tws(),
+        A3954ButtonActionValue::Action(A3954ButtonAction::PreviousSong)
+    );
+    assert_eq!(
+        split.non_tws(),
+        A3954ButtonActionValue::Action(A3954ButtonAction::NextSong)
+    );
+
+    let disabled = A3954ButtonActionByte::from_byte(0xFF);
+    assert_eq!(disabled.tws(), A3954ButtonActionValue::Disabled);
+    assert_eq!(disabled.non_tws(), A3954ButtonActionValue::Disabled);
+    assert_eq!(A3954ButtonActionValue::Disabled.nibble(), 0x0F);
+    assert_eq!(
+        A3954ButtonActionValue::from_nibble(A3954_NO_BUTTON_ACTION),
+        A3954ButtonActionValue::Disabled
+    );
+
+    let unknown = A3954ButtonActionByte::from_byte(0x7A);
+    assert_eq!(unknown.tws(), A3954ButtonActionValue::Unknown(0x0A));
+    assert_eq!(unknown.non_tws(), A3954ButtonActionValue::Unknown(0x07));
+    assert_eq!(unknown.byte(), 0x7A, "unknown bytes are kept verbatim");
+
+    let play_pause = A3954ButtonActionValue::Action(A3954ButtonAction::PlayPause);
+    assert_eq!(A3954ButtonActionValue::from_nibble(6), play_pause);
+    assert_eq!(
+        A3954ButtonActionValue::from_nibble(7),
+        A3954ButtonActionValue::Unknown(7)
+    );
+    assert_eq!(A3954ButtonActionValue::Unknown(9).action(), None);
+    assert_eq!(A3954ButtonActionValue::Disabled.action(), None);
+    assert_eq!(play_pause.action(), Some(A3954ButtonAction::PlayPause));
+    assert_eq!(
+        A3954ButtonActionValue::from(A3954ButtonAction::NextSong),
+        A3954ButtonActionValue::Action(A3954ButtonAction::NextSong)
+    );
+
+    // Each nibble is edited on its own and the other one is preserved.
+    assert_eq!(
+        unknown
+            .with_tws(A3954ButtonActionValue::Action(A3954ButtonAction::VolumeUp))
+            .byte(),
+        0x70
+    );
+    assert_eq!(
+        unknown
+            .with_non_tws(A3954ButtonActionValue::Action(A3954ButtonAction::NextSong))
+            .byte(),
+        0x3A
+    );
+    assert_eq!(
+        split.with_tws(A3954ButtonActionValue::Disabled).byte(),
+        0x3F
+    );
+    assert_eq!(
+        both_play_pause
+            .with_non_tws(A3954ButtonActionValue::Unknown(0x0C))
+            .byte(),
+        0xC6
+    );
+}
+
+#[test]
+fn builds_the_exact_a3954_button_frames() {
+    // The action bytes are the real fixture's values, so every body also pins
+    // the measured side and button id of that gesture.
+    let cases: &[(A3954Button, u8, &str)] = &[
+        (
+            A3954Button::LeftSingle,
+            0x66,
+            "08 EE 00 00 00 04 81 0D 00 00 02 66 F0",
+        ),
+        (
+            A3954Button::RightSingle,
+            0x66,
+            "08 EE 00 00 00 04 81 0D 00 01 02 66 F1",
+        ),
+        (
+            A3954Button::LeftDouble,
+            0x32,
+            "08 EE 00 00 00 04 81 0D 00 00 00 32 BA",
+        ),
+        (
+            A3954Button::RightDouble,
+            0x33,
+            "08 EE 00 00 00 04 81 0D 00 01 00 33 BC",
+        ),
+        (
+            A3954Button::LeftTriple,
+            0xFF,
+            "08 EE 00 00 00 04 81 0D 00 00 05 FF 8C",
+        ),
+        (
+            A3954Button::RightTriple,
+            0xFF,
+            "08 EE 00 00 00 04 81 0D 00 01 05 FF 8D",
+        ),
+        (
+            A3954Button::LeftLong,
+            0x44,
+            "08 EE 00 00 00 04 81 0D 00 00 01 44 CD",
+        ),
+        (
+            A3954Button::RightLong,
+            0x44,
+            "08 EE 00 00 00 04 81 0D 00 01 01 44 CE",
+        ),
+        (
+            A3954Button::LeftSlideUp,
+            0x00,
+            "08 EE 00 00 00 04 81 0D 00 00 06 00 8E",
+        ),
+        (
+            A3954Button::RightSlideUp,
+            0x00,
+            "08 EE 00 00 00 04 81 0D 00 01 06 00 8F",
+        ),
+        (
+            A3954Button::LeftSlideDown,
+            0x11,
+            "08 EE 00 00 00 04 81 0D 00 00 07 11 A0",
+        ),
+        (
+            A3954Button::RightSlideDown,
+            0x11,
+            "08 EE 00 00 00 04 81 0D 00 01 07 11 A1",
+        ),
+    ];
+
+    for (button, action, expected) in cases {
+        let frame = model()
+            .a3954_button_frame(*button, A3954ButtonActionByte::from_byte(*action))
+            .expect("the A3954 builds a button frame");
+        assert_eq!(frame_hex(&frame), *expected, "{button:?}");
+        assert_eq!(frame.len(), 13, "one 04 81 gesture is a 13-byte frame");
+    }
+
+    // The two action bytes of the app's own button writes in the capture
+    // (right double press, connected action 1 and 2).
+    for (action, expected) in [
+        (0x11, "08 EE 00 00 00 04 81 0D 00 01 00 11 9A"),
+        (0x12, "08 EE 00 00 00 04 81 0D 00 01 00 12 9B"),
+    ] {
+        let frame = model()
+            .a3954_button_frame(
+                A3954Button::RightDouble,
+                A3954ButtonActionByte::from_byte(action),
+            )
+            .expect("the A3954 builds a button frame");
+        assert_eq!(frame_hex(&frame), expected);
+    }
+
+    assert_eq!(A3954_BUTTON_CONFIGURATION, Command::new(0x04, 0x81));
+    assert_eq!(
+        A3954Button::LeftLong.command_body(A3954ButtonActionByte::from_byte(0x44)),
+        [0, 1, 0x44],
+        "the body is [side, button id, action byte]"
+    );
+}
+
+#[test]
+fn decodes_the_real_a3954_button_state() {
+    let state = parsed_state(&a3954_captured_body());
+    use A3954ButtonActionValue::{Action, Disabled};
+    let expected = [
+        Action(A3954ButtonAction::PlayPause),
+        Action(A3954ButtonAction::PlayPause),
+        Action(A3954ButtonAction::PreviousSong),
+        Action(A3954ButtonAction::NextSong),
+        Disabled,
+        Disabled,
+        Action(A3954ButtonAction::AmbientSoundMode),
+        Action(A3954ButtonAction::AmbientSoundMode),
+        Action(A3954ButtonAction::VolumeUp),
+        Action(A3954ButtonAction::VolumeUp),
+        Action(A3954ButtonAction::VolumeDown),
+        Action(A3954ButtonAction::VolumeDown),
+    ];
+    assert_eq!(
+        state.button_action_bytes().map(A3954ButtonActionByte::tws),
+        expected,
+        "the connected-state actions are the low nibbles of the real fixture"
+    );
+    // The high nibbles are the disconnected-state actions; the fixture's split
+    // bytes differ from the low nibbles and must be kept.
+    assert_eq!(
+        state.button_action_byte(A3954Button::LeftDouble).non_tws(),
+        Action(A3954ButtonAction::NextSong)
+    );
+    assert_eq!(
+        state.button_action_byte(A3954Button::RightDouble).tws(),
+        Action(A3954ButtonAction::NextSong)
+    );
+    assert_eq!(
+        state.button_action_byte(A3954Button::LeftTriple).tws(),
+        Disabled
+    );
+    assert_eq!(
+        state.button_action_byte(A3954Button::LeftSlideUp).tws(),
+        Action(A3954ButtonAction::VolumeUp)
+    );
+    assert_eq!(
+        state.button_action_byte(A3954Button::LeftSlideDown).tws(),
+        Action(A3954ButtonAction::VolumeDown)
+    );
+    assert_eq!(
+        state.button_action_bytes().map(A3954ButtonActionByte::byte),
+        [
+            0x66, 0x66, 0x32, 0x33, 0xFF, 0xFF, 0x44, 0x44, 0x00, 0x00, 0x11, 0x11
+        ]
+    );
+}
+
+#[test]
+fn keeps_unknown_a3954_button_action_bytes() {
+    // A body whose button blocks carry nibbles outside the measured ids: the
+    // parser must keep the state, not reject it, and the typed helpers must
+    // report the unknown values without losing the raw byte.
+    let mut body = synthetic_body();
+    body[116..124].copy_from_slice(&[0x7A, 0x8C, 0x66, 0x32, 0x33, 0xFF, 0x44, 0x44]);
+    body[161..165].copy_from_slice(&[0x00, 0x11, 0x7F, 0xF0]);
+    let state = parsed_state(&body);
+    assert_eq!(
+        &state.main_buttons,
+        &[0x7A, 0x8C, 0x66, 0x32, 0x33, 0xFF, 0x44, 0x44]
+    );
+    assert_eq!(&state.slide_buttons, &[0x00, 0x11, 0x7F, 0xF0]);
+
+    let unknown = state.button_action_byte(A3954Button::LeftSingle);
+    assert_eq!(unknown.byte(), 0x7A);
+    assert_eq!(unknown.tws(), A3954ButtonActionValue::Unknown(0x0A));
+    assert_eq!(unknown.non_tws(), A3954ButtonActionValue::Unknown(0x07));
+    assert_eq!(
+        state.button_action_byte(A3954Button::RightSingle).tws(),
+        A3954ButtonActionValue::Unknown(0x0C)
+    );
+    assert_eq!(
+        state.button_action_byte(A3954Button::LeftSlideDown).tws(),
+        A3954ButtonActionValue::Disabled
+    );
+    assert_eq!(
+        state
+            .button_action_byte(A3954Button::LeftSlideDown)
+            .non_tws(),
+        A3954ButtonActionValue::Unknown(0x07)
+    );
+    assert_eq!(
+        state.button_action_byte(A3954Button::RightSlideDown).byte(),
+        0xF0
+    );
+    assert_eq!(
+        state
+            .button_action_byte(A3954Button::RightSlideDown)
+            .non_tws(),
+        A3954ButtonActionValue::Disabled
+    );
+
+    // Writing the captured unknown byte round-trips it through a frame.
+    let frame = model()
+        .a3954_button_frame(A3954Button::LeftSingle, unknown)
+        .expect("the A3954 builds a button frame");
+    assert_eq!(frame_hex(&frame), "08 EE 00 00 00 04 81 0D 00 00 02 7A 04");
+}
+
+#[test]
+fn a3954_case_commands_follow_the_measured_order() {
+    let features = A3954CaseFeatures {
+        atmospheric: true,
+        remote_camera: false,
+        find_device: true,
+        case_spatial_audio: false,
+    };
+    assert_eq!(
+        features.command_body(),
+        [1, 0, 1, 0],
+        "the body is atmospheric, remote camera, find device, case spatial audio"
+    );
+    let setting = A3954SettingCommand::CaseFeatures(features);
+    assert_eq!(setting.command(), Command::new(0x07, 0x87));
+    assert_eq!(setting.body(), vec![1, 0, 1, 0]);
+
+    for language in A3954CaseLanguage::ALL {
+        let setting = A3954SettingCommand::CaseLanguage(language);
+        assert_eq!(setting.command(), Command::new(0x07, 0x8A));
+        assert_eq!(setting.body(), vec![language.value()]);
+        assert_eq!(language.command_body(), [language.value()]);
+    }
+
+    // The parsed state's own flags and language write back as the same bytes.
+    let a3954 = parsed_state(&a3954_captured_body());
+    assert_eq!(
+        A3954SettingCommand::CaseFeatures(a3954.case_features).body(),
+        vec![0, 0, 1, 0]
+    );
+    assert_eq!(
+        A3954SettingCommand::CaseLanguage(a3954.case_language).body(),
+        vec![A3954CaseLanguage::English.value()]
+    );
 }
 
 #[test]
@@ -1270,6 +1738,34 @@ fn non_a3954_models_build_no_a3954_frames() {
                 .a3954_setting_frame(A3954SettingCommand::Ldac(true))
                 .is_none(),
             "{code} builds no A3954 setting frame"
+        );
+        assert!(
+            model
+                .a3954_setting_frame(A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                    atmospheric: true,
+                    remote_camera: true,
+                    find_device: true,
+                    case_spatial_audio: true,
+                }))
+                .is_none(),
+            "{code} builds no A3954 case-features frame"
+        );
+        assert!(
+            model
+                .a3954_setting_frame(A3954SettingCommand::CaseLanguage(
+                    A3954CaseLanguage::English
+                ))
+                .is_none(),
+            "{code} builds no A3954 case-language frame"
+        );
+        assert!(
+            model
+                .a3954_button_frame(
+                    A3954Button::LeftSingle,
+                    A3954ButtonActionByte::from_byte(0x66)
+                )
+                .is_none(),
+            "{code} builds no A3954 button frame"
         );
     }
 }
