@@ -353,29 +353,26 @@ fn parses_the_real_a3954_state_at_the_measured_offsets() {
             normal: cycle.normal,
         }
     );
+    let sound_mode = a3954
+        .sound_mode
+        .expect("the real state reports the measured sound-mode block");
+    assert_eq!(sound_mode.mode, expected_mode(&fixture.expected.sound_mode));
+    assert_eq!(sound_mode.slider.value(), fixture.expected.slider_position);
     assert_eq!(
-        a3954.sound_mode.mode,
-        expected_mode(&fixture.expected.sound_mode)
-    );
-    assert_eq!(
-        a3954.sound_mode.slider.value(),
-        fixture.expected.slider_position
-    );
-    assert_eq!(
-        a3954.sound_mode.slider.mode(),
+        sound_mode.slider.mode(),
         expected_mode(&fixture.expected.sound_mode),
         "the measured mode agrees with the slider's half of the scale"
     );
     assert_eq!(
-        a3954.sound_mode.airplane_mode,
+        sound_mode.airplane_mode,
         expected_airplane_mode(&fixture.expected.airplane_mode)
     );
     assert_eq!(
-        a3954.sound_mode.wind_noise_suppression,
+        sound_mode.wind_noise_suppression,
         fixture.expected.wind_noise_suppression
     );
     assert_eq!(
-        a3954.sound_mode.wind_noise_detected,
+        sound_mode.wind_noise_detected,
         fixture.expected.wind_noise_detected
     );
     assert_eq!(
@@ -494,23 +491,17 @@ fn rejects_unknown_values_of_the_closed_a3954_enums() {
         parse_state_body(model(), &body)
     };
 
-    assert!(matches!(
-        mutate(125, 4),
-        Err(StateError::InvalidA3954SoundMode(4))
-    ));
-    for position in [0, 12] {
+    // The sound-mode block is the measured exception: an unmeasured value
+    // there makes only the block unavailable, not the whole poll. The other
+    // closed enums still fail the poll.
+    for offset in [125, 126, 127] {
+        let mut body = a3954_captured_body();
+        body[offset] = 0xFE;
         assert!(
-            matches!(
-                mutate(126, position),
-                Err(StateError::InvalidA3954SoundModeSlider(value)) if value == position
-            ),
-            "slider {position}"
+            parsed_state(&body).sound_mode.is_none(),
+            "an unmeasured sound-mode byte {offset} makes the block unavailable"
         );
     }
-    assert!(matches!(
-        mutate(127, 2),
-        Err(StateError::InvalidA3954AirplaneMode(2))
-    ));
     assert!(matches!(
         mutate(144, 4),
         Err(StateError::InvalidA3954AutoPowerOffIndex(4))
@@ -545,6 +536,34 @@ fn rejects_unknown_values_of_the_closed_a3954_enums() {
     body[140] = 2;
     let state = parsed_state(&body);
     assert!(!state.low_battery_prompt);
+}
+
+#[test]
+fn an_airplane_mode_state_with_the_unmeasured_slider_still_parses() {
+    // Ticket 04 observed the real device report mode byte 3 (airplane mode) and
+    // slider byte 13 after an airplane-mode `06 81` write. Byte 13 is outside
+    // the measured 1..=11 scale and its meaning is unmeasured, so the sound-mode
+    // block reads as unavailable instead of inventing a position or failing the
+    // whole `01 01` poll: every other page must keep working.
+    let mut body = a3954_captured_body();
+    body[125] = A3954AmbientSoundMode::AirplaneMode.value();
+    body[126] = 13;
+    let state = parse_state_body(model(), &body).expect("the airplane-mode state parses");
+    let a3954 = state.a3954.expect("the A3954 block");
+    assert_eq!(
+        a3954.sound_mode, None,
+        "the unmeasured slider byte is not mapped to a scale position"
+    );
+
+    // The rest of the state is untouched by the unavailable block.
+    assert_eq!(a3954.case_firmware.as_deref(), Some("01.58"));
+    assert_eq!(
+        a3954.equalizer.preset_id, CUSTOM_EQUALIZER_PRESET_ID,
+        "the equalizer block still parses"
+    );
+    assert!(a3954.ldac);
+    assert!(a3954.dual_connections);
+    assert_eq!(a3954.auto_power_off.duration.minutes(), 30);
 }
 
 #[test]
@@ -599,56 +618,7 @@ fn maps_the_a3954_sound_mode_scale() {
         };
         assert_eq!(slider.mode(), expected, "position {position}");
     }
-    assert_eq!(A3954SoundModeSlider::new(1).expect("1").strength(), Some(5));
-    assert_eq!(A3954SoundModeSlider::new(5).expect("5").strength(), Some(1));
-    assert_eq!(A3954SoundModeSlider::new(6).expect("6").strength(), None);
-    assert_eq!(A3954SoundModeSlider::new(7).expect("7").strength(), Some(1));
-    assert_eq!(
-        A3954SoundModeSlider::new(11).expect("11").strength(),
-        Some(5)
-    );
-
-    for strength in 1..=5u8 {
-        let transparency = A3954SoundModeSlider::from_mode_and_strength(
-            A3954AmbientSoundMode::Transparency,
-            strength,
-        )
-        .expect("a measured transparency strength");
-        assert_eq!(transparency.value(), 6 - strength);
-        assert_eq!(transparency.mode(), A3954AmbientSoundMode::Transparency);
-        assert_eq!(transparency.strength(), Some(strength));
-
-        let canceling = A3954SoundModeSlider::from_mode_and_strength(
-            A3954AmbientSoundMode::NoiseCanceling,
-            strength,
-        )
-        .expect("a measured noise-canceling strength");
-        assert_eq!(canceling.value(), 6 + strength);
-        assert_eq!(canceling.mode(), A3954AmbientSoundMode::NoiseCanceling);
-        assert_eq!(canceling.strength(), Some(strength));
-    }
     assert_eq!(A3954SoundModeSlider::normal().value(), 6);
-    assert_eq!(
-        A3954SoundModeSlider::from_mode_and_strength(A3954AmbientSoundMode::Normal, 0)
-            .map(A3954SoundModeSlider::value),
-        Some(6),
-        "normal ignores the strength and stays on position 6"
-    );
-    for strength in [0, 6] {
-        assert_eq!(
-            A3954SoundModeSlider::from_mode_and_strength(
-                A3954AmbientSoundMode::NoiseCanceling,
-                strength
-            ),
-            None,
-            "strength {strength}"
-        );
-    }
-    assert_eq!(
-        A3954SoundModeSlider::from_mode_and_strength(A3954AmbientSoundMode::AirplaneMode, 3),
-        None,
-        "airplane mode has no slider position"
-    );
 }
 
 #[test]
@@ -1169,18 +1139,6 @@ fn builds_the_exact_a3954_setting_frames() {
                 wait_time: A3954EasyChatWaitTime::FifteenSeconds,
             }),
             "08 EE 00 00 00 10 9D 0C 00 00 02 B1",
-        ),
-        (
-            A3954SettingCommand::CaseLanguage(A3954CaseLanguage::Japanese),
-            "08 EE 00 00 00 07 8A 0B 00 00 92",
-        ),
-        (
-            A3954SettingCommand::CaseLanguage(A3954CaseLanguage::English),
-            "08 EE 00 00 00 07 8A 0B 00 01 93",
-        ),
-        (
-            A3954SettingCommand::CaseLanguage(A3954CaseLanguage::Chinese),
-            "08 EE 00 00 00 07 8A 0B 00 02 94",
         ),
     ];
 

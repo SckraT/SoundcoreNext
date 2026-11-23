@@ -133,6 +133,16 @@ actually supports and produces `AppState.overview-rows`, `quick-toggles`,
   page sets `mode-scale` and `scale-position` from the device and shows its
   wind-noise suppression as a `ModeRow` toggle. The A3062 keeps the three tiles
   and `mode-scale = false`.
+- The A3954 sound-mode block is optional. When the device reports a value this
+  slice has not measured for it (the real device reports an unmeasured slider
+  byte in airplane mode), `mode-scale` stays false, the mode rows are empty and
+  the Sound mode page and Overview block are hidden; the equalizer and the
+  device pages stay available instead of the connection failing. Do not invent
+  a scale position or send a `06 81` frame without a measured block.
+- A disabled row's device reason is English data from the controller and is
+  localized by the UI through `LocalizedText.setting-reason` when it is one the
+  kit knows (for example `Turn on spatial audio first`); unknown reasons pass
+  through unchanged.
 - Quick presets and case blocks stay unsupported until the core supplies real
   data and working behavior. Do not create decorative substitutes.
 - A model with no supported block keeps its device identity and batteries but

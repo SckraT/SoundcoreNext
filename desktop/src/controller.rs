@@ -205,9 +205,14 @@ pub fn mode_for_index(index: i32) -> Option<SoundMode> {
 }
 
 /// Whether a parsed state has a sound-mode surface these pages can show: the
-/// A3062's three measured modes, or the A3954's 1..=11 scale.
+/// A3062's three measured modes, or the A3954's 1..=11 scale while its
+/// sound-mode block is available.
 pub fn has_sound_mode(state: &DeviceState) -> bool {
-    state.sound_mode.is_some() || state.a3954.is_some()
+    state.sound_mode.is_some()
+        || state
+            .a3954
+            .as_ref()
+            .is_some_and(|a3954| a3954.sound_mode.is_some())
 }
 
 /// Whether a parsed state has an equalizer this app can show: the A3062's
@@ -1439,7 +1444,7 @@ pub fn change_a3954_sound_mode<T: Transport>(
     let state = session.poll_state().map_err(ModeFailure::from_session)?;
     state
         .a3954
-        .map(|a3954| a3954.sound_mode)
+        .and_then(|a3954| a3954.sound_mode)
         .ok_or(ModeFailure::Unreadable)
 }
 
@@ -1513,7 +1518,6 @@ pub fn a3954_setting_label(setting: A3954SettingCommand) -> &'static str {
         A3954SettingCommand::SoundLeakCompensation(_) => "Sound leak compensation",
         A3954SettingCommand::SpatialAudio(_) => "Spatial audio",
         A3954SettingCommand::EasyChat(_) => "Easy chat",
-        A3954SettingCommand::CaseLanguage(_) => "Case language",
     }
 }
 
@@ -4159,7 +4163,10 @@ fn serve_device_with_heartbeat<T: Transport>(
     // `a3954`; the worker keeps that state for the next write's HearID and
     // mode/airplane/wind basis, exactly as it keeps the A3062 equalizer.
     let mut a3954 = state.a3954.clone();
-    let has_sound_mode = state.sound_mode.is_some() || a3954.is_some();
+    let has_sound_mode = state.sound_mode.is_some()
+        || a3954
+            .as_ref()
+            .is_some_and(|a3954| a3954.sound_mode.is_some());
     let mut equalizer = state.equalizer;
     let has_equalizer = equalizer.is_some() || a3954.is_some();
     let has_settings = state.settings.is_some();
@@ -4319,15 +4326,18 @@ fn serve_device_with_heartbeat<T: Transport>(
                 // The UI only offers a slider position or the wind bit. The
                 // worker derives the rest of the five-byte body from the state it
                 // last read, so a stale page can never swap the mode half or the
-                // airplane-mode setting.
-                let outcome = match a3954.as_ref() {
-                    Some(current) => match change.apply(current.sound_mode) {
+                // airplane-mode setting. A state whose sound-mode block is
+                // unavailable (an unmeasured byte, e.g. airplane mode's slider)
+                // has no basis for a write, so nothing is written.
+                let current = a3954.as_ref().and_then(|a3954| a3954.sound_mode);
+                let outcome = match current {
+                    Some(current) => match change.apply(current) {
                         Some(target) => {
                             let reported = change_a3954_sound_mode(&mut session, target);
                             if let Ok(reported) = &reported
                                 && let Some(current) = a3954.as_mut()
                             {
-                                current.sound_mode = *reported;
+                                current.sound_mode = Some(*reported);
                             }
                             reported
                         }
@@ -5641,22 +5651,26 @@ fn open_url(url: &str) {
 ///
 /// The A3062 shows its three measured mode tiles; the A3954, whose ambient sound
 /// is one 1..=11 scale, shows the scale at the position the device reports plus
-/// its wind-noise suppression toggle. The mode labels feed the scale's mode
-/// words on both pages.
+/// its wind-noise suppression toggle. The A3954's sound-mode block is optional:
+/// when the device reports an unmeasured value for it (airplane mode's slider
+/// byte in the real capture), the scale and its page are hidden while every
+/// other page keeps working. The mode labels feed the scale's mode words on both
+/// pages.
 fn show_sound_mode(state: &AppState<'_>, device: Option<&DeviceState>) {
     let sound_mode = device.and_then(|device| device.sound_mode);
     let a3954 = device.and_then(|device| device.a3954.as_ref());
+    let a3954_sound_mode = a3954.and_then(|a3954| a3954.sound_mode);
     state.set_modes(ModelRc::new(VecModel::from(mode_options(sound_mode))));
     state.set_mode_index(mode_index(sound_mode));
-    state.set_mode_scale(a3954.is_some());
+    state.set_mode_scale(a3954_sound_mode.is_some());
     state.set_scale_position(
-        a3954.map_or(i32::from(A3954SoundModeSlider::NORMAL), |a3954| {
-            i32::from(a3954.sound_mode.slider.value())
+        a3954_sound_mode.map_or(i32::from(A3954SoundModeSlider::NORMAL), |sound_mode| {
+            i32::from(sound_mode.slider.value())
         }),
     );
     state.set_mode_rows(ModelRc::new(VecModel::from(
-        a3954.map_or_else(Vec::new, |a3954| {
-            a3954_mode_rows(a3954.sound_mode.wind_noise_suppression)
+        a3954_sound_mode.map_or_else(Vec::new, |sound_mode| {
+            a3954_mode_rows(sound_mode.wind_noise_suppression)
         }),
     )));
     // The scale has no airplane-mode position, so no airplane chip is offered.
@@ -5664,7 +5678,7 @@ fn show_sound_mode(state: &AppState<'_>, device: Option<&DeviceState>) {
     state.set_airplane_label("".into());
     state.set_sound_pages(ModelRc::new(VecModel::from(sound_pages(
         sound_mode.is_some(),
-        a3954.is_some(),
+        a3954_sound_mode.is_some(),
         device.is_some_and(has_equalizer),
         device.is_some_and(has_effects),
     ))));
@@ -6734,7 +6748,7 @@ fn store_a3954_sound_mode(inner: &Rc<Inner>, reported: A3954SoundMode) {
     if let Some(device) = inner.device.borrow_mut().as_mut()
         && let Some(a3954) = device.a3954.as_mut()
     {
-        a3954.sound_mode = reported;
+        a3954.sound_mode = Some(reported);
     }
 }
 
@@ -13236,8 +13250,9 @@ mod tests {
     ///
     /// Connects the paired Liberty 4 Pro through the same RFCOMM path as
     /// [`manual_paired_connect`] and drives a real [`DeviceSession`]: it polls
-    /// and prints the parsed state, writes the 1..=11 scale positions 6 and 11,
-    /// the wind toggle, one equalizer preset and every supported settings
+    /// and prints the parsed state, writes the 1..=11 scale positions 1, 6 and
+    /// 11, the wind toggle, one built-in equalizer preset plus a custom curve
+    /// that differs from the connect curve, and every supported settings
     /// command, polls after each write and restores the value found on connect.
     /// A write that drops the RFCOMM link (LDAC is documented to do so) is
     /// reconnected and retried; a write the device silently drops is retried
@@ -13277,8 +13292,14 @@ mod tests {
 
         // --- The 1..=11 sound-mode scale: position 1 (the strongest
         // transparency), 6 (normal), 11 (the strongest noise canceling), then
-        // the position found on connect.
-        let initial_sound_mode = initial.sound_mode;
+        // the position found on connect. The scale needs the measured
+        // sound-mode block; a device left in airplane mode reports an
+        // unmeasured slider byte and the test cannot run.
+        let initial_sound_mode = initial.sound_mode.unwrap_or_else(|| {
+            panic!(
+                "the connected A3954 reports no measured sound-mode block (airplane mode?); leave airplane mode and rerun"
+            )
+        });
         let transparency = A3954SoundModeChange::Scale(1)
             .apply(initial_sound_mode)
             .expect("position 1");
@@ -13289,7 +13310,8 @@ mod tests {
                         && sound_mode.mode == A3954AmbientSoundMode::Transparency
                 }),
             )
-            .sound_mode;
+            .sound_mode
+            .expect("the re-polled sound-mode block");
         let normal = A3954SoundModeChange::Scale(6)
             .apply(after_1)
             .expect("position 6");
@@ -13300,7 +13322,8 @@ mod tests {
                 sound_mode.slider.value() == 6 && sound_mode.mode == A3954AmbientSoundMode::Normal
             },
         ))
-        .sound_mode;
+        .sound_mode
+        .expect("the re-polled sound-mode block");
         let canceling = A3954SoundModeChange::Scale(11)
             .apply(after_6)
             .expect("position 11");
@@ -13311,13 +13334,15 @@ mod tests {
                         && sound_mode.mode == A3954AmbientSoundMode::NoiseCanceling
                 }),
             )
-            .sound_mode;
+            .sound_mode
+            .expect("the re-polled sound-mode block");
         let restored_scale = a3954_of(&live.set_sound_mode_until(
             "scale restore",
             initial_sound_mode,
             |sound_mode| sound_mode_core(sound_mode) == sound_mode_core(initial_sound_mode),
         ))
-        .sound_mode;
+        .sound_mode
+        .expect("the re-polled sound-mode block");
         println!(
             "  scale: 1 -> position {} mode {:?}; 6 -> position {} mode {:?}; 11 -> position {} mode {:?}; restored position {} mode {:?}",
             after_1.slider.value(),
@@ -13363,13 +13388,15 @@ mod tests {
                     sound_mode.wind_noise_suppression != initial_sound_mode.wind_noise_suppression
                 }),
             )
-            .sound_mode;
+            .sound_mode
+            .expect("the re-polled sound-mode block");
         let restored_wind = a3954_of(&live.set_sound_mode_until(
             "wind restore",
             initial_sound_mode,
             |sound_mode| sound_mode_core(sound_mode) == sound_mode_core(initial_sound_mode),
         ))
-        .sound_mode;
+        .sound_mode
+        .expect("the re-polled sound-mode block");
         println!(
             "  wind: suppression {} -> {}, restored {}",
             initial_sound_mode.wind_noise_suppression,
@@ -13465,6 +13492,87 @@ mod tests {
             restored_equalizer.visible_bands(),
             initial_equalizer.visible_bands(),
             "the connect curve is restored"
+        );
+
+        // --- A custom equalizer curve, proved on the real device: save the
+        // connect curve, write a measured custom body whose visible bands differ
+        // from it, assert the device reports the custom id and bands, then
+        // restore the connect curve with the same body kind (preset or custom)
+        // and assert it again.
+        let initial_bands = initial_equalizer
+            .visible_bands()
+            .expect("the connect equalizer has a visible channel");
+        let mut custom_bands = initial_bands;
+        // Move two bands far enough that the curve cannot be confused with the
+        // connect curve, staying inside the measured raw range.
+        custom_bands[0] = if initial_bands[0] >= 0 { -120 } else { 120 };
+        custom_bands[7] = if initial_bands[7] >= 0 { -60 } else { 60 };
+        let after_custom = a3954_of(&live.set_custom_eq_until(
+            "custom equalizer curve",
+            restored_equalizer,
+            custom_bands,
+            |equalizer| {
+                equalizer.preset_id == CUSTOM_EQUALIZER_PRESET_ID
+                    && equalizer.visible_bands() == Some(custom_bands)
+            },
+        ))
+        .equalizer;
+        let restored_after_custom = match initial_equalizer.preset() {
+            Some(preset) => {
+                let state = live.set_eq_preset_until(
+                    "equalizer restore after custom curve",
+                    after_custom,
+                    preset,
+                    |equalizer| {
+                        equalizer.preset_id == initial_equalizer.preset_id
+                            && equalizer.visible_bands() == Some(initial_bands)
+                    },
+                );
+                a3954_of(&state).equalizer
+            }
+            None => {
+                let state = live.set_custom_eq_until(
+                    "equalizer restore after custom curve",
+                    after_custom,
+                    initial_bands,
+                    |equalizer| {
+                        equalizer.preset_id == initial_equalizer.preset_id
+                            && equalizer.visible_bands() == Some(initial_bands)
+                    },
+                );
+                a3954_of(&state).equalizer
+            }
+        };
+        println!(
+            "  custom equalizer: {} (id {}) -> custom curve {:?} (id {}, left={:?}, right={:?}) -> restored to id {}; visible bands {:?}",
+            initial_equalizer
+                .preset()
+                .map_or("custom", |preset| preset.name),
+            initial_equalizer.preset_id,
+            custom_bands,
+            after_custom.preset_id,
+            after_custom.left,
+            after_custom.right,
+            restored_after_custom.preset_id,
+            restored_after_custom.visible_bands()
+        );
+        assert_eq!(
+            after_custom.preset_id, CUSTOM_EQUALIZER_PRESET_ID,
+            "the custom equalizer write is re-polled as the custom id"
+        );
+        assert_eq!(
+            after_custom.visible_bands(),
+            Some(custom_bands),
+            "the written custom equalizer curve is re-polled"
+        );
+        assert_eq!(
+            restored_after_custom.preset_id, initial_equalizer.preset_id,
+            "the connect preset id is restored after the custom write"
+        );
+        assert_eq!(
+            restored_after_custom.visible_bands(),
+            Some(initial_bands),
+            "the connect curve is restored after the custom write"
         );
 
         // --- Every supported settings command: the connect value, the opposite
@@ -13770,44 +13878,10 @@ mod tests {
             "the connect easy chat is restored"
         );
 
-        // The case display language has no page in this slice. It is exercised
-        // only when the state reports a case: the guarded check restores the
-        // connect value if the device reports the write, and leaves an ignored
-        // out-of-scope write alone.
-        if initial.case_firmware.is_some() {
-            let initial_language = initial.case_language;
-            let target_language = soundcore_models::A3954CaseLanguage::ALL
-                .into_iter()
-                .find(|language| *language != initial_language)
-                .expect("another measured case language");
-            let after_language = a3954_of(&live.set_setting_until(
-                "case language (optional, no page in this slice)",
-                A3954SettingCommand::CaseLanguage(target_language),
-                |state| a3954_of(state).case_language == target_language,
-            ))
-            .case_language;
-            if after_language == initial_language {
-                println!(
-                    "  case language: the device ignored the out-of-scope write; state still {after_language:?}, nothing to restore"
-                );
-            } else {
-                let restored_language = a3954_of(&live.set_setting_until(
-                    "case language restore",
-                    A3954SettingCommand::CaseLanguage(initial_language),
-                    |state| a3954_of(state).case_language == initial_language,
-                ))
-                .case_language;
-                println!(
-                    "  case language: {initial_language:?} -> {after_language:?}, restored {restored_language:?}"
-                );
-                assert_eq!(
-                    restored_language, initial_language,
-                    "the connect case language is restored"
-                );
-            }
-        } else {
-            println!("  case language: no case in the state; not written");
-        }
+        // The case display language is read-only in this slice: the case display
+        // has no page and its `07 8A` write was removed from the app's API as
+        // out of scope. The parsed field is compared with the connect state in
+        // the final poll below, like the other untouched fields.
 
         // LDAC may reset the RFCOMM link; the helper reconnects and retries.
         check_a3954_toggle(
@@ -13851,7 +13925,11 @@ mod tests {
         println!("  final state:");
         print_a3954_state(&final_state);
         assert_eq!(
-            sound_mode_core(final_a3954.sound_mode),
+            sound_mode_core(
+                final_a3954
+                    .sound_mode
+                    .expect("the final poll reports the measured sound-mode block")
+            ),
             sound_mode_core(initial_sound_mode),
             "the final scale, airplane mode and wind flag match the connect state"
         );
@@ -14074,13 +14152,16 @@ mod tests {
                 std::thread::sleep(A3954_WRITE_SPACING);
                 let state =
                     self.write_then_poll(what, |session| session.set_a3954_sound_mode(sound_mode));
-                if expected(a3954_of(&state).sound_mode) {
-                    return state;
+                match a3954_of(&state).sound_mode {
+                    Some(reported) if expected(reported) => return state,
+                    Some(reported) => println!(
+                        "  {what}: the device still reports {:?}; retrying ({attempt}/{A3954_WRITE_ATTEMPTS})",
+                        reported
+                    ),
+                    None => println!(
+                        "  {what}: the re-poll reports no measured sound-mode block; retrying ({attempt}/{A3954_WRITE_ATTEMPTS})"
+                    ),
                 }
-                println!(
-                    "  {what}: the device still reports {:?}; retrying ({attempt}/{A3954_WRITE_ATTEMPTS})",
-                    a3954_of(&state).sound_mode
-                );
             }
             self.poll()
         }
@@ -14235,14 +14316,19 @@ mod tests {
                 |level| format!("{}%", (u16::from(level) + 1) * 10)
             )
         );
-        println!(
-            "  sound mode: position={} mode={:?} airplane={:?} wind={} detected={}",
-            a3954.sound_mode.slider.value(),
-            a3954.sound_mode.mode,
-            a3954.sound_mode.airplane_mode,
-            a3954.sound_mode.wind_noise_suppression,
-            a3954.sound_mode.wind_noise_detected
-        );
+        match a3954.sound_mode {
+            Some(sound_mode) => println!(
+                "  sound mode: position={} mode={:?} airplane={:?} wind={} detected={}",
+                sound_mode.slider.value(),
+                sound_mode.mode,
+                sound_mode.airplane_mode,
+                sound_mode.wind_noise_suppression,
+                sound_mode.wind_noise_detected
+            ),
+            None => println!(
+                "  sound mode: unavailable (the block reports an unmeasured value; the scale page is hidden)"
+            ),
+        }
         println!(
             "  equalizer: {} (id {}) left={:?} right={:?} visible={:?}",
             a3954
@@ -18508,11 +18594,21 @@ mod tests {
         // `sound_mode` field stays empty and the page comes from `a3954`.
         assert_eq!(state.sound_mode, None);
         let a3954 = state.a3954.as_ref().expect("the A3954 block");
-        assert_eq!(a3954.sound_mode.slider.value(), 11);
+        assert_eq!(
+            a3954
+                .sound_mode
+                .expect("the measured sound-mode block")
+                .slider
+                .value(),
+            11
+        );
         assert_eq!(
             sound_pages(
                 state.sound_mode.is_some(),
-                state.a3954.is_some(),
+                state
+                    .a3954
+                    .as_ref()
+                    .is_some_and(|a3954| a3954.sound_mode.is_some()),
                 has_equalizer(&state),
                 has_effects(&state)
             ),
@@ -18625,8 +18721,106 @@ mod tests {
     }
 
     #[test]
+    fn an_airplane_mode_a3954_hides_the_scale_and_keeps_every_other_page() {
+        // Ticket 04 observed the real device report mode byte 3 and slider byte
+        // 13 in airplane mode. The state poll accepts the rest of the state and
+        // only the sound-mode surface is unavailable: no scale, no wind row and
+        // no Sound mode page, while the equalizer and settings pages stay.
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            state.set_device_name("Liberty 4 Pro".into());
+            state.set_device_code("A3954".into());
+            let mut device = a3954_state();
+            device.a3954.as_mut().expect("the A3954 block").sound_mode = None;
+            apply_outcome(
+                ui,
+                &inner,
+                ConnectOutcome::Connected(a3954_model(), Box::new(device)),
+            );
+
+            assert_eq!(
+                state.get_connection(),
+                Connection::Connected,
+                "an unavailable sound-mode block does not reject the connection"
+            );
+            assert!(!state.get_mode_scale(), "the scale is hidden");
+            assert_eq!(
+                state.get_scale_position(),
+                i32::from(A3954SoundModeSlider::NORMAL),
+                "the hidden scale keeps the normal fallback, not an invented device position"
+            );
+            assert_eq!(0, state.get_mode_rows().row_count(), "no wind row");
+            let sound_pages: Vec<Page> = state.get_sound_pages().iter().collect();
+            assert_eq!(
+                sound_pages,
+                vec![Page::Equalizer, Page::Effects],
+                "the Sound mode page is hidden, the other sound pages stay"
+            );
+            let device_pages: Vec<Page> = state.get_device_pages().iter().collect();
+            assert_eq!(device_pages.len(), 5, "the settings pages stay");
+
+            let overview: Vec<crate::OverviewRow> = state.get_overview_rows().iter().collect();
+            let kinds: Vec<crate::BlockKind> = overview
+                .iter()
+                .flat_map(|row| row.blocks.iter().map(|block| block.kind))
+                .collect();
+            assert!(
+                !kinds.contains(&crate::BlockKind::SoundMode),
+                "the Overview hides the unavailable sound-mode block: {kinds:?}"
+            );
+            assert!(kinds.contains(&crate::BlockKind::Equalizer));
+        });
+    }
+
+    #[test]
+    fn an_airplane_mode_connect_accepts_the_state_and_writes_no_scale_frame() {
+        // The connect frame also has dual connections off, so the worker does
+        // not try to read the remembered-device list first.
+        let transport =
+            FakeTransport::scripted([a3954_frame_with(&[(125, 3), (126, 13), (142, 0)])]);
+        let session = session_with("A3954", &transport);
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::ChangeA3954SoundMode {
+                request: 1,
+                change: A3954SoundModeChange::Scale(3),
+            })
+            .expect("the scale click is queued");
+        drop(commands);
+
+        serve_device(session, 11, events, command_receiver);
+
+        match received.try_recv().expect("the connect report") {
+            Event::Connected {
+                attempt: 11,
+                outcome: ConnectOutcome::Connected(..),
+            } => {}
+            other => panic!("unexpected event: {other:?}"),
+        }
+        match received.try_recv().expect("the scale change") {
+            Event::ScaleChanged {
+                attempt: 11,
+                request: 1,
+                outcome: Err(ModeFailure::Unreadable),
+            } => {}
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert_eq!(
+            transport.writes(),
+            vec![state_request()],
+            "no 06 81 body is derived from an unavailable sound-mode block"
+        );
+    }
+
+    #[test]
     fn the_a3954_scale_position_maps_to_the_measured_mode_halves() {
-        let current = a3954_state().a3954.expect("the A3954 block").sound_mode;
+        let current = a3954_state()
+            .a3954
+            .expect("the A3954 block")
+            .sound_mode
+            .expect("the measured sound-mode block");
         for position in 1..=11u8 {
             let slider = A3954SoundModeSlider::new(position).expect("a measured position");
             let target = A3954SoundModeChange::Scale(position)
@@ -18669,7 +18863,11 @@ mod tests {
 
     #[test]
     fn a_scale_click_writes_the_measured_frame_and_re_reads_the_scale() {
-        let current = a3954_state().a3954.expect("the A3954 block").sound_mode;
+        let current = a3954_state()
+            .a3954
+            .expect("the A3954 block")
+            .sound_mode
+            .expect("the measured sound-mode block");
         let target = A3954SoundModeChange::Scale(3)
             .apply(current)
             .expect("position 3");
@@ -18733,7 +18931,11 @@ mod tests {
 
     #[test]
     fn a_wind_toggle_writes_the_same_measured_body_shape_and_re_reads_it() {
-        let current = a3954_state().a3954.expect("the A3954 block").sound_mode;
+        let current = a3954_state()
+            .a3954
+            .expect("the A3954 block")
+            .sound_mode
+            .expect("the measured sound-mode block");
         let target = A3954SoundModeChange::Wind(false)
             .apply(current)
             .expect("the wind toggle applies");
@@ -19560,7 +19762,11 @@ mod tests {
             );
 
             // A reported scale position moves the page and the Overview slider.
-            let current = a3954_state().a3954.expect("the A3954 block").sound_mode;
+            let current = a3954_state()
+                .a3954
+                .expect("the A3954 block")
+                .sound_mode
+                .expect("the measured sound-mode block");
             let slider = A3954SoundModeSlider::new(4).expect("position 4");
             let reported = A3954SoundMode {
                 mode: slider.mode(),
@@ -19580,6 +19786,7 @@ mod tests {
                     .and_then(|device| device.a3954.as_ref())
                     .expect("the A3954 state")
                     .sound_mode
+                    .expect("the measured sound-mode block")
                     .slider
                     .value(),
                 4,

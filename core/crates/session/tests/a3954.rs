@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use soundcore_models::{
     A3954AirplaneMode, A3954AmbientSoundMode, A3954AutoPowerOff, A3954AutoPowerOffDuration,
-    A3954CaseLanguage, A3954EasyChat, A3954EasyChatWaitTime, A3954SettingCommand, A3954SoundMode,
+    A3954EasyChat, A3954EasyChatWaitTime, A3954SettingCommand, A3954SoundMode,
     A3954SoundModeSlider, A3954SpatialAudio, A3954SpatialAudioMode, A3954SpatialAudioMusicMode,
     AmbientSoundModeCycle, DbLimit, DecibelReadingRefreshRate, VISIBLE_EQ_BANDS,
     a3954_equalizer_preset, model_by_code, parse_state_frame,
@@ -157,9 +157,20 @@ fn polls_the_real_a3954_state() {
     assert_eq!(a3954.case_firmware.as_deref(), Some("01.58"));
     assert_eq!(a3954.case_battery_level, Some(9));
     assert_eq!(a3954.case_serial, None);
-    assert_eq!(a3954.sound_mode.slider.value(), 11);
     assert_eq!(
-        a3954.sound_mode.slider.mode(),
+        a3954
+            .sound_mode
+            .expect("the measured sound-mode block")
+            .slider
+            .value(),
+        11
+    );
+    assert_eq!(
+        a3954
+            .sound_mode
+            .expect("the measured sound-mode block")
+            .slider
+            .mode(),
         A3954AmbientSoundMode::NoiseCanceling
     );
     assert!(a3954.ldac);
@@ -433,10 +444,6 @@ fn writes_the_exact_a3954_setting_frames_once() {
             }),
             "08 EE 00 00 00 10 9D 0C 00 00 02 B1",
         ),
-        (
-            A3954SettingCommand::CaseLanguage(A3954CaseLanguage::English),
-            "08 EE 00 00 00 07 8A 0B 00 01 93",
-        ),
     ];
 
     for (setting, expected) in cases {
@@ -460,7 +467,8 @@ fn a_non_a3954_model_writes_nothing_through_the_a3954_apis() {
         .expect("the real A3954 state")
         .a3954
         .expect("the A3954 block")
-        .sound_mode;
+        .sound_mode
+        .expect("the measured sound-mode block");
     sound_mode.wind_noise_suppression = false;
     let error = session
         .set_a3954_sound_mode(sound_mode)
@@ -498,14 +506,11 @@ fn a_non_a3954_model_writes_nothing_through_the_a3954_apis() {
 
 #[test]
 fn skips_the_a3954_acks_and_a_notification_before_the_next_state() {
-    // The device answers a scale write with the empty inbound `06 81` frame, a
-    // case-language write with the empty inbound `07 8A` frame, and may push a
-    // battery notification before the `01 01` answer.
+    // The device answers a scale write with the empty inbound `06 81` frame and
+    // may push a battery notification before the `01 01` answer.
     let mode_ack = encode(Direction::Inbound, Command::ACK_AMBIENT_SOUND_MODE, &[]);
-    let language_ack = encode(Direction::Inbound, Command::new(0x07, 0x8A), &[]);
     let notification = encode(Direction::Inbound, Command::BATTERY, &[0x62]);
     let mut scripted = mode_ack;
-    scripted.extend_from_slice(&language_ack);
     scripted.extend_from_slice(&notification);
     scripted.extend_from_slice(&a3954_frame());
 
@@ -521,17 +526,13 @@ fn skips_the_a3954_acks_and_a_notification_before_the_next_state() {
             wind_noise_detected: false,
         })
         .expect("write the scale");
-    session
-        .set_a3954_setting(A3954SettingCommand::CaseLanguage(
-            A3954CaseLanguage::English,
-        ))
-        .expect("write the case language");
     let state = session.poll_state().expect("state after the acks");
     assert_eq!(
         state
             .a3954
             .expect("the A3954 block")
             .sound_mode
+            .expect("the measured sound-mode block")
             .slider
             .value(),
         11
@@ -544,10 +545,9 @@ fn skips_the_a3954_acks_and_a_notification_before_the_next_state() {
                 Command::ACK_AMBIENT_SOUND_MODE,
                 &[2, 6, 0, 1, 0xFF],
             ),
-            encode(Direction::Outbound, Command::new(0x07, 0x8A), &[1]),
             request(Command::STATE),
         ],
-        "one scale frame, one case-language frame, then one state request"
+        "one scale frame, then one state request"
     );
 }
 
@@ -575,7 +575,7 @@ fn reports_a_failed_a3954_write_as_an_io_error() {
     let transport = FakeTransport::failing_writes(io::ErrorKind::BrokenPipe);
     let mut session = DeviceSession::new(model(), transport);
     let error = session
-        .set_a3954_sound_mode(a3954.sound_mode)
+        .set_a3954_sound_mode(a3954.sound_mode.expect("the measured sound-mode block"))
         .expect_err("write failure");
     assert!(
         matches!(error, SessionError::Io(ref io_error) if io_error.kind() == io::ErrorKind::BrokenPipe),

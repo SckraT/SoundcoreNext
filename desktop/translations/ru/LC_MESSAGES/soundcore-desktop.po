@@ -1478,3 +1478,6 @@ msgstr "Обнаружение ношения"
 
 msgid "Wind noise suppression"
 msgstr "Подавление шума ветра"
+
+msgid "Turn on spatial audio first"
+msgstr "Сначала включите пространственный звук"

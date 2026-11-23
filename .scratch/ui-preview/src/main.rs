@@ -19,6 +19,9 @@ struct Capture {
     diagnostic_step: DiagnosticStep,
     dialog: Dialog,
     name: String,
+    /// Render the Liberty 4 Pro (A3954) surface: the 1..=11 scale page and its
+    /// wind-noise ModeRow toggle instead of the A3062 three-mode tiles.
+    a3954: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -542,6 +545,26 @@ fn configure(ui: &AppWindow, capture: &Capture) {
     ui.global::<Theme>().set_dark(capture.dark);
     let state = ui.global::<AppState>();
     state.set_page(capture.page);
+    // The A3954 states show its 1..=11 scale and the wind-noise `ModeRow`
+    // toggle instead of the demo A3062 three-mode tiles. The rest of the page
+    // data stays the demo data, so the capture shows the real layout.
+    state.set_mode_scale(capture.a3954);
+    state.set_scale_position(6);
+    state.set_airplane_index(-1);
+    state.set_airplane_label("".into());
+    state.set_mode_rows(if capture.a3954 {
+        ModelRc::new(VecModel::from(vec![toggle_row(
+            "windNoiseSuppression",
+            "Wind noise suppression",
+            false,
+        )]))
+    } else {
+        ModelRc::default()
+    });
+    if capture.a3954 {
+        state.set_device_name("soundcore Liberty 4 Pro · Demo".into());
+        state.set_device_code("A3954".into());
+    }
     // The Settings page's segmented control has to show the scale the capture
     // renders with, or a 150 % capture would claim the 100 % choice is selected.
     state.set_app_content_scale(if capture.scale >= 1.5 {
@@ -575,24 +598,46 @@ fn captures() -> Vec<Capture> {
     ];
     for (width, height) in sizes {
         for scale in [1.0, 1.25, 1.5] {
-            for (page, step, label) in [
-                (Page::Overview, DiagnosticStep::Device, "overview"),
-                (Page::Devices, DiagnosticStep::Device, "devices"),
-                (Page::Equalizer, DiagnosticStep::Device, "equalizer"),
-                (Page::Presets, DiagnosticStep::Device, "presets"),
-                (Page::Controls, DiagnosticStep::Device, "controls"),
+            for (page, step, label, a3954) in [
+                (Page::Overview, DiagnosticStep::Device, "overview", false),
+                (Page::Devices, DiagnosticStep::Device, "devices", false),
+                (Page::Equalizer, DiagnosticStep::Device, "equalizer", false),
+                (Page::Presets, DiagnosticStep::Device, "presets", false),
+                (Page::Controls, DiagnosticStep::Device, "controls", false),
                 (
                     Page::Diagnostics,
                     DiagnosticStep::Device,
                     "diagnostics-device",
+                    false,
                 ),
-                (Page::SoundModes, DiagnosticStep::Device, "sound-mode"),
-                (Page::Comfort, DiagnosticStep::Device, "comfort"),
-                (Page::Power, DiagnosticStep::Device, "power"),
-                (Page::Connections, DiagnosticStep::Device, "connections"),
-                (Page::About, DiagnosticStep::Device, "about"),
-                (Page::Effects, DiagnosticStep::Device, "sound-effects"),
-                (Page::Settings, DiagnosticStep::Device, "settings"),
+                (Page::SoundModes, DiagnosticStep::Device, "sound-mode", false),
+                (Page::Comfort, DiagnosticStep::Device, "comfort", false),
+                (Page::Power, DiagnosticStep::Device, "power", false),
+                (Page::Connections, DiagnosticStep::Device, "connections", false),
+                (Page::About, DiagnosticStep::Device, "about", false),
+                (
+                    Page::Effects,
+                    DiagnosticStep::Device,
+                    "sound-effects",
+                    false,
+                ),
+                (Page::Settings, DiagnosticStep::Device, "settings", false),
+                // The Liberty 4 Pro's own sound surface: the 1..=11 scale page
+                // with its wind-noise ModeRow toggle.
+                (
+                    Page::SoundModes,
+                    DiagnosticStep::Device,
+                    "a3954-scale",
+                    true,
+                ),
+                // The same scale and toggle row inside the Overview's
+                // sound-mode block.
+                (
+                    Page::Overview,
+                    DiagnosticStep::Device,
+                    "a3954-overview",
+                    true,
+                ),
             ] {
                 result.push(Capture {
                     width,
@@ -603,27 +648,36 @@ fn captures() -> Vec<Capture> {
                     diagnostic_step: step,
                     dialog: Dialog::None,
                     name: format!("{label}-{width}x{height}-{}.light", (scale * 100.0) as i32),
+                    a3954,
                 });
             }
         }
     }
     for dark in [true] {
         for scale in [1.0, 1.5] {
-            for (page, step, label) in [
-                (Page::Overview, DiagnosticStep::Device, "overview"),
-                (Page::SoundModes, DiagnosticStep::Device, "sound-mode"),
-                (Page::Settings, DiagnosticStep::Device, "settings"),
-                (Page::Controls, DiagnosticStep::Device, "controls"),
-                (Page::Devices, DiagnosticStep::Device, "devices"),
+            for (page, step, label, a3954) in [
+                (Page::Overview, DiagnosticStep::Device, "overview", false),
+                (Page::SoundModes, DiagnosticStep::Device, "sound-mode", false),
+                (Page::Settings, DiagnosticStep::Device, "settings", false),
+                (Page::Controls, DiagnosticStep::Device, "controls", false),
+                (Page::Devices, DiagnosticStep::Device, "devices", false),
                 (
                     Page::Diagnostics,
                     DiagnosticStep::Review,
                     "diagnostics-review",
+                    false,
                 ),
                 (
                     Page::Diagnostics,
                     DiagnosticStep::Capture,
                     "diagnostics-capture",
+                    false,
+                ),
+                (
+                    Page::SoundModes,
+                    DiagnosticStep::Device,
+                    "a3954-scale",
+                    true,
                 ),
             ] {
                 result.push(Capture {
@@ -635,6 +689,7 @@ fn captures() -> Vec<Capture> {
                     diagnostic_step: step,
                     dialog: Dialog::None,
                     name: format!("{label}-1280x900-{}.dark", (scale * 100.0) as i32),
+                    a3954,
                 });
             }
         }
@@ -653,6 +708,7 @@ fn captures() -> Vec<Capture> {
                     "diagnostics-review-{width}x{height}-{}.light",
                     (scale * 100.0) as i32
                 ),
+                a3954: false,
             });
             for (dialog, label) in [
                 (Dialog::Layout, "layout-dialog"),
@@ -667,6 +723,7 @@ fn captures() -> Vec<Capture> {
                     diagnostic_step: DiagnosticStep::Device,
                     dialog,
                     name: format!("{label}-{width}x{height}-{}.light", (scale * 100.0) as i32),
+                    a3954: false,
                 });
             }
         }
@@ -687,6 +744,7 @@ fn captures() -> Vec<Capture> {
                     diagnostic_step: DiagnosticStep::Device,
                     dialog,
                     name: format!("{label}-{width}x{height}-{}.light", (scale * 100.0) as i32),
+                    a3954: false,
                 });
             }
         }
@@ -728,6 +786,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 diagnostic_step: DiagnosticStep::Device,
                 dialog: Dialog::None,
                 name: "interactive".into(),
+                a3954: false,
             },
         );
         interactive::wire(&ui);
