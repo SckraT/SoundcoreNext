@@ -22,10 +22,7 @@ Review the completed Windows client and close the integration branch.
 ## Acceptance
 
 - [x] Review findings resolved or documented.
-- [ ] Gates green on merged master — the review-fix branch is green on the
-      unchanged `integration/windows-complete` tip; merging the integration
-      branch into `master` is the release step after ticket 05, and no hardware
-      acceptance is claimed here.
+- [x] Gates green on merged master — see the final release note below.
 - [x] README and UI_KIT/GUIDE accurate.
 - [x] No local WIP/untracked production files left.
 
@@ -154,3 +151,16 @@ From `core` (untouched by this ticket, run for the slice):
   here. The `integration/windows-complete` → `master` merge and the ticket
   worktree cleanup are the release steps after ticket 05; ticket 06's review
   fixes and gates are complete on the integration tip.
+
+### Release result
+
+`integration/windows-complete` was merged into `master` as
+`a59bb01` ("Finish the OpenSCL4 2.0 Windows client") after ticket 05 passed on the
+real Space One Pro (A3062, firmware 04.39): all five live UIA phases, the ten
+ignored manual hardware tests, diagnostics ZIP redaction (including the
+probe-response serial leak fixed in ticket 05), heartbeat Lost/Retry, tray and
+settings restart persistence passed; the device was left as found. The final
+master tree was re-gated after the merge: desktop fmt/build/clippy clean and
+270 passed / 13 ignored hardware tests; core 158 passed across 22 suites,
+fmt/clippy clean. Ticket worktrees wc01–wc06 were cleaned up. This completes the
+Windows client; Android remains future work.
