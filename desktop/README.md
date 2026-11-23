@@ -291,10 +291,11 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
 ## Screenshots
 
 The real-device captures in this section were taken during the earlier RFCOMM
-acceptance slices. The three Demo-mode captures come from the current build with
-no Bluetooth hardware: their device values are simulated, so they document the
-interface only and are not a hardware-acceptance result. No Bluetooth address or
-serial number appears in any of them.
+acceptance slices. The three Demo-mode captures come from the demo-acceptance
+build (ticket 04) run on Windows with no Bluetooth hardware: their device values
+are simulated and the Settings capture predates the 150 % content-scale choice,
+so they document the interface only and are not a hardware-acceptance result. No
+Bluetooth address or serial number appears in any of them.
 
 ![Demo mode Overview](demo-overview.png)
 
