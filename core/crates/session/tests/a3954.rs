@@ -453,7 +453,7 @@ fn writes_the_exact_a3954_setting_frames_once() {
                 find_device: true,
                 case_spatial_audio: false,
             }),
-            "08 EE 00 00 00 07 87 0E 00 00 00 01 00 93",
+            "08 EE 00 00 00 07 87 0E 00 00 01 00 00 93",
         ),
         (
             A3954SettingCommand::CaseLanguage(A3954CaseLanguage::Chinese),
@@ -598,8 +598,9 @@ fn writes_the_parsed_a3954_button_actions_and_case_settings_back() {
         vec![
             // Left double press, button id 0, action (nonTws=3, tws=6).
             hex("08 EE 00 00 00 04 81 0D 00 00 00 36 BE"),
-            // The fixture's case flags: only find device on.
-            hex("08 EE 00 00 00 07 87 0E 00 00 00 01 00 93"),
+            // The fixture's case flags: only find device on; the `07 87` body
+            // is in the app's order, so find device is the second byte.
+            hex("08 EE 00 00 00 07 87 0E 00 00 01 00 00 93"),
             // The fixture's language: English.
             hex("08 EE 00 00 00 07 8A 0B 00 01 93"),
         ],

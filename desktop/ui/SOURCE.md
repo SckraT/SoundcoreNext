@@ -177,4 +177,8 @@ reconnect. No hardware acceptance claim is implied by this source record.
   `components/localized.slint` with the rest of the runtime labels (the case
   feature and language ids, the gesture actions, `Japanese`/`English`/`Chinese`).
   `desktop/translations/ru/...po` gained their Russian translations. No visible
-  layout, token, callback or A3062 behaviour changed.
+  layout, token, callback or A3062 behaviour changed. The controller edits the
+  gesture action byte's live connection slot (the `01 01` TWS flag: low nibble
+  when the earbuds are TWS-connected, high when they are not) and keeps the
+  other nibble; the core's `07 87` command body uses the Soundcore app's flag
+  order, which differs from the state order.

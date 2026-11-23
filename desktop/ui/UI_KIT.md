@@ -136,10 +136,15 @@ actually supports and produces `AppState.overview-rows`, `quick-toggles`,
   Presses panel, the four measured slides as select rows in the Slides
   (`PanelKind.gestures`) panel, and the ambient-sound-mode cycle panel below.
   Every gesture row names its side and writes exactly one measured `04 81`
-  frame on change; it keeps the action byte's disconnected-state nibble and
-  re-polls `01 01`. The case-page toggles write `07 87` with the other three
-  measured flags kept, and the language row writes `07 8A`. The case status
-  (battery and firmware) is read-only and never shows the case serial.
+  frame on change; it edits the action byte's live slot (the `01 01` TWS flag
+  names it: the low nibble while the earbuds are TWS-connected, the high nibble
+  while they are not) and keeps the other nibble, then re-polls `01 01`. The
+  case-page toggles write `07 87` with the other three measured flags kept, and
+  the language row writes `07 8A`; the `07 87` body is in the Soundcore app's
+  command order (`[remote camera, find device, case spatial audio,
+  atmospheric]`), which is not the state's flag order and is handled by the
+  core command body. The case status (battery and firmware) is read-only and
+  never shows the case serial.
 - The A3954's ambient sound is one 1–11 scale, not three tiles: the Sound mode
   page sets `mode-scale` and `scale-position` from the device and shows its
   wind-noise suppression as a `ModeRow` toggle. The A3062 keeps the three tiles
