@@ -202,13 +202,12 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   model as the theme's color, Silver or Black. **App language** offers Follow
   system plus the 16 bundled languages by their own names; the choice is applied
   to the running window immediately and a code Slint does not bundle falls back
-  to English instead of failing. **Copy logs** puts the recent application log
-  lines on the Windows clipboard (a clipboard failure is logged, not fatal).
-  Controls the connected device cannot use are not offered: the one-earbud badge
-  needs a TWS pair (the single-battery A3062 never shows it) and the sound-mode
-  view choice needs a device whose core reports the 1–11 scale (the A3062 has
-  only its three modes and no core model exposes that scale yet, so the choice
-  stays hidden). Every choice applies to the running window at once and
+  to English instead of failing. Controls the connected device cannot use are not
+  offered: the one-earbud badge needs a TWS pair (the single-battery A3062 never
+  shows it) and the sound-mode view choice needs a device whose core reports the
+  1–11 scale (the A3062 has only its three modes and no core model exposes that
+  scale yet, so the choice stays hidden). Every choice applies to the running
+  window at once and
   is saved through the same flushed temporary file and rename into
   `%APPDATA%\OpenSCL4\desktop-preferences.json`, the one document that also
   holds the notification-area choices. On the next start the saved theme,
@@ -287,7 +286,10 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   opens without a device and shows an empty state. Its device summary, panels,
   progress, probe states and metric tiles use the internal UI kit; wide layouts
   place supporting information in an aside, while narrow layouts stack content
-  and actions in one scrollable column.
+  and actions in one scrollable column. **Copy logs** at the foot of the page
+  puts the recent application log lines on the Windows clipboard (a clipboard
+  failure is logged, not fatal). Diagnostics is the app's one support entry
+  point: the Settings aside no longer repeats a Diagnostics card.
 - Pages other than Overview, My Devices, Settings, Diagnostics, Sound mode,
   Equalizer, Sound and effects and the five A3062 device pages still open in
   their placeholder state, which is expected: the A3062 has no case, sleep,

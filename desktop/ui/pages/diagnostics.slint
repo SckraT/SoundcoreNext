@@ -556,6 +556,20 @@ component DoneStep inherits Stack {
     }
 }
 
+// The page's support actions. The Settings aside used to repeat them; the page
+// is now the one entry point, so the copy stays available on every step.
+component SupportActions inherits Row {
+    padding-top: Theme.space-1;
+    alignment: start;
+    Button {
+        text: @tr("Copy logs");
+        kind: ButtonKind.ghost;
+        has-icon: true;
+        icon: Icons.copy;
+        clicked => { Actions.copy-logs(); }
+    }
+}
+
 export component DiagnosticsPage inherits Stack {
     in property <bool> wide;
     width: 100%;
@@ -568,4 +582,5 @@ export component DiagnosticsPage inherits Stack {
     if AppState.diagnostic-step == DiagnosticStep.capture: CaptureStep { wide: root.wide; }
     if AppState.diagnostic-step == DiagnosticStep.review: ReviewStep { wide: root.wide; }
     if AppState.diagnostic-step == DiagnosticStep.done: DoneStep { }
+    SupportActions { }
 }

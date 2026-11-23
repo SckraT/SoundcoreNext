@@ -22,6 +22,9 @@ struct Capture {
     /// Render the Liberty 4 Pro (A3954) surface: the 1..=11 scale page and its
     /// wind-noise ModeRow toggle instead of the A3062 three-mode tiles.
     a3954: bool,
+    /// Replace the page's panels with the long-label/long-reason stress fixture
+    /// of every setting row kind (`long_panels`), so a wrapped row is captured.
+    long_rows: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -119,6 +122,64 @@ fn panel(kind: PanelKind, rows: Vec<SettingRow>) -> SettingsPanel {
         kind,
         rows: ModelRc::new(VecModel::from(rows)),
     }
+}
+
+// The ticket-02 layout stress fixture: one row of every kind with a label and a
+// device reason long enough to wrap at 800x700 and at 150 % content scale, plus
+// a list row after a normal one. A capture of this state must show every row
+// growing and pushing its own divider down; text drawn over a divider is the
+// regression the fixture catches. Preview-only data: the controller never sends
+// these strings.
+fn long_panels() -> ModelRc<SettingsPanel> {
+    const REASON: &str = "This setting is unavailable while the earbuds are in the charging case. Take them out and keep them connected to change it.";
+    const LABEL: &str = "An unusually long setting name that has to wrap inside the row";
+    let with_reason = |mut row: SettingRow| {
+        row.reason = REASON.into();
+        row
+    };
+    let toggle = with_reason(toggle_row("longToggle", LABEL, true));
+    let select = with_reason(select_row(
+        "longSelect",
+        LABEL,
+        vec![
+            "The first very long option of this select",
+            "The second very long option of this select",
+        ],
+        0,
+    ));
+    let mut range = with_reason(setting_row("limitHighVolumeDbLimit", RowKind::Range, LABEL));
+    range.minimum = 75;
+    range.maximum = 100;
+    range.step = 5;
+    range.value = 90;
+    let info = with_reason(info_row("longInfo", LABEL, "SN 0123 4567 89AB CDEF"));
+    let action = with_reason(setting_row("powerOff", RowKind::Action, LABEL));
+    let mut time = with_reason(setting_row("longTime", RowKind::Time, LABEL));
+    time.value = 22 * 60 + 45;
+    // The easy-chat wait time row also carries a description, so the row can be
+    // three lines above its toggle.
+    let described = with_reason(toggle_row("easyChatWaitTime", LABEL, false));
+    ModelRc::new(VecModel::from(vec![
+        panel(
+            PanelKind::Plain,
+            vec![toggle, select, range, info, action, time, described],
+        ),
+        panel(
+            PanelKind::DualDevices,
+            vec![
+                toggle_row("dualConnections", "Dual connections", true),
+                SettingRow {
+                    options: ModelRc::new(VecModel::from(vec![
+                        SharedString::from(
+                            "An unusually long remembered-device name in the list row",
+                        ),
+                        SharedString::from("Demo phone"),
+                    ])),
+                    ..setting_row("dualDevices", RowKind::List, "Paired devices")
+                },
+            ],
+        ),
+    ]))
 }
 
 // The panels the controller fills for each section page of a connected A3062,
@@ -253,12 +314,7 @@ fn a3954_panels(page: Page) -> Vec<SettingsPanel> {
         )
     };
     let slide = |id: &str, label: &str, index: i32| {
-        select_row(
-            id,
-            label,
-            vec!["None", "Volume up", "Volume down"],
-            index,
-        )
+        select_row(id, label, vec!["None", "Volume up", "Volume down"], index)
     };
     match page {
         Page::Controls => vec![
@@ -669,6 +725,18 @@ fn configure(ui: &AppWindow, capture: &Capture) {
             Page::Case,
             Page::About,
         ])));
+    } else {
+        // A capture after an A3954 one must not keep its device identity: the
+        // matrix runs the A3954 pages last in each size/scale group.
+        state.set_device_name("soundcore Space One Pro · Demo".into());
+        state.set_device_code("A3062".into());
+        state.set_device_pages(ModelRc::new(VecModel::from(vec![
+            Page::Controls,
+            Page::Comfort,
+            Page::Power,
+            Page::Connections,
+            Page::About,
+        ])));
     }
     // The Settings page's segmented control has to show the scale the capture
     // renders with, or a 150 % capture would claim the 100 % choice is selected.
@@ -682,6 +750,9 @@ fn configure(ui: &AppWindow, capture: &Capture) {
         0
     });
     state.set_panels(panels(capture.page, capture.a3954));
+    if capture.long_rows {
+        state.set_panels(long_panels());
+    }
     state.set_diagnostic_step(capture.diagnostic_step);
     state.set_editing_layout(matches!(capture.dialog, Dialog::Layout));
     state.set_choosing_toggles(matches!(capture.dialog, Dialog::Toggles));
@@ -773,6 +844,7 @@ fn captures() -> Vec<Capture> {
                     dialog: Dialog::None,
                     name: format!("{label}-{width}x{height}-{}.light", (scale * 100.0) as i32),
                     a3954,
+                    long_rows: false,
                 });
             }
         }
@@ -826,6 +898,7 @@ fn captures() -> Vec<Capture> {
                     dialog: Dialog::None,
                     name: format!("{label}-1280x900-{}.dark", (scale * 100.0) as i32),
                     a3954,
+                    long_rows: false,
                 });
             }
         }
@@ -845,6 +918,7 @@ fn captures() -> Vec<Capture> {
                     (scale * 100.0) as i32
                 ),
                 a3954: false,
+                long_rows: false,
             });
             for (dialog, label) in [
                 (Dialog::Layout, "layout-dialog"),
@@ -860,6 +934,7 @@ fn captures() -> Vec<Capture> {
                     dialog,
                     name: format!("{label}-{width}x{height}-{}.light", (scale * 100.0) as i32),
                     a3954: false,
+                    long_rows: false,
                 });
             }
         }
@@ -881,8 +956,32 @@ fn captures() -> Vec<Capture> {
                     dialog,
                     name: format!("{label}-{width}x{height}-{}.light", (scale * 100.0) as i32),
                     a3954: false,
+                    long_rows: false,
                 });
             }
+        }
+    }
+    // Ticket 02: the flow-based setting rows with labels and device reasons long
+    // enough to wrap. 800x700 renders the page narrow and 1280x820 two-column;
+    // 150 % wraps the same strings again. Every divider has to stay below its own
+    // row's text, and no row may collapse onto the one under it.
+    for (width, height) in [(800.0, 700.0), (1280.0, 820.0)] {
+        for scale in [1.0, 1.5] {
+            result.push(Capture {
+                width,
+                height,
+                scale,
+                dark: false,
+                page: Page::Power,
+                diagnostic_step: DiagnosticStep::Device,
+                dialog: Dialog::None,
+                name: format!(
+                    "settings-rows-long-{width}x{height}-{}.light",
+                    (scale * 100.0) as i32
+                ),
+                a3954: false,
+                long_rows: true,
+            });
         }
     }
     result
@@ -923,6 +1022,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 dialog: Dialog::None,
                 name: "interactive".into(),
                 a3954: false,
+                long_rows: false,
             },
         );
         interactive::wire(&ui);

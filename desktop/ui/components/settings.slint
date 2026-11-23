@@ -5,7 +5,7 @@ import { LocalizedText } from "localized.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { AppState, Actions, RowKind, SettingRow, SettingsPanel, PanelKind } from "../types.slint";
-import { Icon, IconButton, Button, ButtonKind, Toggle, Panel, PanelHeading, Note } from "basics.slint";
+import { Icon, IconButton, Button, ButtonKind, Toggle, Panel, PanelHeading, Note, Divider } from "basics.slint";
 
 // Names, descriptions and units the library has no words for, by setting id.
 export global SettingText {
@@ -233,7 +233,12 @@ export component Segmented inherits Rectangle {
     }
 }
 
-export component SettingRowView inherits Rectangle {
+// A setting row is a vertical flow: its divider, then the content its kind
+// needs. The row takes its height from the content, so a wrapped description or
+// device reason grows the row and pushes the next divider down; the divider is
+// never drawn at a fixed offset over a taller row. Controls are centred by the
+// layout instead of manual `y` coordinates, which a managed layout does not own.
+export component SettingRowView inherits VerticalLayout {
     in property <SettingRow> setting;
     in property <bool> first;
     // information with a copy button, as serial numbers are
@@ -242,16 +247,13 @@ export component SettingRowView inherits Rectangle {
     private property <string> description: SettingText.description(setting.id, AppState.device-is-speaker);
     // the rows of a list; empty for every other kind
     private property <[string]> devices: root.setting.kind == RowKind.list ? root.setting.options : [];
-    min-height: setting.kind == RowKind.list ? 0px : 64px;
-    if !root.first: Rectangle {
-        y: 0px;
-        height: 1px;
-        background: Theme.container;
-    }
+    spacing: 0px;
+    if !root.first: Divider { }
     if root.setting.kind != RowKind.list: HorizontalLayout {
         padding-top: root.first ? 2px : 15px;
         padding-bottom: 13px;
         spacing: 18px;
+        cross-axis-alignment: center;
         VerticalLayout {
             horizontal-stretch: 1;
             alignment: center;
@@ -282,7 +284,6 @@ export component SettingRowView inherits Rectangle {
             checked: root.setting.checked;
             enabled: root.setting.enabled;
             label: root.label;
-            y: (parent.height - self.height) / 2;
             toggled(on) => { Actions.set-toggle(root.setting.id, on); }
         }
         if root.setting.kind == RowKind.select: Select {
@@ -292,12 +293,12 @@ export component SettingRowView inherits Rectangle {
             current-index: root.setting.index;
             enabled: root.setting.enabled;
             label: root.label;
-            y: (parent.height - self.height) / 2;
             selected(index) => { Actions.set-option(root.setting.id, index); }
         }
         if root.setting.kind == RowKind.range || root.setting.kind == RowKind.hue: HorizontalLayout {
             spacing: 12px;
             width: 260px;
+            cross-axis-alignment: center;
             slider := RangeSlider {
                 minimum: root.setting.minimum;
                 maximum: root.setting.maximum;
@@ -305,13 +306,11 @@ export component SettingRowView inherits Rectangle {
                 value: root.setting.value;
                 enabled: root.setting.enabled;
                 label: root.label;
-                y: (parent.height - self.height) / 2;
                 committed(value) => { Actions.set-number(root.setting.id, value); }
             }
             Rectangle {
                 width: 64px;
                 height: 26px;
-                y: (parent.height - self.height) / 2;
                 border-radius: 8px;
                 background: Theme.container;
                 Text {
@@ -324,6 +323,7 @@ export component SettingRowView inherits Rectangle {
         }
         if root.setting.kind == RowKind.info: HorizontalLayout {
             spacing: 4px;
+            cross-axis-alignment: center;
             Text {
                 text: LocalizedText.setting-text(root.setting.id, root.setting.text);
                 color: Theme.text;
@@ -334,7 +334,6 @@ export component SettingRowView inherits Rectangle {
                 icon: Icons.copy;
                 label: @tr("Copy");
                 tint: Theme.muted;
-                y: (parent.height - self.height) / 2;
                 clicked => { Actions.copy(root.setting.text); }
             }
         }
@@ -351,6 +350,7 @@ export component SettingRowView inherits Rectangle {
         }
         if root.setting.kind == RowKind.time: HorizontalLayout {
             spacing: 6px;
+            cross-axis-alignment: center;
             SpinBox {
                 width: 90px;
                 minimum: 0;
@@ -367,9 +367,9 @@ export component SettingRowView inherits Rectangle {
             }
         }
     }
-    // the devices paired with the earbuds, each one can be forgotten. This layout is not behind an `if`: a
-    // conditional layout child does not count towards this rectangle's preferred height, so the row would collapse
-    // to nothing and the note below it would be drawn on top of the devices.
+    // the devices paired with the earbuds, each one can be forgotten. It stays an
+    // unconditional flow child: empty for every other kind (and therefore 0 px
+    // tall), and directly below the divider for a list row.
     VerticalLayout {
         spacing: 10px;
         if root.devices.length == 0 && root.setting.kind == RowKind.list: Text {
