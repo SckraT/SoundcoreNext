@@ -10,3 +10,6 @@ local.properties
 .scratch/wc04-uia/shots/
 .scratch/wc04-uia/state/
 .scratch/ui-validation/
+.scratch/reference-*/
+.scratch/feedback/
+/dist/
