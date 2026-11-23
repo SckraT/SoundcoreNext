@@ -253,7 +253,12 @@ fn a3954_panels(page: Page) -> Vec<SettingsPanel> {
         )
     };
     let slide = |id: &str, label: &str, index: i32| {
-        select_row(id, label, vec!["Volume up", "Volume down"], index)
+        select_row(
+            id,
+            label,
+            vec!["None", "Volume up", "Volume down"],
+            index,
+        )
     };
     match page {
         Page::Controls => vec![
@@ -273,10 +278,10 @@ fn a3954_panels(page: Page) -> Vec<SettingsPanel> {
             panel(
                 PanelKind::Gestures,
                 vec![
-                    slide("leftSlideUp", "Left slide up", 0),
-                    slide("rightSlideUp", "Right slide up", 0),
-                    slide("leftSlideDown", "Left slide down", 1),
-                    slide("rightSlideDown", "Right slide down", 1),
+                    slide("leftSlideUp", "Left slide up", 1),
+                    slide("rightSlideUp", "Right slide up", 1),
+                    slide("leftSlideDown", "Left slide down", 2),
+                    slide("rightSlideDown", "Right slide down", 2),
                 ],
             ),
             panel(
