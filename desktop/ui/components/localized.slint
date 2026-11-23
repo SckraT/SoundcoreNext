@@ -64,14 +64,6 @@ export global LocalizedText {
         return fallback;
     }
 
-    // Why a row is disabled, when the controller supplies the device's reason.
-    public pure function setting-reason(id: string, fallback: string) -> string {
-        if (id == "spatialAudioMusicMode" || id == "spatialAudioMode") && fallback == "Turn on spatial audio first" {
-            return @tr("Turn on spatial audio first");
-        }
-        return fallback;
-    }
-
     public pure function option(value: string) -> string {
         if value == "None" { return @tr("None"); }
         if value == "Bass Up" { return @tr("Bass up"); }

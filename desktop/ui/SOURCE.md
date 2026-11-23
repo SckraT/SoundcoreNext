@@ -157,9 +157,10 @@ reconnect. No hardware acceptance claim is implied by this source record.
   suppression`, `Spatial audio`, the easy-chat/limit-high-volume rows, the
   left/right/case battery and firmware About ids, and the `5/10/15 seconds`,
   `10/20/30/60 minutes` and spatial-audio mode values). The disabled spatial
-  select rows' device reason (`Turn on spatial audio first`) is translated the
-  same way through `LocalizedText.setting-reason`, because it is English data
-  from the controller. `desktop/translations/ru/...po` gained their Russian
+  select rows' device reason (`Turn on spatial audio first`) was translated the
+  same way through `LocalizedText.setting-reason` at the time; UI-polish ticket
+  03 moved disabled reasons to `UiMessage` + `Messages` (see the message catalog
+  entry below). `desktop/translations/ru/...po` gained their Russian
   translations. The controller fills the rows and owns every device write; the
   view still renders state only. The A3954's sound-mode block is optional: when
   the device reports an unmeasured value for it, the controller hides the scale
@@ -195,3 +196,150 @@ reconnect. No hardware acceptance claim is implied by this source record.
   or device behavior changed beyond the extra `None` choice and the banner
   wording; the controller still derives every row from state and owns every
   device write.
+- UI-polish layout tickets 01 and 02 (breadcrumb, one Diagnostics entry point,
+  flow-based setting rows):
+  - `shell.slint`: the `PageHeading` breadcrumb is a normal horizontal layout
+    child; `cross-axis-alignment: center` centres the device-name `TextLink`,
+    the chevron `Icon` and the section name, and the chevron no longer carries a
+    manual `y`. The chevron is therefore centred by the layout at every content
+    scale instead of being positioned with an offset the layout also manages.
+  - `pages/settings.slint`: the Settings aside's `AsidePanel` "Diagnostics" card
+    is removed, so Settings no longer duplicates the sidebar's Diagnostics route
+    or its Copy logs action; imports that only that card used are dropped. The
+    page keeps the Showcase, Home screen and About cards.
+  - `pages/diagnostics.slint`: a compact support `Row` at the bottom of
+    `DiagnosticsPage` offers **Copy logs** through the existing
+    `Actions.copy-logs()` on every step, so Diagnostics is the one entry point
+    for the app log. No callback, controller or translation document changed:
+    the label reuses the existing `Copy logs` message.
+  - `components/settings.slint`: `SettingRowView` is a `VerticalLayout` in normal
+    flow instead of a `Rectangle` with an absolutely placed divider and a fixed
+    non-list `min-height: 64px`. The divider (`Divider`, drawn only for
+    non-first rows) is the first child, the content row follows it, and the
+    row's height comes from its content, so a wrapped label, description or
+    device reason pushes the next divider down instead of drawing over it.
+    Toggle, select, range/hue, info/copy, action and time controls keep their
+    behavior and are centred with `cross-axis-alignment: center` in the content
+    row (and in the small groups that used to position them with manual `y`);
+    the list row keeps its device cards and stays an unconditional (empty when
+    not a list row) flow child. No row kind, callback or device write changed.
+  - `.scratch/ui-preview`: a `settings-rows-long` capture state renders every row
+    kind with a wrapped label and a wrapped device reason at 800×700 and
+    1280×820, 100 % and 150 %, plus a list row after a normal one; it is the
+    fixture for the "text never crosses a divider" acceptance. `make_ui_sheets.py`
+    groups those captures into their own sheet.
+  - `UI_KIT.md` records the flow-divider/auto-height rule; `GUIDE.md` records the
+    same rule as the way to change row layout and points at the long-string
+    preview fixture; `README.md` no longer places Copy logs on Settings.
+- UI-polish ticket 03 (runtime message catalog):
+  - `types.slint`: new `UiMessage { key, arg0, arg1 }`. `SettingRow.reason` and
+    `QuickToggle.reason` are now a `UiMessage` instead of a `string`, so the Rust
+    model can no longer send an English sentence for those fields; the empty key
+    is the empty message and draws no reason line.
+  - `messages.slint` (new): global `Messages.text(UiMessage) -> string`. Each
+    branch matches an internal key and returns its English source through `@tr`,
+    passing `message.arg0`/`message.arg1` where the source has `{}` placeholders;
+    an unknown or empty key returns `""`. The English sentence therefore lives in
+    the Slint translation catalog, not in Rust.
+  - `src/messages.rs` (new): typed key constants (`QUICK_TOGGLE_ONE_EARBUD`,
+    `SETTING_TURN_ON_SPATIAL_AUDIO`), `with_args`, `empty` and one constructor per
+    migrated reason; a test asserts the key, the empty arguments and that the
+    English sources exist only in `messages.slint` and the Russian `.po`.
+  - `components/settings.slint`: `SettingRowView` renders a reason through
+    `Messages.text(root.setting.reason)` when the reason key is non-empty.
+    `components/localized.slint` drops `LocalizedText.setting-reason`; the
+    runtime-label mapping stays for device-id labels and option values.
+    `pages/overview.slint` renders a disabled quick toggle's reason through
+    `Messages.text` too.
+  - `src/overview.rs`: the LDAC one-earbud toggle reason is the
+    `quick-toggle.one-earbud` key. `src/controller.rs`: the two disabled
+    spatial-audio rows use `setting.turn-on-spatial-audio`; the shared row
+    constructors start with the empty message. Visible behavior and the A3062 /
+    A3954 capability rules are unchanged; the English source of the LDAC reason
+    is the same sentence as before and the spatial reason is the existing msgid.
+  - `translations/ru/...po`: the new `Changing is available when both earbuds are
+    connected` msgid (the spatial reason reuses the existing `Turn on spatial
+    audio first` msgid). The preview fixture's wrapped reason is a preview-only
+    `preview.long-reason` branch, so its long-string coverage keeps working
+    through the same `Messages` path; the ru document carries its source too.
+  - `.scratch/ui-preview`: sends `UiMessage` keys (`message(...)`), including
+    `preview.long-reason` for the wrapped-row fixture, instead of raw strings.
+  - `UI_KIT.md`/`GUIDE.md` record the contract: UI-facing sentences from Rust are
+    `UiMessage` + `Messages`; `LocalizedText` remains for device-id labels and
+    option values; keys are identifiers, not UI copy. Errors, failure text and
+    diagnostics copy stay as they are for ticket 04.
+- UI-polish ticket 04 (controller copy migrated to the catalog):
+  - `types.slint`: `connection-reason`, `failure-text`, `add-error`, `error-label`,
+    `diagnostic-device-meta`, `diagnostic-status` and `diagnostic-error` are
+    `UiMessage` instead of `string`; `DiagnosticProbe.status` is a `UiMessage`
+    too. The technical fields stay data: device/model names, `diagnostic-file-name`,
+    `diagnostic-issue-url`, `diagnostic-note`, `diagnostic-archive-size` and the
+    numeric fields. No renderer shows a raw controller sentence any more.
+  - `messages.slint`: the `Messages` half of the catalog gained the full banner
+    sentence (`Could not change “{} ({})”. The device kept its previous value.`,
+    warning the saved-profile document failure separately), one branch per
+    `ConnectFailure`, the Add Device errors, the Diagnostics errors/status/meta
+    line and the probe status words. The new `MessageParts` global resolves the
+    words a sentence quotes from argument keys: `subject.*` (the setting or
+    action a failed write names), `reason.no-answer`/`connection-lost`/
+    `unreadable-answer`, and `part.unknown`; any other value argument is a
+    technical reading passed through unchanged.
+  - `src/messages.rs`: typed constants and constructors for every new branch
+    (`setting_write_failure`, the `connect_*`/`add_*`/`demo_*`/`diagnostics_*`
+    set, the `SUBJECT_*`/`REASON_*`/`PART_UNKNOWN` keys, probe statuses). Tests
+    assert the key/argument shape, that every key has a catalog branch with a
+    non-empty Russian translation, that the migrated `AppState` fields are
+    `UiMessage` (a compiler-level guard against re-adding a string field), and
+    that the English sentences of the `Messages` catalog do not appear in
+    `controller.rs`/`overview.rs`/`demo.rs`. A window test selects the bundled
+    Russian translation, resolves the composed failed-write banner through the
+    compiled `Messages` global (proving `@tr`, `MessageParts` and the `.po`
+    chain work end to end) and restores English.
+  - `src/controller.rs`: `ModeFailure`/`EqFailure`/`SettingFailure`/`DualFailure`
+    expose `message()`/`bands_message()`/`list_message()`/`action_message()`
+    instead of English label builders; `setting_subject`, `a3954_setting_subject`,
+    `a3954_setting_row_subject` and `a3954_button_subject` map a command to its
+    banner subject key, including the specific case-screen flag. `ConnectFailure`
+    gained `WorkerStart`, `DemoWorkerStart` and `SavedAddress` so the app's own
+    failures are catalog keys rather than English transport details; the OS
+    detail of `Transport` is a technical argument. Every `AppState` sentence
+    setter now receives a message; the clear paths use `messages::empty()`.
+    `diagnostic_probe_rows` statuses are catalog keys; the meta line passes the
+    firmware/battery readings (or `part.unknown`) to the catalog, removing the
+    former hardcoded Russian/English branch in `show_diagnostics_device`.
+    `EqPage`, `SaveDialogPage` and `ImportPage` test seams take `UiMessage`.
+    `src/demo.rs` no longer contains the demo texts or the language branch.
+  - `pages/`: `app.slint` banner and reconnecting line, `devices.slint`
+    connection state, `add_device.slint` error line, `diagnostics.slint` status,
+    meta, error and probe status, and `pages/overview.slint`'s power/spatial
+    shortcut values all render through `Messages.text` (the Overview values are
+    localized option data, not sentences). The old `FailureText` global is gone.
+  - `translations/ru/...po`: translations for every new source (connection
+    failures, Add Device, Diagnostics, subjects/reasons), and the banner msgid
+    now has two placeholders. `desktop/tests/translations.rs` (ticket 05) keeps
+    the document complete.
+  - Not migrated on purpose: stderr/log lines, URLs and file names, protocol ids,
+    the GitHub-issue body, and the native surfaces (notification-area menu
+    wording and OS file-dialog titles/filter names); the README records them.
+- UI-polish ticket 05 (translation completeness test):
+  - `desktop/tests/translations.rs` (new): scans every `@tr` source from
+    `desktop/ui/**/*.slint` (comments skipped, escapes decoded, plural forms both
+    captured), parses the `.po` documents with continuation lines, escapes and
+    plurals, and fails with a readable list when a source has no entry or an empty
+    `msgstr`/`msgstr[0]` in any locale of `REQUIRED_TRANSLATIONS` (`ru`). It also
+    asserts every `src/messages.rs` key has a `Messages`/`MessageParts` branch and
+    that the source the catalog returns for it has a non-empty translation, and
+    that a required document has no duplicate msgid. The scanner's own rules are
+    pinned by tests; the file documents how to add a locale.
+  - `tools/ui-capture/capture-ui.ps1`: the preflight parses the `.po` the same way
+    and fails on a missing **or empty** required translation before launching the
+    app (it used to check msgid presence only); `tools/ui-capture/README.md`
+    records the non-empty rule.
+  - Demonstration: emptying the Russian `msgstr` of `Could not build the
+    archive: {}` made both the UI-source test and the `messages.rs` key test fail
+    with `empty msgstr for "Could not build the archive: {}"` / `empty msgstr
+    for ..., the source of messages.rs key "diagnostics.build-failed"`; the
+    string was restored and the suite went green again.
+  - `UI_KIT.md`/`GUIDE.md`/`README.md` record the contract, the migrated fields
+    and how to add a locale; `README.md` drops the outdated "Diagnostics and
+    Demo-mode copy stay English" limitation.

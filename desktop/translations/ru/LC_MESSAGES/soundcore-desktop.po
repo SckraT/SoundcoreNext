@@ -241,8 +241,8 @@ msgstr "Подключить снова"
 msgid "Bluetooth settings"
 msgstr "Параметры Bluetooth"
 
-msgid "Could not change “{}”. The device kept its previous value."
-msgstr "Не удалось изменить «{}». На устройстве осталось прежнее значение."
+msgid "Could not change “{} ({})”. The device kept its previous value."
+msgstr "Не удалось изменить «{} ({})». На устройстве осталось прежнее значение."
 
 msgid "Retry"
 msgstr "Повторить"
@@ -1565,3 +1565,139 @@ msgstr "Подавление шума ветра"
 
 msgid "Turn on spatial audio first"
 msgstr "Сначала включите пространственный звук"
+
+# Runtime messages from the Rust model (desktop/ui/messages.slint). These are
+# sentences the controller supplies as UiMessage keys, not static page copy.
+msgid "Changing is available when both earbuds are connected"
+msgstr "Изменение доступно, когда подключены оба наушника"
+
+# Preview-only: the wrapped-row fixture in .scratch/ui-preview; no controller
+# message sends this key.
+msgid "This setting is unavailable while the earbuds are in the charging case. Take them out and keep them connected to change it."
+msgstr "Эта настройка недоступна, пока наушники в зарядном кейсе. Достаньте их и не отключайте, чтобы изменить её."
+
+# Runtime message words (desktop/ui/messages.slint MessageParts): the setting
+# or action a failed write names, why the write did not take, and small values
+# quoted inside a message. The controller passes these as UiMessage arguments.
+msgid "Equalizer profile"
+msgstr "Профиль эквалайзера"
+
+msgid "Equalizer bands"
+msgstr "Полосы эквалайзера"
+
+msgid "Mode cycle"
+msgstr "Цикл режимов"
+
+msgid "Dual connections list"
+msgstr "Список двух подключений"
+
+msgid "Connect device"
+msgstr "Подключить устройство"
+
+msgid "Disconnect device"
+msgstr "Отключить устройство"
+
+msgid "no answer"
+msgstr "нет ответа"
+
+msgid "connection lost"
+msgstr "связь потеряна"
+
+msgid "unreadable answer"
+msgstr "нечитаемый ответ"
+
+msgid "unknown"
+msgstr "неизвестно"
+
+# Runtime connection failures (controller ConnectFailure -> Messages).
+msgid "The device is not paired with Windows. Pair it in Windows settings, then try again."
+msgstr "Устройство не сопряжено с Windows. Сопрягите его в параметрах Windows и повторите попытку."
+
+msgid "Bluetooth is off. Turn it on in Windows settings, then try again."
+msgstr "Bluetooth выключен. Включите его в параметрах Windows и повторите попытку."
+
+msgid "Could not open a Bluetooth connection to the device. Make sure it is nearby and not connected to another device."
+msgstr "Не удалось открыть Bluetooth-соединение с устройством. Убедитесь, что оно рядом и не подключено к другому устройству."
+
+msgid "This paired device does not offer the Soundcore Bluetooth service. Pair it again in Windows settings and try again."
+msgstr "Это сопряжённое устройство не предоставляет Bluetooth-службу Soundcore. Сопрягите его снова в параметрах Windows и повторите попытку."
+
+msgid "The app cannot read this model's state yet, so its battery levels are unavailable."
+msgstr "Приложение пока не умеет читать состояние этой модели, поэтому уровень заряда недоступен."
+
+msgid "This model reports a battery layout the app cannot read yet, so battery levels are unavailable."
+msgstr "Эта модель сообщает раскладку заряда, которую приложение пока не умеет читать, поэтому уровень заряда недоступен."
+
+msgid "The device answered with a Bluetooth message the app could not read."
+msgstr "Устройство ответило сообщением Bluetooth, которое приложение не смогло прочитать."
+
+msgid "The Bluetooth connection failed: {}"
+msgstr "Не удалось установить Bluetooth-соединение: {}"
+
+msgid "Could not start the Bluetooth worker."
+msgstr "Не удалось запустить службу Bluetooth."
+
+msgid "Could not start the demo device worker."
+msgstr "Не удалось запустить службу деморежима."
+
+msgid "The saved device's Bluetooth address cannot be read. Add the device again."
+msgstr "Не удалось прочитать Bluetooth-адрес сохранённого устройства. Добавьте устройство снова."
+
+msgid "Could not save the equalizer profiles. The saved list was not changed."
+msgstr "Не удалось сохранить профили эквалайзера. Сохранённый список не изменён."
+
+# Runtime Add Device errors.
+msgid "Choose a model before picking a paired device."
+msgstr "Сначала выберите модель, затем сопряжённое устройство."
+
+msgid "This paired device could not be read. Refresh the list and try again."
+msgstr "Не удалось прочитать это сопряжённое устройство. Обновите список и повторите попытку."
+
+msgid "Could not search for paired devices. Try again."
+msgstr "Не удалось найти сопряжённые устройства. Попробуйте ещё раз."
+
+msgid "Demo mode is available for Space One Pro"
+msgstr "Деморежим доступен для Space One Pro"
+
+# Runtime Diagnostics messages.
+msgid "Demo mode cannot collect diagnostics. No probes are run and no archive is written."
+msgstr "Деморежим не собирает диагностику. Пробы не запускаются, архив не создаётся."
+
+msgid "The device worker is not running. Reconnect the device and try again."
+msgstr "Служба устройства не запущена. Подключите устройство снова и повторите попытку."
+
+msgid "There is no capture to save yet."
+msgstr "Пока нет записи для сохранения."
+
+msgid "Could not build the archive: {}"
+msgstr "Не удалось собрать архив: {}"
+
+msgid "Could not start the save dialog."
+msgstr "Не удалось открыть диалог сохранения."
+
+msgid "Could not write the archive: {}"
+msgstr "Не удалось записать архив: {}"
+
+msgid "The issue link is not ready yet."
+msgstr "Ссылка на задачу ещё не готова."
+
+msgid "Supported"
+msgstr "Поддерживается"
+
+msgid "Firmware {} · Battery {}"
+msgstr "Прошивка {} · Заряд {}"
+
+msgid "No answer"
+msgstr "Нет ответа"
+
+msgid "Empty reply"
+msgstr "Пустой ответ"
+
+msgid "Unexpected"
+msgstr "Неожиданный ответ"
+
+msgid "Bad checksum"
+msgstr "Неверная контрольная сумма"
+
+msgid "Waiting…"
+msgstr "Ожидание…"

@@ -27,6 +27,7 @@ mod catalog_adapter;
 mod controller;
 mod demo;
 mod logs;
+mod messages;
 mod overview;
 mod settings;
 mod single_instance;

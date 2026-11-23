@@ -74,41 +74,174 @@ function Resolve-Exe {
     return (Resolve-Path (Join-Path $repo 'desktop\target\debug\soundcore-desktop.exe')).Path
 }
 
-function Assert-RussianTranslations {
-    $poPath = Join-Path $repo 'desktop\translations\ru\LC_MESSAGES\soundcore-desktop.po'
-    if (-not (Test-Path $poPath)) { Fail "missing $poPath" }
-    $po = Get-Content $poPath -Raw
-    $missing = New-Object System.Collections.Generic.List[string]
-    $trFiles = Get-ChildItem (Join-Path $repo 'desktop\ui') -Recurse -Filter '*.slint'
-    foreach ($file in $trFiles) {
-        $text = Get-Content $file.FullName -Raw
-        foreach ($match in [regex]::Matches($text, '@tr\("([^"]+)"')) {
-            $id = $match.Groups[1].Value
-            if ($po -notmatch ('(?m)^msgid "' + [regex]::Escape($id) + '"\s*$')) {
-                if (-not $missing.Contains($id)) { [void]$missing.Add($id) }
+# The required translations this capture depends on. The same non-empty rule
+# lives in `desktop/tests/translations.rs`; add a locale to both places when its
+# translation document is complete.
+$requiredTranslations = @('ru')
+
+function ConvertFrom-EscapedText([string]$Text) {
+    return [regex]::Replace($Text, '\\(.)', {
+            param($match)
+            $escaped = $match.Groups[1].Value
+            switch ($escaped) {
+                'n' { "`n" }
+                't' { "`t" }
+                'r' { "`r" }
+                default { $escaped }
             }
-        }
-    }
-    if ($missing.Count -gt 0) {
-        Fail ("Russian translation is missing $($missing.Count) string(s):`n" + (($missing | Select-Object -First 20) -join "`n"))
-    }
-    Log "Russian translation covers every @tr string in desktop/ui"
+        })
 }
 
-function Get-MissingRussianStrings {
-    $poPath = Join-Path $repo 'desktop\translations\ru\LC_MESSAGES\soundcore-desktop.po'
-    $po = Get-Content $poPath -Raw
-    $missing = New-Object System.Collections.Generic.List[string]
+# Reads a `.po` document into `msgid -> @{ translated; plural }`, decoding
+# continuation lines and escapes. `translated` is true only when the entry has a
+# non-empty translation: `msgstr` for a plain source, `msgstr[0]` for a plural
+# one. A source with an empty `msgstr` counts as missing, exactly like the Rust
+# translation test.
+function Read-PoTranslations([string]$Path) {
+    $translations = @{}
+    $msgid = $null
+    $field = $null
+    $msgstr = ''
+    $msgidPlural = $null
+    $pluralMsgstr = @()
+    $pluralIndex = -1
+    $flush = {
+        if ($null -ne $msgid -and $msgid -ne '') {
+            $translated = if ($null -ne $msgidPlural) {
+                $pluralMsgstr.Count -gt 0 -and "$($pluralMsgstr[0])".Trim() -ne ''
+            }
+            else {
+                $msgstr.Trim() -ne ''
+            }
+            $forms = @($pluralMsgstr | ForEach-Object { "$_" })
+            $translations[$msgid] = @{ translated = $translated; plural = $msgidPlural; forms = $forms }
+        }
+    }
+    $lines = @(Get-Content $Path -Encoding UTF8)
+    $last = $lines.Count - 1
+    for ($i = 0; $i -le $last; $i++) {
+        $line = $lines[$i].TrimEnd()
+        if ($line -eq '') {
+            . $flush
+            $msgid = $null; $msgstr = ''; $msgidPlural = $null; $pluralMsgstr = @(); $pluralIndex = -1
+            $field = $null
+            continue
+        }
+        if ($line.StartsWith('#')) { continue }
+        if ($line -match '^msgid_plural\s+"((?:[^"\\]|\\.)*)"') {
+            $field = 'plural-id'
+            $msgidPlural = ConvertFrom-EscapedText $Matches[1]
+            continue
+        }
+        if ($line -match '^msgid\s+"((?:[^"\\]|\\.)*)"') {
+            $field = 'id'
+            $msgid = ConvertFrom-EscapedText $Matches[1]
+            continue
+        }
+        if ($line -match '^msgstr\[(\d+)\]\s+"((?:[^"\\]|\\.)*)"') {
+            $index = [int]$Matches[1]
+            $value = ConvertFrom-EscapedText $Matches[2]
+            while ($pluralMsgstr.Count -le $index) { $pluralMsgstr += '' }
+            $pluralMsgstr[$index] = $value
+            $pluralIndex = $index
+            $field = 'plural'
+            continue
+        }
+        if ($line -match '^msgstr\s+"((?:[^"\\]|\\.)*)"') {
+            $field = 'str'
+            $msgstr = ConvertFrom-EscapedText $Matches[1]
+            continue
+        }
+        if ($line -match '^"((?:[^"\\]|\\.)*)"') {
+            $value = ConvertFrom-EscapedText $Matches[1]
+            switch ($field) {
+                'id' { $msgid += $value }
+                'plural-id' { $msgidPlural += $value }
+                'str' { $msgstr += $value }
+                'plural' { $pluralMsgstr[$pluralIndex] += $value }
+            }
+            continue
+        }
+    }
+    . $flush
+    return $translations
+}
+
+# Every `@tr("...")` source in desktop/ui, comments stripped and escapes
+# decoded; a plural call contributes its singular source (the `.po` msgid).
+function Read-SlintTranslatables {
+    $sources = New-Object System.Collections.Generic.List[string]
     foreach ($file in Get-ChildItem (Join-Path $repo 'desktop\ui') -Recurse -Filter '*.slint') {
-        $text = Get-Content $file.FullName -Raw
-        foreach ($match in [regex]::Matches($text, '@tr\("([^"]+)"')) {
-            $id = $match.Groups[1].Value
-            if ($po -notmatch ('(?m)^msgid "' + [regex]::Escape($id) + '"\s*$') -and -not $missing.Contains($id)) {
-                [void]$missing.Add($id)
+        $text = Get-Content $file.FullName -Raw -Encoding UTF8
+        $text = [regex]::Replace($text, '(?s)/\*.*?\*/', '')
+        $text = [regex]::Replace($text, '(?m)//[^\n]*$', '')
+        foreach ($match in [regex]::Matches($text, '@tr\("((?:[^"\\]|\\.)*)"')) {
+            $source = ConvertFrom-EscapedText $match.Groups[1].Value
+            if (-not $sources.Contains($source)) { [void]$sources.Add($source) }
+        }
+    }
+    return $sources
+}
+
+# The number of plural forms a `.po` header declares (`nplurals`). A plural
+# `@tr` source needs one non-empty translation per form; this is the same rule as
+# `desktop/tests/translations.rs`.
+function Get-PoPluralForms([string]$Path) {
+    $raw = Get-Content $Path -Raw -Encoding UTF8
+    $match = [regex]::Match($raw, 'Plural-Forms:[^"\r\n]*nplurals=(\d+)')
+    if (-not $match.Success) { Fail "missing Plural-Forms nplurals in $Path" }
+    return [int]$match.Groups[1].Value
+}
+
+function Assert-RussianTranslations {
+    $poPaths = New-Object System.Collections.Generic.List[string]
+    $pluralForms = @{}
+    foreach ($locale in $requiredTranslations) {
+        $poPath = Join-Path $repo "desktop\translations\$locale\LC_MESSAGES\soundcore-desktop.po"
+        if (-not (Test-Path $poPath)) { Fail "missing $poPath" }
+        $poPaths.Add($poPath)
+        $pluralForms[$locale] = Get-PoPluralForms $poPath
+    }
+    $translations = @{}
+    foreach ($poPath in $poPaths) {
+        $locale = $requiredTranslations[$poPaths.IndexOf($poPath)]
+        foreach ($entry in (Read-PoTranslations $poPath).GetEnumerator()) {
+            if (-not $translations.ContainsKey($entry.Key)) {
+                $value = $entry.Value
+                $value.nplurals = $pluralForms[$locale]
+                $translations[$entry.Key] = $value
             }
         }
     }
-    return $missing
+    $sources = Read-SlintTranslatables
+    $problems = New-Object System.Collections.Generic.List[string]
+    foreach ($source in $sources) {
+        if (-not $translations.ContainsKey($source)) {
+            [void]$problems.Add("missing msgid: $source")
+            continue
+        }
+        $entry = $translations[$source]
+        if (-not $entry.translated) {
+            [void]$problems.Add("empty msgstr: $source")
+            continue
+        }
+        if ($null -ne $entry.plural) {
+            $forms = @($entry.forms)
+            $complete = $forms.Count -ge $entry.nplurals
+            if ($complete) {
+                for ($i = 0; $i -lt $entry.nplurals; $i++) {
+                    if ("$($forms[$i])".Trim() -eq '') { $complete = $false }
+                }
+            }
+            if (-not $complete) {
+                [void]$problems.Add("incomplete plural msgstr: $source (needs $($entry.nplurals) non-empty forms)")
+            }
+        }
+    }
+    if ($problems.Count -gt 0) {
+        Fail ("The required translations do not cover every @tr string ($($problems.Count) problem(s)):`n" + (($problems | Select-Object -First 20) -join "`n"))
+    }
+    Log "Required translations ($($requiredTranslations -join ', ')) have a non-empty translation for every @tr string in desktop/ui"
 }
 
 function Get-PageMap {

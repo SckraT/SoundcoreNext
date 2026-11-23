@@ -194,6 +194,9 @@ export component PageHeading inherits HorizontalLayout {
             spacing: 8px;
             padding-bottom: 8px;
             alignment: start;
+            // The device name, the arrow and the section name sit on one line:
+            // the layout centres each of them, so the arrow needs no manual `y`.
+            cross-axis-alignment: center;
             TextLink {
                 text: AppState.device-name;
                 chevron: false;
@@ -204,7 +207,6 @@ export component PageHeading inherits HorizontalLayout {
                 tint: Theme.muted;
                 width: 12px;
                 height: 12px;
-                y: (parent.height - self.height) / 2;
             }
             Text {
                 text: Strings.section(root.page);

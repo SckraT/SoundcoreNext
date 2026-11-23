@@ -102,6 +102,14 @@ content, not in duplicated action or state logic.
   the main column narrower than its rows. A row's label shrinks and elides
   before its actions do: a long device or setting name must never push a button
   out of its panel.
+- A settings row (`components/settings.slint`) is a flow, not a fixed-height
+  rectangle: the divider is the row's first layout child, the content row
+  follows, and the row's height comes from that content. Never place a divider
+  at an absolute offset and never give a non-list row a fixed minimum height to
+  line controls up: a wrapped label, description or device reason then grows its
+  row instead of running over the next divider. The same rule applies to composed
+  rows elsewhere: centre controls with `cross-axis-alignment` rather than a
+  manual child `y`.
 - On Windows, quick settings occupy a separate panel below the device hero (and
   the one-earbud notice when present), not the sage device card. Their grid uses
   the compact control height, left-aligned rows and cell widths clamped to
@@ -161,10 +169,12 @@ actually supports and produces `AppState.overview-rows`, `quick-toggles`,
   the Sound mode page and Overview block are hidden; the equalizer and the
   device pages stay available instead of the connection failing. Do not invent
   a scale position or send a `06 81` frame without a measured block.
-- A disabled row's device reason is English data from the controller and is
-  localized by the UI through `LocalizedText.setting-reason` when it is one the
-  kit knows (for example `Turn on spatial audio first`); unknown reasons pass
-  through unchanged.
+- A disabled row's or quick toggle's reason is a `UiMessage` from the
+  controller: a catalog key plus up to two arguments. The UI resolves it through
+  `Messages.text` (`messages.slint`), which holds the English `@tr` source and
+  therefore the translated copy; Rust carries no sentence for it. An available
+  row sends the empty message, so `reason.key == ""` means "nothing to explain"
+  and no reason line is drawn.
 - Quick presets and the Overview's case shortcut stay unsupported until the core
   supplies real data and working behavior. Do not create decorative
   substitutes. The A3954's case settings are a real Case page, not an Overview
@@ -217,11 +227,58 @@ restore controls; Retry remains an explicit user action.
 
 ### Runtime labels
 
-Static UI copy uses `@tr`. Names and values that come from the device model are
+Static UI copy uses `@tr`. Sentences that the Rust model composes are not
+carried as English text: the model field holds a `UiMessage` (`key`, `arg0`,
+`arg1`), and `Messages.text` in `messages.slint` resolves the key through `@tr`
+and the translation documents. `desktop/src/messages.rs` owns the typed key
+constants and constructors; a key is an internal identifier such as
+`quick-toggle.one-earbud`, never UI copy, and the English source lives in
+`messages.slint` with the rest of the translatable strings. `arg0`/`arg1` fill
+that source's `{}` placeholders in order; an empty key is the empty message.
+Adding a runtime sentence means three changes: a constant and constructor in
+`messages.rs`, a matching `if message.key == ...` branch with its `@tr` source in
+`messages.slint`, and the source string in every required `.po` document. A
+branch that uses placeholders passes `message.arg0`/`message.arg1`.
+
+A sentence that quotes a translatable word takes that word as a message argument
+*as another key*, resolved inside `messages.slint` by the `MessageParts` global
+(subjects such as `subject.ldac` or `subject.equalizer-bands`, reasons such as
+`reason.no-answer`, and `part.unknown` for a missing reading). This is how the
+failed-write banner is composed: Rust sends `error.setting-write` with the
+setting/action subject key and the failure reason key, and the catalog returns
+`Could not change “{} ({})”. The device kept its previous value.` — no English is
+composed on the Rust side. Every model field that used to carry a sentence is a
+`UiMessage`: `connection-reason`, `failure-text`, `add-error`, `error-label`,
+`diagnostic-device-meta`, `diagnostic-status`, `diagnostic-error`, and
+`DiagnosticProbe.status`. Fields that carry values or identifiers stay strings:
+device and model names, file names, the issue URL, the archive size (`12.3 KB`),
+the note the user types, and technical arguments a sentence quotes (the OS
+transport detail, an archive build/write error, a firmware version, a battery
+reading). `failure-kind`, `add-failure-kind`, `Connection`, `ToastKind` and the
+other enums stay page data; the renderer gets the sentence from `Messages.text`.
+
+`desktop/tests/translations.rs` enforces the contract in `cargo test`: every
+`@tr` source in `desktop/ui/**/*.slint` (static pages, `messages.slint` and
+`localized.slint` alike) has a non-empty translation in each locale of
+`REQUIRED_TRANSLATIONS` (currently `ru`), every `messages.rs` key has a catalog
+branch, and the English source for that key has a non-empty `.po` translation.
+The test fails with a list of every missing or empty source. A unit test in
+`messages.rs` also resolves a composed message through the compiled window in
+Russian (`slint::select_bundled_translation("ru")`) and restores English, so the
+`@tr` + `MessageParts` + `.po` chain is exercised end to end, not only as data.
+`tools/ui-capture/capture-ui.ps1` runs the same non-empty rule for Russian before
+it launches the app. A new language is added by translating a full `.po` document
+and adding its code to both lists. The native notification-area menu and the OS
+file-dialog titles/filter names are worded in Rust/Tray or `rfd` data and are not
+part of this Slint catalog; they are the remaining untranslated surfaces (see
+`desktop/README.md`).
+
+Names and values that come from the device model are
 English data at the protocol/controller boundary; the UI translates the ones it
 knows through `components/localized.slint` (`LocalizedText.setting-label`,
 `setting-text`, `option`, `mode-label`), keyed by the stable setting id or
-protocol value. Add a mapping there when a new row, option or mode label is
+protocol value. `LocalizedText` stays for those labels and option values; it does
+not carry sentences. Add a mapping there when a new row, option or mode label is
 introduced, and add the `@tr` strings to the locale documents. This includes the
 A3954 rows (`windNoiseSuppression`, `wearingDetection`, `easyChat`,
 `easyChatWaitTime`, `soundLeakCompensation`, `spatialAudio`,

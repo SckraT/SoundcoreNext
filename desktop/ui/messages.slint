@@ -1,0 +1,221 @@
+// The sentences the Rust model supplies. Rust sends a message key and up to two
+// arguments as a `UiMessage`; this catalog turns the key back into its English
+// source through `@tr`, so the `.po` documents translate it like static UI copy.
+// Keys are internal identifiers, never UI text: keep every English sentence in
+// the `@tr` branch below (or in the page/component that shows it), not in Rust.
+//
+// A message's arguments are keys too when the sentence quotes a word that has to
+// be translated: `MessageParts.subject` names the setting or action a failure
+// reports, `MessageParts.reason` says why a write did not take, and
+// `MessageParts.value` words a small value (`part.unknown`) while passing a
+// technical value such as a firmware version through unchanged. That keeps the
+// composition ("Could not change “LDAC (no answer)”.") translatable without any
+// English in the Rust model.
+import { UiMessage } from "types.slint";
+
+// The words messages quote inside their sentence, resolved from the keys Rust
+// passes as message arguments.
+export global MessageParts {
+    public pure function subject(key: string) -> string {
+        if key == "subject.sound-mode" { return @tr("Sound mode"); }
+        if key == "subject.equalizer-profile" { return @tr("Equalizer profile"); }
+        if key == "subject.equalizer-bands" { return @tr("Equalizer bands"); }
+        if key == "subject.double-press" { return @tr("Double press"); }
+        if key == "subject.mode-cycle" { return @tr("Mode cycle"); }
+        if key == "subject.low-battery-prompt" { return @tr("Low battery prompt"); }
+        if key == "subject.dolby-audio" { return @tr("Dolby audio"); }
+        if key == "subject.ldac" { return @tr("LDAC"); }
+        if key == "subject.dual-connections" { return @tr("Dual connections"); }
+        if key == "subject.auto-power-off" { return @tr("Auto power off"); }
+        if key == "subject.limit-high-volume" { return @tr("Limit high volume"); }
+        if key == "subject.refresh-rate" { return @tr("Refresh rate"); }
+        if key == "subject.side-tone" { return @tr("Side tone"); }
+        if key == "subject.voice-prompt" { return @tr("Voice prompt"); }
+        if key == "subject.wearing-detection" { return @tr("Wearing detection"); }
+        if key == "subject.sound-leak-compensation" { return @tr("Sound leak compensation"); }
+        if key == "subject.spatial-audio" { return @tr("Spatial audio"); }
+        if key == "subject.easy-chat" { return @tr("Easy chat"); }
+        if key == "subject.case-screen" { return @tr("Case screen"); }
+        if key == "subject.case-language" { return @tr("Case language"); }
+        if key == "subject.case-atmospheric" { return @tr("Atmospheric"); }
+        if key == "subject.case-remote-camera" { return @tr("Remote camera"); }
+        if key == "subject.case-find-device" { return @tr("Find device"); }
+        if key == "subject.case-spatial-audio" { return @tr("Spatial audio on case"); }
+        if key == "subject.left-single-press" { return @tr("Left single press"); }
+        if key == "subject.right-single-press" { return @tr("Right single press"); }
+        if key == "subject.left-double-press" { return @tr("Left double press"); }
+        if key == "subject.right-double-press" { return @tr("Right double press"); }
+        if key == "subject.left-triple-press" { return @tr("Left triple press"); }
+        if key == "subject.right-triple-press" { return @tr("Right triple press"); }
+        if key == "subject.left-long-press" { return @tr("Left long press"); }
+        if key == "subject.right-long-press" { return @tr("Right long press"); }
+        if key == "subject.left-slide-up" { return @tr("Left slide up"); }
+        if key == "subject.right-slide-up" { return @tr("Right slide up"); }
+        if key == "subject.left-slide-down" { return @tr("Left slide down"); }
+        if key == "subject.right-slide-down" { return @tr("Right slide down"); }
+        if key == "subject.dual-connections-list" { return @tr("Dual connections list"); }
+        if key == "subject.connect-device" { return @tr("Connect device"); }
+        if key == "subject.disconnect-device" { return @tr("Disconnect device"); }
+        if key == "subject.forget-device" { return @tr("Forget device"); }
+        return "";
+    }
+
+    public pure function reason(key: string) -> string {
+        if key == "reason.no-answer" { return @tr("no answer"); }
+        if key == "reason.connection-lost" { return @tr("connection lost"); }
+        if key == "reason.unreadable-answer" { return @tr("unreadable answer"); }
+        return "";
+    }
+
+    // A value a sentence quotes: a `part.*` key is worded here, any other
+    // argument is a technical value (a firmware version, a battery reading) and
+    // passes through unchanged.
+    public pure function value(text: string) -> string {
+        if text == "part.unknown" { return @tr("unknown"); }
+        return text;
+    }
+}
+
+export global Messages {
+    public pure function text(message: UiMessage) -> string {
+        // The empty message: the model has nothing to explain.
+        if message.key == "" { return ""; }
+        // The LDAC quick toggle while only one of a pair is connected. A branch's
+        // source string takes the message arguments in order where it has `{}`
+        // placeholders (one arg fills the first `{}`, the next the second).
+        if message.key == "quick-toggle.one-earbud" {
+            return @tr("Changing is available when both earbuds are connected");
+        }
+        // The two spatial-audio choices while spatial audio itself is off.
+        if message.key == "setting.turn-on-spatial-audio" {
+            return @tr("Turn on spatial audio first");
+        }
+        // Preview-only: the wrapped-row fixture in `.scratch/ui-preview` renders a
+        // long device reason, which no controller message sends. It stays a key so
+        // the fixture tests the same Messages path as real reasons.
+        if message.key == "preview.long-reason" {
+            return @tr("This setting is unavailable while the earbuds are in the charging case. Take them out and keep them connected to change it.");
+        }
+
+        // A failed device write above the page: the setting the user changed
+        // (`arg0` subject key) and why the device did not take it (`arg1` reason
+        // key). The Rust side holds only those keys.
+        if message.key == "error.setting-write" {
+            return @tr("Could not change “{} ({})”. The device kept its previous value.", MessageParts.subject(message.arg0), MessageParts.reason(message.arg1));
+        }
+        // A failed write of the saved-profile document; no device value changed.
+        if message.key == "error.profile-write" {
+            return @tr("Could not save the equalizer profiles. The saved list was not changed.");
+        }
+
+        // Why a connection attempt or a lost link ended. The controller resolves
+        // the failure kind to one of these keys, so the page never shows a
+        // ready-made English sentence from Rust.
+        if message.key == "connect.not-paired" {
+            return @tr("The device is not paired with Windows. Pair it in Windows settings, then try again.");
+        }
+        if message.key == "connect.not-found" {
+            return @tr("The device was not found. Make sure it is turned on and nearby.");
+        }
+        if message.key == "connect.timed-out" {
+            return @tr("The device did not answer in time. Try again.");
+        }
+        if message.key == "connect.bluetooth-off" {
+            return @tr("Bluetooth is off. Turn it on in Windows settings, then try again.");
+        }
+        if message.key == "connect.connection-failed" {
+            return @tr("Could not open a Bluetooth connection to the device. Make sure it is nearby and not connected to another device.");
+        }
+        if message.key == "connect.no-service" {
+            return @tr("This paired device does not offer the Soundcore Bluetooth service. Pair it again in Windows settings and try again.");
+        }
+        if message.key == "connect.no-parser" {
+            return @tr("The app cannot read this model's state yet, so its battery levels are unavailable.");
+        }
+        if message.key == "connect.unsupported-layout" {
+            return @tr("This model reports a battery layout the app cannot read yet, so battery levels are unavailable.");
+        }
+        if message.key == "connect.protocol" {
+            return @tr("The device answered with a Bluetooth message the app could not read.");
+        }
+        // A transport failure the window has no case for; the OS detail is a
+        // technical value and stays untranslated inside the translated sentence.
+        if message.key == "connect.transport" {
+            return @tr("The Bluetooth connection failed: {}", MessageParts.value(message.arg0));
+        }
+        if message.key == "connect.worker-start" {
+            return @tr("Could not start the Bluetooth worker.");
+        }
+        if message.key == "connect.demo-worker-start" {
+            return @tr("Could not start the demo device worker.");
+        }
+        if message.key == "connect.saved-address" {
+            return @tr("The saved device's Bluetooth address cannot be read. Add the device again.");
+        }
+
+        // The Add Device dialog's own errors.
+        if message.key == "add.choose-model" {
+            return @tr("Choose a model before picking a paired device.");
+        }
+        if message.key == "add.unreadable-paired" {
+            return @tr("This paired device could not be read. Refresh the list and try again.");
+        }
+        if message.key == "add.paired-worker-start" {
+            return @tr("Could not search for paired devices. Try again.");
+        }
+        if message.key == "demo.unavailable" {
+            return @tr("Demo mode is available for Space One Pro");
+        }
+
+        // Diagnostics: the page's own failures and status words.
+        if message.key == "diagnostics.demo-unavailable" {
+            return @tr("Demo mode cannot collect diagnostics. No probes are run and no archive is written.");
+        }
+        if message.key == "diagnostics.worker-stopped" {
+            return @tr("The device worker is not running. Reconnect the device and try again.");
+        }
+        if message.key == "diagnostics.no-capture" {
+            return @tr("There is no capture to save yet.");
+        }
+        if message.key == "diagnostics.build-failed" {
+            return @tr("Could not build the archive: {}", MessageParts.value(message.arg0));
+        }
+        if message.key == "diagnostics.save-dialog-failed" {
+            return @tr("Could not start the save dialog.");
+        }
+        if message.key == "diagnostics.write-failed" {
+            return @tr("Could not write the archive: {}", MessageParts.value(message.arg0));
+        }
+        if message.key == "diagnostics.issue-not-ready" {
+            return @tr("The issue link is not ready yet.");
+        }
+        if message.key == "diagnostics.supported" {
+            return @tr("Supported");
+        }
+        // The device card's second line: a firmware version and a battery reading.
+        if message.key == "diagnostics.meta" {
+            return @tr("Firmware {} · Battery {}", MessageParts.value(message.arg0), MessageParts.value(message.arg1));
+        }
+        // One probe row's state word.
+        if message.key == "diagnostics.probe.done" {
+            return @tr("Done");
+        }
+        if message.key == "diagnostics.probe.no-answer" {
+            return @tr("No answer");
+        }
+        if message.key == "diagnostics.probe.empty-reply" {
+            return @tr("Empty reply");
+        }
+        if message.key == "diagnostics.probe.unexpected" {
+            return @tr("Unexpected");
+        }
+        if message.key == "diagnostics.probe.bad-checksum" {
+            return @tr("Bad checksum");
+        }
+        if message.key == "diagnostics.probe.waiting" {
+            return @tr("Waiting…");
+        }
+
+        return "";
+    }
+}

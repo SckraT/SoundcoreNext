@@ -7,6 +7,8 @@ import { ModeTiles, ModeScale, ModeRow } from "../components/modes.slint";
 import { PageHeading } from "../shell.slint";
 import { DialogFrame } from "add_device.slint";
 import { ScrollArea } from "../components/scrollarea.slint";
+import { LocalizedText } from "../components/localized.slint";
+import { Messages } from "../messages.slint";
 
 export global BlockText {
     public pure function title(kind: BlockKind) -> string {
@@ -40,12 +42,15 @@ export global BlockText {
             return @tr("Presses");
         }
         if data.kind == BlockKind.comfort {
-            if data.text != "" { return data.text + " · " + (data.on ? @tr("on") : @tr("off")); }
+            if data.text != "" { return LocalizedText.option(data.text) + " · " + (data.on ? @tr("on") : @tr("off")); }
             if data.total > 0 { return @tr("On: {} of {}", data.number, data.total); }
             return @tr("Volume: {}", data.number);
         }
-        if data.kind == BlockKind.spatial { return data.text + " · " + (data.on ? @tr("on") : @tr("off")); }
-        if data.kind == BlockKind.power { return @tr("Auto power off: {}", data.text); }
+        // The controller sends the compact state label, not a sentence: "LDAC"
+        // is a product name, and the power-off value is one of the localized
+        // option words ("60 minutes", "Disabled").
+        if data.kind == BlockKind.spatial { return LocalizedText.option(data.text) + " · " + (data.on ? @tr("on") : @tr("off")); }
+        if data.kind == BlockKind.power { return @tr("Auto power off: {}", LocalizedText.option(data.text)); }
         if data.kind == BlockKind.connections { return data.on ? @tr("Two devices at once") : @tr("One device at a time"); }
         if data.kind == BlockKind.case { return @tr("Case battery {}", data.text); }
         return "";
@@ -233,8 +238,8 @@ component QuickSettingsPanel inherits Panel {
     for toggle in AppState.quick-toggles: VerticalLayout {
         padding-top: toggle.enabled ? 0px : Theme.space-2;
         spacing: 0px;
-        if !toggle.enabled: Text {
-            text: toggle.label + ": " + toggle.reason;
+        if !toggle.enabled && toggle.reason.key != "": Text {
+            text: toggle.label + ": " + Messages.text(toggle.reason);
             color: Theme.muted;
             font-size: Theme.font-caption;
             wrap: word-wrap;

@@ -12,6 +12,10 @@ developers and agents. Project agents should also use
 - `components/scrollarea.slint`: shared overflow behavior.
 - `pages/`: page composition and page-specific domain components.
 - `types.slint`: Slint-facing models and callbacks, not device logic.
+- `messages.slint`: the `Messages` catalog; it resolves a Rust-supplied
+  `UiMessage` key through `@tr` and the translation documents.
+- `../src/messages.rs`: typed keys and constructors for the sentences the Rust
+  model sends (keys only, never English copy).
 - `../src/controller.rs`: callbacks, connection state and persistence wiring.
 - `../src/overview.rs`: Overview capability filtering, row models and layout
   preferences.
@@ -33,8 +37,13 @@ main/aside layout.
 4. Define the relevant default, hover, focus, selected, disabled and result
    states. Interactive controls need pointer and keyboard activation plus an
    accessible name. Decorative status and metrics must not masquerade as buttons.
-5. Use `@tr` for user-visible copy. Set an accessible `label` on `TextField`,
-   `Toggle` and icon-only controls.
+5. Use `@tr` for user-visible copy. A sentence the Rust model composes is a
+   `UiMessage` key resolved by `Messages.text` (add the key in
+   `../src/messages.rs` and the branch with its English source in
+   `messages.slint`); never put an English sentence in a Rust model field. When a
+   sentence quotes a translatable word, pass the *word's key* as an argument
+   (`subject.*`/`reason.*`, resolved by `MessageParts`) instead of the word. Set
+   an accessible `label` on `TextField`, `Toggle` and icon-only controls.
 6. Replace existing local copies only after the shared component supports their
    actual behavior; do not change callbacks or device semantics as a side effect.
 7. Update the component table or state rules in `UI_KIT.md` and record the change
@@ -64,8 +73,15 @@ dialog-local name, pass `name.text` to the action as above.
    features remain absent rather than becoming decorative controls.
 3. Compose with `Panel`, `PanelHeading`, `BodyText`, `CaptionText`, `Button`,
    `Chip`, `Banner`, `Note` and `ScrollArea` before introducing local primitives.
-4. Put page copy and error text behind `@tr`. A disabled device control needs a
-   reason from state, not an invented explanation.
+4. Put page copy and error text behind `@tr`. A sentence the controller composes
+   arrives as a `UiMessage` (`key`, `arg0`, `arg1`) and is rendered with
+   `Messages.text`; the English source stays in `messages.slint` and the `.po`
+   documents, so a translated build never falls back to Rust English. The
+   migrated `AppState` sentence fields are `connection-reason`, `failure-text`,
+   `add-error`, `error-label`, `diagnostic-device-meta`, `diagnostic-status` and
+   `diagnostic-error`, plus `DiagnosticProbe.status`; keep a new one a
+   `UiMessage` rather than adding a string back. A disabled device control needs
+   a reason from state, not an invented explanation.
 5. Give dialogs a bounded height and a scrollable list when content can grow.
    Their primary action must remain reachable at 800×700 and 150% scale.
 6. Wire the callback in Rust and add tests for accepted, rejected, cancelled,
@@ -84,6 +100,16 @@ dialog-local name, pass `name.text` to the action as above.
   `cross-axis-alignment` instead of assigning a child's `y`/`x` manually. Manual
   coordinates in a managed layout can be overridden and produce compiler
   warnings.
+- Keep a row's divider in normal flow with its content, and take the row's height
+  from that content. A divider at a fixed offset, or a fixed row height for
+  visual alignment, is only correct until a description wraps: then the text
+  runs over the next divider, or two rows overlap. `SettingRowView` is the
+  reference row (`VerticalLayout`, divider first, content row after, controls
+  centred with `cross-axis-alignment`) and the preview's `settings-rows-long`
+  captures are the fixture that shows the wrapped case.
+- Add new long-string cases to the preview's capture states rather than
+  eyeballing the normal ones: the failure appears only at narrow widths, 150 %
+  scale and long translated text.
 - Give grid children explicit cell dimensions and derive column counts from the
   available width. Long labels elide or wrap inside the cell; they must not widen
   the window.
@@ -108,14 +134,20 @@ Run the same relevant check/clippy/test sequence from `core` when shared session
 protocol or model behavior changes. The repository root has no Cargo workspace
 manifest; run each crate tree explicitly.
 
+`cargo test` includes `desktop/tests/translations.rs`, which fails when a `@tr`
+source has a missing or empty translation in a required locale (`ru` today) or
+when a `messages.rs` key has no catalog source. When adding UI copy, run it
+before the capture tool: it prints the complete missing/empty list.
+
 ### Full Russian screenshot matrix
 
 For a reviewable Windows matrix, use `tools/ui-capture/capture-ui.ps1`. It
 launches the app in an isolated profile, connects the demo A3062, captures every
 page and the core dialogs at 100/110/125/150 % in both themes, and generates
 `index.html` plus contact sheets grouped by theme×scale, page and feature area.
-It verifies that every `@tr` string has a Russian translation first and fails
-the capture if the window is not in Russian. See `tools/ui-capture/README.md`.
+It verifies that every `@tr` string has a **non-empty** Russian translation first
+(the same rule as the translation test) and fails the capture if the window is not
+in Russian. See `tools/ui-capture/README.md`.
 ### Visual matrix
 
 The preview harness lives in `.scratch/ui-preview`. From that directory:
