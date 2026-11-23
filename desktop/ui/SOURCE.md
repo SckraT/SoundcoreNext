@@ -164,3 +164,17 @@ reconnect. No hardware acceptance claim is implied by this source record.
   view still renders state only. The A3954's sound-mode block is optional: when
   the device reports an unmeasured value for it, the controller hides the scale
   and the page, so `modes.slint` only ever renders a measured scale.
+- A3954 controls and case pages: the vendored `PanelKind.presses`,
+  `PanelKind.gestures`, `PanelKind.case-screen` and `PanelKind.case-status` had
+  no controller producing them, so the controller now fills the Presses,
+  Slides and Case panels with the existing `SettingRowView` row kinds. The only
+  vendored-component changes are additive: `components/settings.slint`'s
+  `PanelText` gains the `Slides` title and its wave icon for
+  `PanelKind.gestures`, and `SettingText.short-label` no longer shortens the
+  side-specific gesture ids (`leftSinglePress`, `rightSlideUp`, …) to the
+  A3062's side-less `Single press` wording: this app shows both earbuds in the
+  one panel, so the side stays in the row label and the twelve names live in
+  `components/localized.slint` with the rest of the runtime labels (the case
+  feature and language ids, the gesture actions, `Japanese`/`English`/`Chinese`).
+  `desktop/translations/ru/...po` gained their Russian translations. No visible
+  layout, token, callback or A3062 behaviour changed.

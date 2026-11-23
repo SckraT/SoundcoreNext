@@ -11,12 +11,10 @@ import { Icon, IconButton, Button, ButtonKind, Toggle, Panel, PanelHeading, Note
 export global SettingText {
     // a shorter name where the page already says the rest, such as which earbud
     public pure function short-label(id: string) -> string {
-        if id == "leftSinglePress" || id == "rightSinglePress" { return @tr("Single press"); }
-        if id == "leftDoublePress" || id == "rightDoublePress" { return @tr("Double press"); }
-        if id == "leftTriplePress" || id == "rightTriplePress" { return @tr("Triple press"); }
-        if id == "leftLongPress" || id == "rightLongPress" { return @tr("Long press"); }
-        if id == "leftSlideUp" || id == "rightSlideUp" { return @tr("Slide up"); }
-        if id == "leftSlideDown" || id == "rightSlideDown" { return @tr("Slide down"); }
+        if id == "singlePress" { return @tr("Single press"); }
+        if id == "doublePress" { return @tr("Double press"); }
+        // The side-specific gesture ids name their side in the row label, which
+        // LocalizedText translates; this app shows both earbuds on one page.
         if id == "noiseCancelingModeInCycle" { return @tr("Noise canceling"); }
         if id == "transparencyModeInCycle" { return @tr("Transparency"); }
         if id == "normalModeInCycle" { return @tr("Normal"); }
@@ -434,6 +432,7 @@ export global PanelText {
     public pure function title(kind: PanelKind) -> string {
         if kind == PanelKind.volume { return @tr("Volume"); }
         if kind == PanelKind.presses { return @tr("Presses"); }
+        if kind == PanelKind.gestures { return @tr("Slides"); }
         if kind == PanelKind.cycle { return @tr("Switching modes"); }
         if kind == PanelKind.case-screen { return @tr("Case screen"); }
         if kind == PanelKind.case-status { return @tr("Status"); }
@@ -444,6 +443,7 @@ export global PanelText {
     public pure function icon(kind: PanelKind) -> image {
         if kind == PanelKind.volume { return Icons.shield; }
         if kind == PanelKind.presses { return Icons.hand; }
+        if kind == PanelKind.gestures { return Icons.wave; }
         if kind == PanelKind.cycle { return Icons.noise; }
         if kind == PanelKind.case-screen { return Icons.case; }
         if kind == PanelKind.case-status { return Icons.info; }

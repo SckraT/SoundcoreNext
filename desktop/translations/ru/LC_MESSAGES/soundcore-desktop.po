@@ -427,6 +427,90 @@ msgstr "Скольжение вверх"
 msgid "Slide down"
 msgstr "Скольжение вниз"
 
+# Liberty 4 Pro gestures: the controls page shows both earbuds
+msgid "Left single press"
+msgstr "Однократное нажатие слева"
+
+msgid "Right single press"
+msgstr "Однократное нажатие справа"
+
+msgid "Left double press"
+msgstr "Двойное нажатие слева"
+
+msgid "Right double press"
+msgstr "Двойное нажатие справа"
+
+msgid "Left triple press"
+msgstr "Тройное нажатие слева"
+
+msgid "Right triple press"
+msgstr "Тройное нажатие справа"
+
+msgid "Left long press"
+msgstr "Долгое нажатие слева"
+
+msgid "Right long press"
+msgstr "Долгое нажатие справа"
+
+msgid "Left slide up"
+msgstr "Скольжение вверх слева"
+
+msgid "Right slide up"
+msgstr "Скольжение вверх справа"
+
+msgid "Left slide down"
+msgstr "Скольжение вниз слева"
+
+msgid "Right slide down"
+msgstr "Скольжение вниз справа"
+
+# What a press or slide does
+msgid "Volume up"
+msgstr "Увеличить громкость"
+
+msgid "Volume down"
+msgstr "Уменьшить громкость"
+
+msgid "Previous song"
+msgstr "Предыдущий трек"
+
+msgid "Next song"
+msgstr "Следующий трек"
+
+msgid "Voice assistant"
+msgstr "Голосовой помощник"
+
+msgid "Play/pause"
+msgstr "Воспроизведение / пауза"
+
+msgid "Slides"
+msgstr "Свайпы"
+
+# The charging case's screen features and language
+msgid "Atmospheric"
+msgstr "Атмосферное давление"
+
+msgid "Remote camera"
+msgstr "Дистанционное управление камерой"
+
+msgid "Find device"
+msgstr "Поиск устройства"
+
+msgid "Spatial audio on case"
+msgstr "Пространственный звук на кейсе"
+
+msgid "Case language"
+msgstr "Язык кейса"
+
+msgid "Japanese"
+msgstr "Японский"
+
+msgid "English"
+msgstr "Английский"
+
+msgid "Chinese"
+msgstr "Китайский"
+
 msgid "Noise canceling"
 msgstr "Шумоподавление"
 

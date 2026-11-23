@@ -27,7 +27,26 @@ export global LocalizedText {
         if id == "spatialAudio" { return @tr("Spatial audio"); }
         if id == "spatialAudioMusicMode" { return @tr("Spatial audio music mode"); }
         if id == "spatialAudioMode" { return @tr("Spatial audio mode"); }
-        if id == "buttonRemapping" { return @tr("Button remapping"); }
+        // The A3954's twelve measured gestures. The Controls page shows both
+        // earbuds, so each row names its side.
+        if id == "leftSinglePress" { return @tr("Left single press"); }
+        if id == "rightSinglePress" { return @tr("Right single press"); }
+        if id == "leftDoublePress" { return @tr("Left double press"); }
+        if id == "rightDoublePress" { return @tr("Right double press"); }
+        if id == "leftTriplePress" { return @tr("Left triple press"); }
+        if id == "rightTriplePress" { return @tr("Right triple press"); }
+        if id == "leftLongPress" { return @tr("Left long press"); }
+        if id == "rightLongPress" { return @tr("Right long press"); }
+        if id == "leftSlideUp" { return @tr("Left slide up"); }
+        if id == "rightSlideUp" { return @tr("Right slide up"); }
+        if id == "leftSlideDown" { return @tr("Left slide down"); }
+        if id == "rightSlideDown" { return @tr("Right slide down"); }
+        // The A3954 case page: the four case-screen features and the language.
+        if id == "atmospheric" { return @tr("Atmospheric"); }
+        if id == "remoteCamera" { return @tr("Remote camera"); }
+        if id == "findDevice" { return @tr("Find device"); }
+        if id == "caseSpatialAudio" { return @tr("Spatial audio on case"); }
+        if id == "caseLanguage" { return @tr("Case language"); }
         if id == "leftBattery" { return @tr("Left battery"); }
         if id == "rightBattery" { return @tr("Right battery"); }
         if id == "caseBattery" { return @tr("Case battery"); }
@@ -41,9 +60,6 @@ export global LocalizedText {
         if id == "singlePress" { return @tr("Ambient sound mode"); }
         if id == "isCharging" {
             return fallback == "Charging" ? @tr("Charging") : @tr("Not charging");
-        }
-        if id == "buttonRemapping" {
-            return fallback == "Not available in this version" ? @tr("Not available in this version") : fallback;
         }
         return fallback;
     }
@@ -77,6 +93,17 @@ export global LocalizedText {
         if value == "Podcast" { return @tr("Podcast"); }
         if value == "Movie" { return @tr("Movie"); }
         if value == "Gaming" { return @tr("Gaming"); }
+        // The A3954 gesture actions and case-display languages.
+        if value == "Volume up" { return @tr("Volume up"); }
+        if value == "Volume down" { return @tr("Volume down"); }
+        if value == "Previous song" { return @tr("Previous song"); }
+        if value == "Next song" { return @tr("Next song"); }
+        if value == "Ambient sound mode" { return @tr("Ambient sound mode"); }
+        if value == "Voice assistant" { return @tr("Voice assistant"); }
+        if value == "Play/pause" { return @tr("Play/pause"); }
+        if value == "Japanese" { return @tr("Japanese"); }
+        if value == "English" { return @tr("English"); }
+        if value == "Chinese" { return @tr("Chinese"); }
         if value == "Unknown device" { return @tr("Unknown device"); }
         if value == "Noise canceling" { return @tr("Noise canceling"); }
         if value == "Transparency" { return @tr("Transparency"); }
