@@ -9,10 +9,11 @@
 //!
 //! The Liberty 4 Pro (A3954) shares the TWS Cmm2 prefix and appends its own
 //! measured 165-byte block: the case firmware, battery and serial, the
-//! ten-band/two-channel equalizer with its HearID, the 1..=11 sound-mode scale
-//! and the remaining settings. Its state is additive
-//! ([`DeviceState::a3954`]) and its write bodies are 114-byte `03 87` and
-//! five-byte `06 81` frames of their own.
+//! ten-band/two-channel equalizer with its HearID, the 1..=11 sound-mode scale,
+//! the twelve button action bytes, the case features/language and the
+//! remaining settings. Its state is additive ([`DeviceState::a3954`]) and its
+//! write bodies are the 114-byte `03 87`, five-byte `06 81`, three-byte
+//! `04 81`, four-byte `07 87` and one-byte `07 8A` frames of their own.
 //!
 //! The TLV D1203 layout stays unimplemented: returning `UnsupportedLayout` is
 //! better than inventing offsets.
@@ -741,13 +742,13 @@ const A3954_EQUALIZER_UNKNOWN_BODY_BYTES: [u8; 2] = [0xFF, 0xFF];
 /// The length of the A3954 HearID block inside the `01 01` body (67..115).
 const A3954_HEAR_ID_BLOCK_LEN: usize = 48;
 
-/// The eight main-button action bytes in the A3954 `01 01` body (116..124).
-/// Button remapping is deferred, so they are kept raw.
+/// The eight main-button action bytes in the A3954 `01 01` body (116..124), in
+/// [`A3954Button::ALL`] order.
 const A3954_MAIN_BUTTONS_OFFSET: usize = 116;
 const A3954_MAIN_BUTTON_COUNT: usize = 8;
 
-/// The four slide-button action bytes in the A3954 `01 01` body (161..165).
-/// Button remapping is deferred, so they are kept raw.
+/// The four slide-button action bytes in the A3954 `01 01` body (161..165), in
+/// [`A3954Button::ALL`] order after the main block.
 const A3954_SLIDE_BUTTON_COUNT: usize = 4;
 
 /// The A3954 body offset of the case firmware string.
@@ -788,13 +789,20 @@ const A3954_WEARING_DETECTION_OFFSET: usize = 159;
 /// The A3954 body offset of the four slide-button bytes.
 const A3954_SLIDE_BUTTONS_OFFSET: usize = 161;
 
+/// The A3954 button configuration command, `04 81`.
+///
+/// The measured body is the three bytes `[side, button_id, (non_tws << 4) |
+/// tws]`; see [`A3954Button::command_body`]. The A3954 has no set-all button
+/// packet, so one write carries one gesture.
+pub const A3954_BUTTON_CONFIGURATION: Command = Command::new(0x04, 0x81);
+
 /// The measured A3954-specific blocks of the `01 01` state response.
 ///
 /// A model with this capability is an A3954: its state is parsed into
-/// [`DeviceState::a3954`] and it builds the A3954 `06 81`/`03 87`/setting
-/// frames. The remaining A3954 offsets are fixed by the measured body length
-/// and documented on [`A3954State`]; these two start blocks are recorded here
-/// because the body parsers read them through the capability.
+/// [`DeviceState::a3954`] and it builds the A3954 `06 81`/`03 87`/`04 81`
+/// and setting frames. The remaining A3954 offsets are fixed by the measured
+/// body length and documented on [`A3954State`]; these two start blocks are
+/// recorded here because the body parsers read them through the capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct A3954Capability {
     /// Body offset of the four sound-mode bytes: the ambient mode at 125, then
@@ -1040,8 +1048,8 @@ pub struct A3954AutoPowerOff {
 /// The four case-feature switches of the A3954 `01 01` body 132..136.
 ///
 /// Each byte is a flag: `1` is on and every other byte reads as off, as in
-/// OpenSCL4's parser. The Soundcore app's `07 87` case-features write is not
-/// part of this slice (see [`DeviceModel::a3954_setting_frame`]).
+/// OpenSCL4's parser. [`Self::command_body`] writes them back as the measured
+/// four-byte `07 87` body, in the same order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct A3954CaseFeatures {
     /// The case's atmospheric-pressure display.
@@ -1053,6 +1061,19 @@ pub struct A3954CaseFeatures {
     /// The case's spatial-audio button (separate from the earbuds' spatial
     /// audio).
     pub case_spatial_audio: bool,
+}
+
+impl A3954CaseFeatures {
+    /// The exact measured `07 87` body, in state order:
+    /// `[atmospheric, remote_camera, find_device, case_spatial_audio]`.
+    pub fn command_body(self) -> [u8; 4] {
+        [
+            u8::from(self.atmospheric),
+            u8::from(self.remote_camera),
+            u8::from(self.find_device),
+            u8::from(self.case_spatial_audio),
+        ]
+    }
 }
 
 /// The A3954 spatial-audio music mode: the second `10 81` body byte.
@@ -1213,9 +1234,9 @@ impl A3954EasyChat {
 
 /// The three measured A3954 case-display languages.
 ///
-/// The `01 01` body reports the value at byte 157 and this slice parses it as a
-/// read-only field: the case display has no page and the out-of-scope `07 8A`
-/// language write is not built by [`A3954SettingCommand`].
+/// The `01 01` body reports the value at byte 157 and the app writes the same
+/// value back as the measured one-byte `07 8A` body; see
+/// [`A3954SettingCommand::CaseLanguage`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum A3954CaseLanguage {
     Japanese,
@@ -1244,6 +1265,403 @@ impl A3954CaseLanguage {
             2 => Some(Self::Chinese),
             _ => None,
         }
+    }
+
+    /// The exact measured `07 8A` body for this language.
+    pub const fn command_body(self) -> [u8; 1] {
+        [self.value()]
+    }
+}
+
+/// The two sides of an A3954 gesture: the first `04 81` body byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum A3954ButtonSide {
+    /// Left, body value `0`.
+    Left,
+    /// Right, body value `1`.
+    Right,
+}
+
+impl A3954ButtonSide {
+    /// The side's `04 81` body value.
+    pub const fn value(self) -> u8 {
+        match self {
+            Self::Left => 0,
+            Self::Right => 1,
+        }
+    }
+
+    /// The side a value names, or `None` for a byte outside the measured
+    /// values.
+    pub const fn from_value(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Left),
+            1 => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
+/// One of the six measured A3954 gesture kinds and its `04 81` button id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum A3954ButtonPressKind {
+    /// Single press, button id `2`.
+    Single,
+    /// Double press, button id `0`.
+    Double,
+    /// Triple press, button id `5`.
+    Triple,
+    /// Long press, button id `1`.
+    Long,
+    /// Slide up, button id `6`.
+    SlideUp,
+    /// Slide down, button id `7`.
+    SlideDown,
+}
+
+impl A3954ButtonPressKind {
+    /// Every measured press kind, in state order.
+    pub const ALL: [Self; 6] = [
+        Self::Single,
+        Self::Double,
+        Self::Triple,
+        Self::Long,
+        Self::SlideUp,
+        Self::SlideDown,
+    ];
+
+    /// The measured `04 81` button id, as OpenSCL4's A3954 table reports it:
+    /// single `2`, double `0`, triple `5`, long `1`, slide up `6` and slide
+    /// down `7`.
+    pub const fn button_id(self) -> u8 {
+        match self {
+            Self::Single => 2,
+            Self::Double => 0,
+            Self::Triple => 5,
+            Self::Long => 1,
+            Self::SlideUp => 6,
+            Self::SlideDown => 7,
+        }
+    }
+
+    /// Whether this gesture is one of the two swipes.
+    pub const fn is_slide(self) -> bool {
+        matches!(self, Self::SlideUp | Self::SlideDown)
+    }
+
+    /// The actions measured for this press kind.
+    ///
+    /// The six press gestures take [`A3954_COMMON_ACTIONS`]; the two slides take
+    /// the volume up/down set only.
+    pub const fn available_actions(self) -> &'static [A3954ButtonAction] {
+        if self.is_slide() {
+            A3954_SLIDE_ACTIONS
+        } else {
+            A3954_COMMON_ACTIONS
+        }
+    }
+}
+
+/// A measured A3954 gesture action id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum A3954ButtonAction {
+    /// Volume up, id `0`.
+    VolumeUp,
+    /// Volume down, id `1`.
+    VolumeDown,
+    /// Previous song, id `2`.
+    PreviousSong,
+    /// Next song, id `3`.
+    NextSong,
+    /// Ambient sound mode, id `4`.
+    AmbientSoundMode,
+    /// Voice assistant, id `5`.
+    VoiceAssistant,
+    /// Play/pause, id `6`.
+    PlayPause,
+}
+
+impl A3954ButtonAction {
+    /// Every measured action, in body-id order.
+    pub const ALL: [Self; 7] = [
+        Self::VolumeUp,
+        Self::VolumeDown,
+        Self::PreviousSong,
+        Self::NextSong,
+        Self::AmbientSoundMode,
+        Self::VoiceAssistant,
+        Self::PlayPause,
+    ];
+
+    /// The action's measured id, `0..=6`.
+    pub const fn value(self) -> u8 {
+        match self {
+            Self::VolumeUp => 0,
+            Self::VolumeDown => 1,
+            Self::PreviousSong => 2,
+            Self::NextSong => 3,
+            Self::AmbientSoundMode => 4,
+            Self::VoiceAssistant => 5,
+            Self::PlayPause => 6,
+        }
+    }
+
+    /// The action a value names, or `None` for any other byte, including
+    /// [`A3954_NO_BUTTON_ACTION`].
+    pub const fn from_value(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::VolumeUp),
+            1 => Some(Self::VolumeDown),
+            2 => Some(Self::PreviousSong),
+            3 => Some(Self::NextSong),
+            4 => Some(Self::AmbientSoundMode),
+            5 => Some(Self::VoiceAssistant),
+            6 => Some(Self::PlayPause),
+            _ => None,
+        }
+    }
+}
+
+/// The measured A3954 "no action" value, `0x0F`.
+///
+/// The A3954 has no separate enabled flag: a gesture slot whose current action
+/// is `0x0F` is disabled, exactly as OpenSCL4 reads the TwsLowBits action byte.
+pub const A3954_NO_BUTTON_ACTION: u8 = 0x0F;
+
+/// The actions the Soundcore app offers for the six A3954 press gestures:
+/// volume up/down, previous/next, ambient sound mode, voice assistant and
+/// play/pause (OpenSCL4's `COMMON_ACTIONS`, without gaming mode).
+pub const A3954_COMMON_ACTIONS: &[A3954ButtonAction] = &[
+    A3954ButtonAction::VolumeUp,
+    A3954ButtonAction::VolumeDown,
+    A3954ButtonAction::PreviousSong,
+    A3954ButtonAction::NextSong,
+    A3954ButtonAction::AmbientSoundMode,
+    A3954ButtonAction::VoiceAssistant,
+    A3954ButtonAction::PlayPause,
+];
+
+/// The actions the app offers for the two A3954 slides: volume up and volume
+/// down only (`0` and `1`). The six common actions are not available on a
+/// slide, and both slide gestures share these two ids.
+pub const A3954_SLIDE_ACTIONS: &[A3954ButtonAction] =
+    &[A3954ButtonAction::VolumeUp, A3954ButtonAction::VolumeDown];
+
+/// One action slot of an A3954 gesture byte.
+///
+/// The measured state and `04 81` byte packs two ids,
+/// `(non_tws << 4) | tws` (OpenSCL4's `TwsLowBits` encoding): the low nibble is
+/// the action while the earbuds are TWS-connected and the high nibble the
+/// action while they are not. A nibble the device reports outside the measured
+/// action ids and [`A3954_NO_BUTTON_ACTION`] is kept as [`Self::Unknown`], so a
+/// state value is never silently lost or rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum A3954ButtonActionValue {
+    /// A measured action id, `0..=6`.
+    Action(A3954ButtonAction),
+    /// No action, `0x0F`.
+    Disabled,
+    /// A nibble outside the measured action values, kept verbatim.
+    Unknown(u8),
+}
+
+impl A3954ButtonActionValue {
+    /// The value a nibble names.
+    pub const fn from_nibble(nibble: u8) -> Self {
+        match A3954ButtonAction::from_value(nibble) {
+            Some(action) => Self::Action(action),
+            None if nibble == A3954_NO_BUTTON_ACTION => Self::Disabled,
+            None => Self::Unknown(nibble),
+        }
+    }
+
+    /// The nibble this value writes.
+    pub const fn nibble(self) -> u8 {
+        match self {
+            Self::Action(action) => action.value(),
+            Self::Disabled => A3954_NO_BUTTON_ACTION,
+            Self::Unknown(nibble) => nibble,
+        }
+    }
+
+    /// The measured action, or `None` for the disabled and unknown values.
+    pub const fn action(self) -> Option<A3954ButtonAction> {
+        match self {
+            Self::Action(action) => Some(action),
+            Self::Disabled | Self::Unknown(_) => None,
+        }
+    }
+}
+
+impl From<A3954ButtonAction> for A3954ButtonActionValue {
+    fn from(action: A3954ButtonAction) -> Self {
+        Self::Action(action)
+    }
+}
+
+/// One A3954 gesture's raw action byte, from the `01 01` state or the `04 81`
+/// body: `(non_tws << 4) | tws`.
+///
+/// The byte is kept whole, so a caller can preserve the slot it is not editing
+/// and restore exactly what the device reported. The two nibbles decode
+/// through [`A3954ButtonActionValue`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct A3954ButtonActionByte(u8);
+
+impl A3954ButtonActionByte {
+    /// The raw byte, accepted as the device reported it.
+    pub const fn from_byte(byte: u8) -> Self {
+        Self(byte)
+    }
+
+    /// The raw byte the state reported or the `04 81` body carries.
+    pub const fn byte(self) -> u8 {
+        self.0
+    }
+
+    /// The action while the two earbuds are TWS-connected: the low nibble.
+    pub const fn tws(self) -> A3954ButtonActionValue {
+        A3954ButtonActionValue::from_nibble(self.0 & 0x0F)
+    }
+
+    /// The action while the earbuds are not TWS-connected: the high nibble.
+    pub const fn non_tws(self) -> A3954ButtonActionValue {
+        A3954ButtonActionValue::from_nibble(self.0 >> 4)
+    }
+
+    /// This byte with the connected-state action replaced.
+    pub const fn with_tws(self, value: A3954ButtonActionValue) -> Self {
+        Self((self.0 & 0xF0) | value.nibble())
+    }
+
+    /// This byte with the disconnected-state action replaced.
+    pub const fn with_non_tws(self, value: A3954ButtonActionValue) -> Self {
+        Self((self.0 & 0x0F) | (value.nibble() << 4))
+    }
+}
+
+/// The twelve measured A3954 gestures, in the order the `01 01` state reports
+/// them: the eight press gestures at body 116..124 and the four slides at
+/// 161..165.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum A3954Button {
+    LeftSingle,
+    RightSingle,
+    LeftDouble,
+    RightDouble,
+    LeftTriple,
+    RightTriple,
+    LeftLong,
+    RightLong,
+    LeftSlideUp,
+    RightSlideUp,
+    LeftSlideDown,
+    RightSlideDown,
+}
+
+impl A3954Button {
+    /// Every gesture, in measured state order.
+    pub const ALL: [Self; 12] = [
+        Self::LeftSingle,
+        Self::RightSingle,
+        Self::LeftDouble,
+        Self::RightDouble,
+        Self::LeftTriple,
+        Self::RightTriple,
+        Self::LeftLong,
+        Self::RightLong,
+        Self::LeftSlideUp,
+        Self::RightSlideUp,
+        Self::LeftSlideDown,
+        Self::RightSlideDown,
+    ];
+
+    /// The gesture's position in measured state order.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::LeftSingle => 0,
+            Self::RightSingle => 1,
+            Self::LeftDouble => 2,
+            Self::RightDouble => 3,
+            Self::LeftTriple => 4,
+            Self::RightTriple => 5,
+            Self::LeftLong => 6,
+            Self::RightLong => 7,
+            Self::LeftSlideUp => 8,
+            Self::RightSlideUp => 9,
+            Self::LeftSlideDown => 10,
+            Self::RightSlideDown => 11,
+        }
+    }
+
+    /// The gesture at a measured state-order position, or `None` outside
+    /// `0..12`.
+    pub const fn from_index(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(Self::LeftSingle),
+            1 => Some(Self::RightSingle),
+            2 => Some(Self::LeftDouble),
+            3 => Some(Self::RightDouble),
+            4 => Some(Self::LeftTriple),
+            5 => Some(Self::RightTriple),
+            6 => Some(Self::LeftLong),
+            7 => Some(Self::RightLong),
+            8 => Some(Self::LeftSlideUp),
+            9 => Some(Self::RightSlideUp),
+            10 => Some(Self::LeftSlideDown),
+            11 => Some(Self::RightSlideDown),
+            _ => None,
+        }
+    }
+
+    /// Which earbud the gesture belongs to.
+    pub const fn side(self) -> A3954ButtonSide {
+        match self {
+            Self::LeftSingle
+            | Self::LeftDouble
+            | Self::LeftTriple
+            | Self::LeftLong
+            | Self::LeftSlideUp
+            | Self::LeftSlideDown => A3954ButtonSide::Left,
+            Self::RightSingle
+            | Self::RightDouble
+            | Self::RightTriple
+            | Self::RightLong
+            | Self::RightSlideUp
+            | Self::RightSlideDown => A3954ButtonSide::Right,
+        }
+    }
+
+    /// The measured press kind.
+    pub const fn press_kind(self) -> A3954ButtonPressKind {
+        match self {
+            Self::LeftSingle | Self::RightSingle => A3954ButtonPressKind::Single,
+            Self::LeftDouble | Self::RightDouble => A3954ButtonPressKind::Double,
+            Self::LeftTriple | Self::RightTriple => A3954ButtonPressKind::Triple,
+            Self::LeftLong | Self::RightLong => A3954ButtonPressKind::Long,
+            Self::LeftSlideUp | Self::RightSlideUp => A3954ButtonPressKind::SlideUp,
+            Self::LeftSlideDown | Self::RightSlideDown => A3954ButtonPressKind::SlideDown,
+        }
+    }
+
+    /// The measured `04 81` button id for this gesture.
+    pub const fn button_id(self) -> u8 {
+        self.press_kind().button_id()
+    }
+
+    /// Whether this gesture is one of the two swipes.
+    pub const fn is_slide(self) -> bool {
+        self.press_kind().is_slide()
+    }
+
+    /// The actions measured for this gesture.
+    pub const fn available_actions(self) -> &'static [A3954ButtonAction] {
+        self.press_kind().available_actions()
+    }
+
+    /// The exact measured `04 81` body: `[side, button_id, action_byte]`.
+    pub const fn command_body(self, action: A3954ButtonActionByte) -> [u8; 3] {
+        [self.side().value(), self.button_id(), action.byte()]
     }
 }
 
@@ -1457,7 +1875,7 @@ fn visible_bands(bands: [i16; A3954_EQ_BANDS]) -> [i16; VISIBLE_EQ_BANDS] {
 /// | 37 | case battery level, raw `0..=9` (255 = unavailable); the display level is raw + 1 of 10 |
 /// | 38..44 | case serial, kept internal and usually `None` in masked captures |
 /// | 44..115 | [`A3954EqualizerState`]: preset, two ten-band channels and the HearID block |
-/// | 116..124 | eight main-button action bytes (remapping deferred) |
+/// | 116..124 | eight main-button action bytes, [`A3954Button::ALL`] order |
 /// | 124 | ambient-sound-mode cycle bits |
 /// | 125..129 | [`A3954SoundMode`], or unavailable (`None`) when a value is unmeasured |
 /// | 129..132 | three unknown bytes the parser skips |
@@ -1478,12 +1896,12 @@ fn visible_bands(bands: [i16; A3954_EQ_BANDS]) -> [i16; VISIBLE_EQ_BANDS] {
 /// | 158 | [`A3954EasyChat::wait_time`] |
 /// | 159 | wearing detection |
 /// | 160 | one unknown byte the parser skips |
-/// | 161..165 | four slide-button action bytes (remapping deferred) |
+/// | 161..165 | four slide-button action bytes, [`A3954Button::ALL`] order |
 ///
 /// The serials are deliberately optional and are never logged, exactly like
-/// [`DeviceState::serial`]. Button remapping, the case display's settings and
-/// air pressure *writes* are out of this slice: the two raw button blocks and
-/// the air-pressure byte are parsed but no command is built from them.
+/// [`DeviceState::serial`]. The raw button blocks are kept as bytes and decoded
+/// on demand through [`Self::button_action_byte`]; air-pressure *writes* stay
+/// out of this slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct A3954State {
     /// The case firmware, when the body holds a valid `MM.mm` pair.
@@ -1495,8 +1913,9 @@ pub struct A3954State {
     pub case_serial: Option<String>,
     /// The equalizer preset, bands and HearID block.
     pub equalizer: A3954EqualizerState,
-    /// The eight main-button action bytes at body 116..124. Remapping is
-    /// deferred to a later slice, so they are kept raw.
+    /// The eight main-button action bytes at body 116..124, in
+    /// [`A3954Button::ALL`] order (the eight press gestures). See
+    /// [`Self::button_action_byte`].
     pub main_buttons: [u8; A3954_MAIN_BUTTON_COUNT],
     /// The ambient-sound-mode cycle bits at body 124.
     pub ambient_sound_mode_cycle: AmbientSoundModeCycle,
@@ -1532,14 +1951,39 @@ pub struct A3954State {
     pub easy_chat: A3954EasyChat,
     /// Adaptive sound-leak compensation (`10 9A` write).
     pub sound_leak_compensation: bool,
-    /// The case display language, parsed read-only: the case display has no
-    /// page in this slice and its write is out of scope.
+    /// The case display language at body 157, written back through
+    /// [`A3954SettingCommand::CaseLanguage`].
     pub case_language: A3954CaseLanguage,
     /// In-ear wearing detection.
     pub wearing_detection: bool,
-    /// The four slide-button action bytes at body 161..165. Remapping is
-    /// deferred, so they are kept raw.
+    /// The four slide-button action bytes at body 161..165, in
+    /// [`A3954Button::ALL`] order after the main block. See
+    /// [`Self::button_action_byte`].
     pub slide_buttons: [u8; A3954_SLIDE_BUTTON_COUNT],
+}
+
+impl A3954State {
+    /// The raw action byte of one of the twelve gestures.
+    ///
+    /// The eight press gestures come from the main block at body 116..124 and
+    /// the four slides from the block at 161..165, both in
+    /// [`A3954Button::ALL`] order. The byte is the measured TwsLowBits pair
+    /// `(non_tws << 4) | tws`; [`A3954ButtonActionByte`] decodes both nibbles
+    /// and keeps unknown values.
+    pub fn button_action_byte(&self, button: A3954Button) -> A3954ButtonActionByte {
+        let index = button.index();
+        let byte = if button.is_slide() {
+            self.slide_buttons[index - A3954_MAIN_BUTTON_COUNT]
+        } else {
+            self.main_buttons[index]
+        };
+        A3954ButtonActionByte::from_byte(byte)
+    }
+
+    /// All twelve raw action bytes, in [`A3954Button::ALL`] order.
+    pub fn button_action_bytes(&self) -> [A3954ButtonActionByte; 12] {
+        A3954Button::ALL.map(|button| self.button_action_byte(button))
+    }
 }
 
 /// One A3954 settings write: a validated value plus the exact measured command
@@ -1547,10 +1991,9 @@ pub struct A3954State {
 ///
 /// Every variant names the command OpenSCL4's A3954 module uses and the app was
 /// measured sending; turn one into a complete outbound frame with
-/// [`DeviceModel::a3954_setting_frame`]. Button remapping, the case-features
-/// write, air-pressure writes and the case-display language write are
-/// deliberately not variants: they are deferred by this slice (the case language
-/// stays a read-only state field).
+/// [`DeviceModel::a3954_setting_frame`]. Button remapping has its own command
+/// and frame builder ([`DeviceModel::a3954_button_frame`]); air-pressure writes
+/// and the case display's brightness/color/style/text stay deferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum A3954SettingCommand {
     /// `01 FF` body `[on]`; the device confirms with an `01 7F` notification.
@@ -1578,6 +2021,11 @@ pub enum A3954SettingCommand {
     SpatialAudio(A3954SpatialAudio),
     /// `10 9D` body `[enabled, wait_time]`.
     EasyChat(A3954EasyChat),
+    /// `07 87` body `[atmospheric, remote_camera, find_device,
+    /// case_spatial_audio]`, the four measured flags in state order.
+    CaseFeatures(A3954CaseFeatures),
+    /// `07 8A` body `[language]`; see [`A3954CaseLanguage::command_body`].
+    CaseLanguage(A3954CaseLanguage),
 }
 
 impl A3954SettingCommand {
@@ -1595,6 +2043,8 @@ impl A3954SettingCommand {
             Self::SoundLeakCompensation(_) => Command::new(0x10, 0x9A),
             Self::SpatialAudio(_) => Command::new(0x10, 0x81),
             Self::EasyChat(_) => Command::new(0x10, 0x9D),
+            Self::CaseFeatures(_) => Command::new(0x07, 0x87),
+            Self::CaseLanguage(_) => Command::new(0x07, 0x8A),
         }
     }
 
@@ -1615,6 +2065,8 @@ impl A3954SettingCommand {
             Self::AmbientSoundModeCycle(cycle) => vec![cycle.byte()],
             Self::SpatialAudio(spatial_audio) => spatial_audio.command_body().to_vec(),
             Self::EasyChat(easy_chat) => easy_chat.command_body().to_vec(),
+            Self::CaseFeatures(case_features) => case_features.command_body().to_vec(),
+            Self::CaseLanguage(case_language) => case_language.command_body().to_vec(),
         }
     }
 }
@@ -1974,7 +2426,7 @@ pub struct DeviceModel {
     pub settings: Option<SettingsCapability>,
     /// The measured A3954-specific state blocks, or `None` for every other
     /// model. A model with this capability parses [`DeviceState::a3954`] and
-    /// builds the A3954 `06 81`, `03 87` and setting frames.
+    /// builds the A3954 `06 81`, `03 87`, `04 81` and setting frames.
     pub a3954: Option<A3954Capability>,
     /// Whether this slice implements the model's dual-connections list and its
     /// connect/disconnect/forget writes.
@@ -2131,6 +2583,27 @@ impl DeviceModel {
             Direction::Outbound,
             setting.command(),
             &setting.body(),
+        ))
+    }
+
+    /// The exact `04 81` frame for one A3954 gesture, or `None` when this model
+    /// has no measured A3954 state blocks.
+    ///
+    /// The body is the measured three bytes `[side, button_id, action]`; see
+    /// [`A3954Button::command_body`]. The action is the whole TwsLowBits byte
+    /// ([`A3954ButtonActionByte`]), so a caller keeps the nibble it is not
+    /// editing and can restore exactly what the device reported. The A3954 has
+    /// no set-all button packet: one call is one gesture and one frame.
+    pub fn a3954_button_frame(
+        self,
+        button: A3954Button,
+        action: A3954ButtonActionByte,
+    ) -> Option<Vec<u8>> {
+        self.a3954?;
+        Some(encode(
+            Direction::Outbound,
+            A3954_BUTTON_CONFIGURATION,
+            &button.command_body(action),
         ))
     }
 
@@ -2629,8 +3102,11 @@ fn parse_a3954_sound_mode(body: &[u8], offset: usize) -> Option<A3954SoundMode> 
 /// looking like a known setting. The sound-mode block is the one measured
 /// exception: the real device reports the unmeasured slider byte `13` in
 /// airplane mode, so that block reads as [`A3954State::sound_mode`] `None` and
-/// the rest of the state still parses. Flags are on only when the byte is `1`,
-/// as in OpenSCL4's parser, so an unexpected flag byte reads as off.
+/// the rest of the state still parses. The button action bytes are kept raw by
+/// design: [`A3954ButtonActionValue`] represents unmeasured nibbles instead of
+/// failing the poll, so a state value is never lost. Flags are on only when the
+/// byte is `1`, as in OpenSCL4's parser, so an unexpected flag byte reads as
+/// off.
 fn parse_a3954_state(model: DeviceModel, body: &[u8]) -> Result<Option<A3954State>, StateError> {
     let Some(capability) = model.a3954 else {
         return Ok(None);
