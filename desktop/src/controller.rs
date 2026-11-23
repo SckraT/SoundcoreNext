@@ -26,8 +26,9 @@ use soundcore_diagnostics::{
     DiagnosticSession, PROBES, ProbeResult, ProbeStatus, hex as diagnostic_hex,
 };
 use soundcore_models::{
-    A3062Settings, A3954AutoPowerOff, A3954AutoPowerOffDuration, A3954EasyChat,
-    A3954EasyChatWaitTime, A3954EqualizerState, A3954SettingCommand, A3954SoundMode,
+    A3062Settings, A3954AutoPowerOff, A3954AutoPowerOffDuration, A3954Button,
+    A3954ButtonActionByte, A3954ButtonActionValue, A3954CaseFeatures, A3954CaseLanguage,
+    A3954EasyChat, A3954EasyChatWaitTime, A3954EqualizerState, A3954SettingCommand, A3954SoundMode,
     A3954SoundModeSlider, A3954SpatialAudio, A3954SpatialAudioMode, A3954SpatialAudioMusicMode,
     A3954State, AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, ButtonAction,
     CUSTOM_EQUALIZER_PRESET_ID, DbLimit, DecibelReadingRefreshRate, DeviceModel, DeviceState,
@@ -275,19 +276,28 @@ pub fn sound_pages(
 
 /// The sidebar device pages of a state with a settings surface: the A3062's
 /// settings block or the A3954's own settings block. Both models expose the same
-/// five pages; the rows and commands behind them differ. A model without either
-/// (the A3949 and the rest of the catalog) has no pages and no write path.
+/// device pages, and only the A3954 adds the Case page: its state always parses
+/// the measured case features and language, so the presence of its block is the
+/// presence of the case blocks. The rows and commands behind the pages differ per
+/// model. A model without either (the A3949 and the rest of the catalog) has no
+/// pages and no write path.
 pub fn device_pages(has_settings: bool, has_a3954: bool) -> Vec<Page> {
     if !has_settings && !has_a3954 {
         return Vec::new();
     }
-    vec![
+    let mut pages = vec![
         Page::Controls,
         Page::Comfort,
         Page::Power,
         Page::Connections,
-        Page::About,
-    ]
+    ];
+    // The Case page follows Connections and precedes About, the order the
+    // Android app groups the settings in.
+    if has_a3954 {
+        pages.push(Page::Case);
+    }
+    pages.push(Page::About);
+    pages
 }
 
 /// The A3062 equalizer range in device units (dB×10): -12.0..+13.4 dB. The
@@ -1186,7 +1196,8 @@ impl ModeFailure {
             | SessionError::UnsupportedSoundMode
             | SessionError::UnsupportedEqualizer
             | SessionError::UnsupportedSetting
-            | SessionError::UnsupportedDualConnections => Self::Unreadable,
+            | SessionError::UnsupportedDualConnections
+            | SessionError::UnsupportedButtonConfiguration => Self::Unreadable,
         }
     }
 
@@ -1240,7 +1251,8 @@ impl EqFailure {
             | SessionError::UnsupportedSoundMode
             | SessionError::UnsupportedEqualizer
             | SessionError::UnsupportedSetting
-            | SessionError::UnsupportedDualConnections => Self::Unreadable,
+            | SessionError::UnsupportedDualConnections
+            | SessionError::UnsupportedButtonConfiguration => Self::Unreadable,
         }
     }
 
@@ -1338,7 +1350,8 @@ impl SettingFailure {
             | SessionError::UnsupportedSoundMode
             | SessionError::UnsupportedEqualizer
             | SessionError::UnsupportedSetting
-            | SessionError::UnsupportedDualConnections => Self::Unreadable,
+            | SessionError::UnsupportedDualConnections
+            | SessionError::UnsupportedButtonConfiguration => Self::Unreadable,
         }
     }
 
@@ -1503,6 +1516,31 @@ pub fn change_a3954_setting<T: Transport>(
     Ok(Box::new(state))
 }
 
+/// Writes one A3954 gesture's `04 81` frame and re-reads the state, returning
+/// the whole re-polled state so the caller can update the Controls page and the
+/// rest of the section pages. `action` is the whole measured TwsLowBits byte, so
+/// the nibble the page did not edit is written back exactly as the device
+/// reported it.
+///
+/// Blocking: only the device worker calls this, never the UI thread.
+pub fn change_a3954_button<T: Transport>(
+    session: &mut DeviceSession<T>,
+    button: A3954Button,
+    action: A3954ButtonActionByte,
+) -> Result<Box<DeviceState>, SettingFailure> {
+    session
+        .set_a3954_button(button, action)
+        .map_err(SettingFailure::from_session)?;
+    let state = session.poll_state().map_err(SettingFailure::from_session)?;
+    Ok(Box::new(state))
+}
+
+/// The `AppState.error-label` of a failed gesture write, naming the row the user
+/// changed; the vendored banner wraps it as "Could not change “{}”.".
+pub fn a3954_button_failure_label(failure: SettingFailure, button: A3954Button) -> String {
+    format!("{} ({})", a3954_button_label(button), failure.reason())
+}
+
 /// The row name a failed A3954 write's banner shows, matching the setting the
 /// row names.
 pub fn a3954_setting_label(setting: A3954SettingCommand) -> &'static str {
@@ -1518,6 +1556,8 @@ pub fn a3954_setting_label(setting: A3954SettingCommand) -> &'static str {
         A3954SettingCommand::SoundLeakCompensation(_) => "Sound leak compensation",
         A3954SettingCommand::SpatialAudio(_) => "Spatial audio",
         A3954SettingCommand::EasyChat(_) => "Easy chat",
+        A3954SettingCommand::CaseFeatures(_) => "Case screen",
+        A3954SettingCommand::CaseLanguage(_) => "Case language",
     }
 }
 
@@ -1589,7 +1629,8 @@ impl DualFailure {
             | SessionError::UnsupportedSoundMode
             | SessionError::UnsupportedEqualizer
             | SessionError::UnsupportedSetting
-            | SessionError::UnsupportedDualConnections => Self::Unreadable,
+            | SessionError::UnsupportedDualConnections
+            | SessionError::UnsupportedButtonConfiguration => Self::Unreadable,
         }
     }
 
@@ -1746,14 +1787,16 @@ impl ConnectFailure {
             SessionError::Io(error) => Self::Transport(error.to_string()),
             // A connection attempt only polls `01 01`; `UnsupportedSoundMode`
             // only comes from a mode write, `UnsupportedEqualizer` only from an
-            // equalizer write, `UnsupportedSetting` only from a setting write
-            // and `UnsupportedDualConnections` only from a dual-connections list
-            // read or write, so none can reach this mapping.
+            // equalizer write, `UnsupportedSetting` only from a setting write,
+            // `UnsupportedDualConnections` only from a dual-connections list
+            // read or write and `UnsupportedButtonConfiguration` only from a
+            // button write, so none can reach this mapping.
             SessionError::Protocol(_)
             | SessionError::UnsupportedSoundMode
             | SessionError::UnsupportedEqualizer
             | SessionError::UnsupportedSetting
-            | SessionError::UnsupportedDualConnections => Self::Protocol,
+            | SessionError::UnsupportedDualConnections
+            | SessionError::UnsupportedButtonConfiguration => Self::Protocol,
             SessionError::UnsupportedLayout => Self::UnsupportedLayout,
         }
     }
@@ -1995,6 +2038,14 @@ enum DeviceCommand {
         request: u64,
         setting: A3954SettingCommand,
     },
+    /// Write one A3954 `04 81` button configuration frame and re-read the state;
+    /// `request` identifies the row choice. The whole measured action byte is
+    /// carried, so the worker writes the nibble the page did not edit unchanged.
+    SetA3954Button {
+        request: u64,
+        button: A3954Button,
+        action: A3954ButtonActionByte,
+    },
     /// Ask for the dual-connections list: the worker writes the empty `0B 01`
     /// frame and reports the devices the earbuds remember and whether they are
     /// connected. Used by the Connections page's refresh.
@@ -2078,6 +2129,15 @@ enum Event {
         attempt: u64,
         request: u64,
         setting: A3954SettingCommand,
+        outcome: Result<Box<DeviceState>, SettingFailure>,
+    },
+    /// A device worker finished an A3954 gesture write and re-read the state;
+    /// the whole state comes along so the Controls page and the rest of the
+    /// section pages are refilled from the device's answer.
+    A3954ButtonChanged {
+        attempt: u64,
+        request: u64,
+        button: A3954Button,
         outcome: Result<Box<DeviceState>, SettingFailure>,
     },
     /// A device worker read the dual-connections list: on connect while the
@@ -3880,6 +3940,23 @@ fn drain_events(inner: &Rc<Inner>) {
                     apply_a3954_setting_outcome(&window, inner, setting, outcome);
                 }
             }
+            Ok(Event::A3954ButtonChanged {
+                attempt,
+                request,
+                button,
+                outcome,
+            }) => {
+                let applies = setting_result_applies(
+                    &outcome,
+                    attempt,
+                    request,
+                    inner.connect.get(),
+                    inner.setting_change.get(),
+                );
+                if applies && let Some(window) = inner.ui.upgrade() {
+                    apply_a3954_button_outcome(&window, inner, button, outcome);
+                }
+            }
             Ok(Event::DualConnectionsRead { attempt, outcome }) => {
                 if attempt == inner.connect.get()
                     && let Some(window) = inner.ui.upgrade()
@@ -4448,6 +4525,30 @@ fn serve_device_with_heartbeat<T: Transport>(
                     }
                 }
             }
+            DeviceCommand::SetA3954Button {
+                request,
+                button,
+                action,
+            } => {
+                let outcome = change_a3954_button(&mut session, button, action);
+                // The re-polled state becomes the base of the next A3954 write,
+                // exactly as after a settings write.
+                if let Ok(reported) = &outcome {
+                    a3954 = reported.a3954.clone();
+                }
+                let failed = outcome.is_err();
+                let _ = events.send(Event::A3954ButtonChanged {
+                    attempt,
+                    request,
+                    button,
+                    outcome,
+                });
+                if failed {
+                    // Same rule as a failed settings write: stop writing on a
+                    // session that is out of step and let Retry reconnect.
+                    return;
+                }
+            }
             DeviceCommand::ReadDualConnections => {
                 let outcome = read_dual_connections(&mut session);
                 let disconnected = outcome == Err(DualFailure::Disconnected);
@@ -4709,6 +4810,17 @@ fn serve_demo_device(
                     attempt,
                     request,
                     setting,
+                    outcome: Err(SettingFailure::Unreadable),
+                });
+                return;
+            }
+            DeviceCommand::SetA3954Button {
+                request, button, ..
+            } => {
+                let _ = events.send(Event::A3954ButtonChanged {
+                    attempt,
+                    request,
+                    button,
                     outcome: Err(SettingFailure::Unreadable),
                 });
                 return;
@@ -5711,7 +5823,7 @@ fn show_device_pages(state: &AppState<'_>, device: Option<&DeviceState>) {
     ))));
     // Neither model has per-earbud control surfaces in this slice, and only the
     // A3954 reports spatial audio. The A3954 reports its case battery on the
-    // About page; the case page itself is deferred.
+    // Case page and its About rows.
     state.set_has_sides(false);
     state.set_has_ldac(has_settings || a3954.is_some());
     state.set_has_spatial(a3954.is_some());
@@ -5936,14 +6048,17 @@ pub fn panels_for_page(
     panels.into_iter().flatten().collect()
 }
 
-/// The five sidebar pages of an A3954, built from its own measured settings
-/// block. Each row's id is the one the controller's `a3954_*_command` helpers
-/// map back to a measured [`A3954SettingCommand`], so a row can only ever write
-/// the setting it shows.
+/// The six sidebar pages of an A3954, built from its own measured settings block.
 ///
-/// Button remapping is deliberately deferred by this slice: the Controls page
-/// shows the ambient-sound-mode cycle toggles, which are the only measured
-/// button-related writes, and an info row says remapping is not available.
+/// The Controls page shows the twelve measured gestures as two select panels and
+/// keeps the ambient-sound-mode cycle panel. Each gesture row's id is mapped back
+/// to an [`A3954Button`] by [`a3954_button_for_row_id`], and the row writes the
+/// measured `04 81` frame; every other row's id is mapped by the controller's
+/// `a3954_*_command` helpers to a measured [`A3954SettingCommand`], so a row can
+/// only ever write the setting it shows.
+///
+/// The Case page shows the four measured case-screen features, the case
+/// language and the read-only case status (battery and firmware).
 fn a3954_panels_for_page(
     page: Page,
     device_state: &DeviceState,
@@ -5952,14 +6067,8 @@ fn a3954_panels_for_page(
 ) -> Vec<SettingsPanel> {
     let panels: Vec<Option<SettingsPanel>> = match page {
         Page::Controls => vec![
-            settings_panel(
-                PanelKind::Presses,
-                vec![info_row(
-                    "buttonRemapping",
-                    "Button remapping",
-                    "Not available in this version",
-                )],
-            ),
+            settings_panel(PanelKind::Presses, a3954_press_rows(a3954)),
+            settings_panel(PanelKind::Gestures, a3954_slide_rows(a3954)),
             settings_panel(PanelKind::Cycle, cycle_rows(a3954.ambient_sound_mode_cycle)),
         ],
         Page::Comfort => vec![
@@ -6086,6 +6195,10 @@ fn a3954_panels_for_page(
                 ],
             )]
         }
+        Page::Case => vec![
+            settings_panel(PanelKind::CaseScreen, a3954_case_screen_rows(a3954)),
+            settings_panel(PanelKind::CaseStatus, a3954_case_status_rows(a3954)),
+        ],
         Page::About => vec![settings_panel(
             PanelKind::Info,
             a3954_about_rows(device_state, a3954),
@@ -6166,6 +6279,214 @@ pub fn a3954_about_rows(device_state: &DeviceState, a3954: &A3954State) -> Vec<S
     }
     if let Some(firmware) = device_state.firmware.right.as_deref() {
         rows.push(info_row("rightFirmware", "Right firmware", firmware));
+    }
+    if let Some(firmware) = a3954.case_firmware.as_deref() {
+        rows.push(info_row("caseFirmware", "Case firmware", firmware));
+    }
+    rows
+}
+
+/// The action choices of the six A3954 press gestures, in the page's order: no
+/// action, then the measured [`A3954_COMMON_ACTIONS`] catalog. A gesture the
+/// device reports as `0x0F` is disabled, which the page shows as "None".
+pub const A3954_PRESS_ACTION_OPTIONS: [&str; 8] = [
+    "None",
+    "Volume up",
+    "Volume down",
+    "Previous song",
+    "Next song",
+    "Ambient sound mode",
+    "Voice assistant",
+    "Play/pause",
+];
+
+/// The action choices of the two A3954 slide gestures: exactly the measured
+/// [`A3954_SLIDE_ACTIONS`] catalog (volume up and volume down). The measured
+/// slide catalog has no "none" action, so the page offers no disabled choice.
+pub const A3954_SLIDE_ACTION_OPTIONS: [&str; 2] = ["Volume up", "Volume down"];
+
+/// The case-display language choices, in [`A3954CaseLanguage`] value order.
+pub const A3954_CASE_LANGUAGE_OPTIONS: [&str; 3] = ["Japanese", "English", "Chinese"];
+
+/// The setting id the Controls page gives one gesture: the id names the side and
+/// the press kind, exactly as the vendored UI kit names the A3954's button
+/// settings.
+pub const fn a3954_button_row_id(button: A3954Button) -> &'static str {
+    match button {
+        A3954Button::LeftSingle => "leftSinglePress",
+        A3954Button::RightSingle => "rightSinglePress",
+        A3954Button::LeftDouble => "leftDoublePress",
+        A3954Button::RightDouble => "rightDoublePress",
+        A3954Button::LeftTriple => "leftTriplePress",
+        A3954Button::RightTriple => "rightTriplePress",
+        A3954Button::LeftLong => "leftLongPress",
+        A3954Button::RightLong => "rightLongPress",
+        A3954Button::LeftSlideUp => "leftSlideUp",
+        A3954Button::RightSlideUp => "rightSlideUp",
+        A3954Button::LeftSlideDown => "leftSlideDown",
+        A3954Button::RightSlideDown => "rightSlideDown",
+    }
+}
+
+/// The gesture a Controls page row id names, or `None` for any other row.
+pub fn a3954_button_for_row_id(id: &str) -> Option<A3954Button> {
+    A3954Button::ALL
+        .into_iter()
+        .find(|button| a3954_button_row_id(*button) == id)
+}
+
+/// The row name of one gesture, as the English fallback the UI localizes by id.
+pub const fn a3954_button_label(button: A3954Button) -> &'static str {
+    match button {
+        A3954Button::LeftSingle => "Left single press",
+        A3954Button::RightSingle => "Right single press",
+        A3954Button::LeftDouble => "Left double press",
+        A3954Button::RightDouble => "Right double press",
+        A3954Button::LeftTriple => "Left triple press",
+        A3954Button::RightTriple => "Right triple press",
+        A3954Button::LeftLong => "Left long press",
+        A3954Button::RightLong => "Right long press",
+        A3954Button::LeftSlideUp => "Left slide up",
+        A3954Button::RightSlideUp => "Right slide up",
+        A3954Button::LeftSlideDown => "Left slide down",
+        A3954Button::RightSlideDown => "Right slide down",
+    }
+}
+
+/// The option strings of one gesture row: the eight press choices for a press,
+/// the two volume choices for a slide.
+pub const fn a3954_button_options(button: A3954Button) -> &'static [&'static str] {
+    if button.is_slide() {
+        &A3954_SLIDE_ACTION_OPTIONS
+    } else {
+        &A3954_PRESS_ACTION_OPTIONS
+    }
+}
+
+/// The index of the action a gesture currently performs, in
+/// [`a3954_button_options`]: a press row's `0` is "None", then the measured
+/// action order; a slide row's `0` and `1` are the two volume actions. A nibble
+/// the measured catalogs do not name is kept unselected (`-1`) rather than shown
+/// as an action the device did not report.
+pub fn a3954_button_action_index(button: A3954Button, value: A3954ButtonActionValue) -> i32 {
+    let position = |action| {
+        button
+            .available_actions()
+            .iter()
+            .position(|candidate| *candidate == action)
+    };
+    if button.is_slide() {
+        return match value.action().and_then(position) {
+            Some(index) => index as i32,
+            None => -1,
+        };
+    }
+    match value {
+        A3954ButtonActionValue::Disabled => 0,
+        A3954ButtonActionValue::Action(action) => match position(action) {
+            Some(index) => index as i32 + 1,
+            None => -1,
+        },
+        A3954ButtonActionValue::Unknown(_) => -1,
+    }
+}
+
+/// The action value a gesture row's option index names, or `None` outside the
+/// row's choices. A press row's `0` is the measured "no action" value; a slide
+/// row has no such choice because the measured slide catalog has none.
+pub fn a3954_button_action_for_index(
+    button: A3954Button,
+    index: i32,
+) -> Option<A3954ButtonActionValue> {
+    let actions = button.available_actions();
+    if button.is_slide() {
+        let index = usize::try_from(index).ok()?;
+        return actions
+            .get(index)
+            .copied()
+            .map(A3954ButtonActionValue::from);
+    }
+    match index {
+        0 => Some(A3954ButtonActionValue::Disabled),
+        index => {
+            let index = usize::try_from(index - 1).ok()?;
+            actions
+                .get(index)
+                .copied()
+                .map(A3954ButtonActionValue::from)
+        }
+    }
+}
+
+/// The eight press gesture rows of the Controls page, in measured state order,
+/// each showing the action the device reports for its TWS nibble.
+fn a3954_press_rows(a3954: &A3954State) -> Vec<SettingRow> {
+    A3954Button::ALL
+        .into_iter()
+        .filter(|button| !button.is_slide())
+        .map(|button| a3954_gesture_row(button, a3954))
+        .collect()
+}
+
+/// The four slide gesture rows of the Controls page, in measured state order.
+fn a3954_slide_rows(a3954: &A3954State) -> Vec<SettingRow> {
+    A3954Button::ALL
+        .into_iter()
+        .filter(|button| button.is_slide())
+        .map(|button| a3954_gesture_row(button, a3954))
+        .collect()
+}
+
+/// One gesture row: its id, its name and the action the device currently reports
+/// for it. The row writes the whole measured action byte, preserving the nibble
+/// the page is not editing (see [`answer_a3954_button`]).
+fn a3954_gesture_row(button: A3954Button, a3954: &A3954State) -> SettingRow {
+    let current = a3954.button_action_byte(button).tws();
+    select_row(
+        a3954_button_row_id(button),
+        a3954_button_label(button),
+        a3954_button_options(button),
+        a3954_button_action_index(button, current),
+    )
+}
+
+/// The four measured case-screen switches, in the measured state order, then
+/// the case-language choice. The page's note explains the language is
+/// independent of the app language.
+fn a3954_case_screen_rows(a3954: &A3954State) -> Vec<SettingRow> {
+    let features = a3954.case_features;
+    vec![
+        toggle_row("atmospheric", "Atmospheric", features.atmospheric),
+        toggle_row("remoteCamera", "Remote camera", features.remote_camera),
+        toggle_row("findDevice", "Find device", features.find_device),
+        toggle_row(
+            "caseSpatialAudio",
+            "Spatial audio on case",
+            features.case_spatial_audio,
+        ),
+        select_row(
+            "caseLanguage",
+            "Case language",
+            &A3954_CASE_LANGUAGE_OPTIONS,
+            a3954_case_language_index(a3954.case_language),
+        ),
+    ]
+}
+
+/// The index of an A3954 case-display language in
+/// [`A3954_CASE_LANGUAGE_OPTIONS`].
+pub fn a3954_case_language_index(language: A3954CaseLanguage) -> i32 {
+    i32::from(language.value())
+}
+
+/// The read-only case status: the case battery (the measured ten-step level plus
+/// one) and the case firmware. The case serial stays off the page, exactly like
+/// the device's other serial.
+fn a3954_case_status_rows(a3954: &A3954State) -> Vec<SettingRow> {
+    let mut rows = Vec::new();
+    if let Some(level) = a3954.case_battery_level {
+        let case = battery_tile(2, level.saturating_add(1), 10);
+        rows.push(info_row("caseBattery", "Case battery", case.value.as_str()));
     }
     if let Some(firmware) = a3954.case_firmware.as_deref() {
         rows.push(info_row("caseFirmware", "Case firmware", firmware));
@@ -6447,6 +6768,24 @@ pub fn a3954_toggle_command(
             normal: on,
             ..current.ambient_sound_mode_cycle
         }),
+        // A case-screen toggle changes one measured flag and keeps the other
+        // three, exactly as the core's four-byte `07 87` body reports them.
+        "atmospheric" => A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+            atmospheric: on,
+            ..current.case_features
+        }),
+        "remoteCamera" => A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+            remote_camera: on,
+            ..current.case_features
+        }),
+        "findDevice" => A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+            find_device: on,
+            ..current.case_features
+        }),
+        "caseSpatialAudio" => A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+            case_spatial_audio: on,
+            ..current.case_features
+        }),
         _ => return None,
     })
 }
@@ -6504,6 +6843,8 @@ pub fn a3954_option_command(
                 ..current.spatial_audio
             }))
         }
+        "caseLanguage" => A3954CaseLanguage::from_value(u8::try_from(index).ok()?)
+            .map(A3954SettingCommand::CaseLanguage),
         _ => None,
     }
 }
@@ -6876,16 +7217,48 @@ fn apply_a3954_setting_outcome(
     refresh_tray(inner, &state);
 }
 
+/// Applies a finished A3954 gesture write: the re-polled state replaces the
+/// controller's copy and refills the panels and the rest of the section pages,
+/// or the error banner names the gesture that failed.
+fn apply_a3954_button_outcome(
+    window: &AppWindow,
+    inner: &Rc<Inner>,
+    button: A3954Button,
+    outcome: Result<Box<DeviceState>, SettingFailure>,
+) {
+    let state = window.global::<AppState>();
+    match outcome {
+        Ok(reported) => {
+            *inner.device.borrow_mut() = Some(reported);
+            show_overview(&state, inner);
+            show_section_pages(&state, inner);
+            state.set_error_label("".into());
+        }
+        Err(failure) => {
+            // The worker closes the session after a failed write; Retry in the
+            // banner opens a fresh connection.
+            inner.stop_worker();
+            state.set_error_label(a3954_button_failure_label(failure, button).into());
+        }
+    }
+    refresh_tray(inner, &state);
+}
+
 /// Answers a choice control on the UI thread. The Sound mode tiles keep their
 /// own `ambientSoundMode` id and `06 81` write; every other id is a section row,
 /// and an id or index this slice does not write is ignored, so no other frame
-/// can be written. The A3954's rows name its own settings commands.
+/// can be written. The A3954's rows name its own settings commands, and its
+/// twelve gesture rows name the measured `04 81` write.
 fn set_option(window: &AppWindow, inner: &Rc<Inner>, setting_id: &str, index: i32) {
     if setting_id == SOUND_MODE_SETTING_ID {
         set_ambient_sound_mode(window, inner, index);
         return;
     }
     if connected_a3954(inner) {
+        if let Some(button) = a3954_button_for_row_id(setting_id) {
+            answer_a3954_button(window, inner, button, index);
+            return;
+        }
         answer_a3954_setting(window, inner, |a3954| {
             a3954_option_command(setting_id, index, a3954)
         });
@@ -7075,6 +7448,48 @@ fn answer_a3954_setting(
     });
     if !sent {
         state.set_error_label(SettingFailure::Disconnected.a3954_label(setting).into());
+    }
+}
+
+/// Queues one A3954 `04 81` gesture write on the device worker, keeping the
+/// action byte's disconnected-state nibble. Nothing is sent when the connection
+/// cannot write, the device is not an A3954 or the chosen index is outside the
+/// row's measured choices, so an unknown row id or option never writes a frame
+/// the device did not offer.
+fn answer_a3954_button(window: &AppWindow, inner: &Rc<Inner>, button: A3954Button, index: i32) {
+    let state = window.global::<AppState>();
+    if state.get_connection() != Connection::Connected {
+        return;
+    }
+    let action = {
+        let device = inner.device.borrow();
+        let Some(a3954) = device
+            .as_ref()
+            .and_then(|device_state| device_state.a3954.as_ref())
+        else {
+            return;
+        };
+        let Some(value) = a3954_button_action_for_index(button, index) else {
+            return;
+        };
+        // Only the earbuds-connected action changes; the byte the device
+        // reported keeps the disconnected-state nibble, exactly as the core's
+        // `with_tws` does.
+        a3954.button_action_byte(button).with_tws(value)
+    };
+    let sent = inner.send_queued(&inner.setting_change, |request| {
+        DeviceCommand::SetA3954Button {
+            request,
+            button,
+            action,
+        }
+    });
+    if !sent {
+        // The worker of a previous failed change has closed the connection; the
+        // banner's Retry reconnects.
+        state.set_error_label(
+            a3954_button_failure_label(SettingFailure::Disconnected, button).into(),
+        );
     }
 }
 
@@ -18621,6 +19036,7 @@ mod tests {
                 Page::Comfort,
                 Page::Power,
                 Page::Connections,
+                Page::Case,
                 Page::About
             ]
         );
@@ -18678,7 +19094,18 @@ mod tests {
                 vec![Page::SoundModes, Page::Equalizer, Page::Effects]
             );
             let device_pages: Vec<Page> = state.get_device_pages().iter().collect();
-            assert_eq!(device_pages.len(), 5);
+            assert_eq!(
+                device_pages,
+                vec![
+                    Page::Controls,
+                    Page::Comfort,
+                    Page::Power,
+                    Page::Connections,
+                    Page::Case,
+                    Page::About
+                ],
+                "the A3954 adds the measured Case page"
+            );
             assert!(state.get_has_ldac());
             assert!(state.get_has_spatial(), "the A3954 has spatial audio");
             assert!(!state.get_has_sides());
@@ -18758,7 +19185,7 @@ mod tests {
                 "the Sound mode page is hidden, the other sound pages stay"
             );
             let device_pages: Vec<Page> = state.get_device_pages().iter().collect();
-            assert_eq!(device_pages.len(), 5, "the settings pages stay");
+            assert_eq!(device_pages.len(), 6, "the settings pages stay");
 
             let overview: Vec<crate::OverviewRow> = state.get_overview_rows().iter().collect();
             let kinds: Vec<crate::BlockKind> = overview
@@ -19116,26 +19543,75 @@ mod tests {
     #[test]
     fn the_a3954_settings_pages_have_their_measured_rows() {
         let state = a3954_state();
-        // Controls: the ambient-mode cycle toggles and the deferred remapping
-        // note. Button remapping is not part of this slice.
+        // Controls: the eight measured presses, the four slides and the cycle.
         let controls = panels_for_page(Page::Controls, &state, &[]);
         assert_eq!(
             panel_kinds(&controls),
-            vec![PanelKind::Presses, PanelKind::Cycle]
+            vec![PanelKind::Presses, PanelKind::Gestures, PanelKind::Cycle]
         );
-        assert_eq!(row_ids(&controls[0]), ["buttonRemapping"]);
-        assert_eq!(row_kinds(&controls[0]), vec![RowKind::Info]);
-        let remapping: SettingRow = controls[0].rows.iter().next().expect("the remapping row");
-        assert_eq!(remapping.text.as_str(), "Not available in this version");
+        assert_eq!(
+            row_ids(&controls[0]),
+            [
+                "leftSinglePress",
+                "rightSinglePress",
+                "leftDoublePress",
+                "rightDoublePress",
+                "leftTriplePress",
+                "rightTriplePress",
+                "leftLongPress",
+                "rightLongPress"
+            ]
+        );
+        assert_eq!(row_kinds(&controls[0]), vec![RowKind::Select; 8]);
+        let presses: Vec<SettingRow> = controls[0].rows.iter().collect();
+        assert_eq!(
+            presses.iter().map(|row| row.index).collect::<Vec<_>>(),
+            [7, 7, 3, 4, 0, 0, 5, 5],
+            "the measured TWS action of each press"
+        );
+        assert_eq!(
+            select_options(&controls[0], 0),
+            [
+                "None",
+                "Volume up",
+                "Volume down",
+                "Previous song",
+                "Next song",
+                "Ambient sound mode",
+                "Voice assistant",
+                "Play/pause"
+            ]
+        );
         assert_eq!(
             row_ids(&controls[1]),
+            [
+                "leftSlideUp",
+                "rightSlideUp",
+                "leftSlideDown",
+                "rightSlideDown"
+            ]
+        );
+        assert_eq!(row_kinds(&controls[1]), vec![RowKind::Select; 4]);
+        let slides: Vec<SettingRow> = controls[1].rows.iter().collect();
+        assert_eq!(
+            slides.iter().map(|row| row.index).collect::<Vec<_>>(),
+            [0, 0, 1, 1],
+            "the measured TWS action of each slide"
+        );
+        assert_eq!(
+            select_options(&controls[1], 0),
+            ["Volume up", "Volume down"],
+            "the measured slide catalog has only the two volume actions"
+        );
+        assert_eq!(
+            row_ids(&controls[2]),
             [
                 "noiseCancelingModeInCycle",
                 "transparencyModeInCycle",
                 "normalModeInCycle"
             ]
         );
-        let cycle: Vec<bool> = controls[1].rows.iter().map(|row| row.checked).collect();
+        let cycle: Vec<bool> = controls[2].rows.iter().map(|row| row.checked).collect();
         assert_eq!(cycle, [true, true, false], "the measured cycle bits");
 
         // Comfort: the measured comfort switches and the volume panel.
@@ -19275,6 +19751,60 @@ mod tests {
         );
         assert!(!effect_rows[4].checked);
 
+        // Case: the four measured case-screen flags, the case language and the
+        // read-only case battery and firmware. The case serial never shows.
+        let case = panels_for_page(Page::Case, &state, &[]);
+        assert_eq!(
+            panel_kinds(&case),
+            vec![PanelKind::CaseScreen, PanelKind::CaseStatus]
+        );
+        assert_eq!(
+            row_ids(&case[0]),
+            [
+                "atmospheric",
+                "remoteCamera",
+                "findDevice",
+                "caseSpatialAudio",
+                "caseLanguage"
+            ]
+        );
+        assert_eq!(
+            row_kinds(&case[0]),
+            vec![
+                RowKind::Toggle,
+                RowKind::Toggle,
+                RowKind::Toggle,
+                RowKind::Toggle,
+                RowKind::Select
+            ]
+        );
+        let case_rows: Vec<SettingRow> = case[0].rows.iter().collect();
+        assert_eq!(
+            case_rows[..4]
+                .iter()
+                .map(|row| row.checked)
+                .collect::<Vec<_>>(),
+            [false, false, true, false],
+            "the measured case-screen flags"
+        );
+        assert_eq!(
+            case_rows[4].index, 1,
+            "the measured case language is English"
+        );
+        assert_eq!(
+            select_options(&case[0], 4),
+            ["Japanese", "English", "Chinese"]
+        );
+        assert_eq!(row_ids(&case[1]), ["caseBattery", "caseFirmware"]);
+        assert_eq!(row_kinds(&case[1]), vec![RowKind::Info, RowKind::Info]);
+        let case_status: Vec<SettingRow> = case[1].rows.iter().collect();
+        assert_eq!(case_status[0].text.as_str(), "100%");
+        assert_eq!(case_status[1].text.as_str(), "01.58");
+        assert!(
+            !row_ids(&case[1]).iter().any(|id| id.contains("serial")),
+            "the case serial is never shown"
+        );
+
         // About: both earbud batteries, the case battery, both firmwares and
         // the case firmware; no serial or address.
         let about = panels_for_page(Page::About, &state, &[]);
@@ -19301,6 +19831,181 @@ mod tests {
             !row_ids(&about[0]).iter().any(|id| id == "serialNumber"),
             "the serial is never shown"
         );
+    }
+
+    #[test]
+    fn every_a3954_gesture_row_writes_one_measured_frame_and_re_polls() {
+        let state = a3954_state().a3954.expect("the A3954 block");
+        for button in A3954Button::ALL {
+            // The row id round-trips to the gesture and no other id names it.
+            let id = a3954_button_row_id(button);
+            assert_eq!(a3954_button_for_row_id(id), Some(button), "{id}");
+            assert_eq!(
+                a3954_button_for_row_id(&id.to_uppercase()),
+                None,
+                "row ids stay exact"
+            );
+            assert_eq!(a3954_button_for_row_id("singlePress"), None);
+            assert!(
+                a3954_button_label(button).starts_with("Left")
+                    || a3954_button_label(button).starts_with("Right"),
+                "{id}: the row names its side"
+            );
+
+            // Every measured option index round-trips to the action value the
+            // row writes back; no index outside the row's choices names one.
+            let actions = button.available_actions();
+            let expected_len = actions.len() + usize::from(!button.is_slide());
+            assert_eq!(a3954_button_options(button).len(), expected_len);
+            for index in 0..i32::try_from(expected_len).expect("a small row") {
+                let value = a3954_button_action_for_index(button, index)
+                    .unwrap_or_else(|| panic!("{id}: option {index}"));
+                assert_eq!(
+                    a3954_button_action_index(button, value),
+                    index,
+                    "{id}: option {index}"
+                );
+            }
+            let past_end = i32::try_from(expected_len).expect("a small row");
+            assert_eq!(a3954_button_action_for_index(button, -1), None);
+            assert_eq!(a3954_button_action_for_index(button, past_end), None);
+            assert_eq!(
+                a3954_button_action_index(button, A3954ButtonActionValue::Unknown(9)),
+                -1,
+                "{id}: an unmeasured nibble is left unselected"
+            );
+            if !button.is_slide() {
+                assert_eq!(
+                    a3954_button_action_index(button, A3954ButtonActionValue::Disabled),
+                    0,
+                    "{id}: a disabled press is the page's None"
+                );
+            }
+
+            // The row shows the measured TWS action of the fixture.
+            let measured = state.button_action_byte(button);
+            let row = a3954_gesture_row(button, &state);
+            assert_eq!(row.id.as_str(), id);
+            assert_eq!(row.kind, RowKind::Select);
+            assert_eq!(row.index, a3954_button_action_index(button, measured.tws()));
+
+            // The click writes the whole measured byte with only its TWS nibble
+            // replaced: one `04 81` frame, then the `01 01` re-poll.
+            let value = a3954_button_action_for_index(button, 0).expect("the first choice");
+            let action = measured.with_tws(value);
+            let expected = a3954_model()
+                .a3954_button_frame(button, action)
+                .expect("the measured A3954 frame");
+            let transport = FakeTransport::scripted([a3954_connect_frame(), a3954_connect_frame()]);
+            let session = session_with("A3954", &transport);
+            let (events, received) = mpsc::channel();
+            let (commands, command_receiver) = mpsc::channel();
+            commands
+                .send(DeviceCommand::SetA3954Button {
+                    request: 1,
+                    button,
+                    action,
+                })
+                .expect("the gesture click is queued");
+            drop(commands);
+
+            serve_device(session, 9, events, command_receiver);
+
+            assert_eq!(
+                transport.writes(),
+                vec![state_request(), expected, state_request()],
+                "{id}: one 04 81 frame, then the re-poll"
+            );
+            let _ = received.try_recv().expect("the state report");
+            match received.try_recv().expect("the gesture write") {
+                Event::A3954ButtonChanged {
+                    attempt: 9,
+                    request: 1,
+                    button: reported,
+                    outcome: Ok(re_polled),
+                } => {
+                    assert_eq!(reported, button);
+                    assert!(
+                        re_polled.a3954.is_some(),
+                        "{id}: the event carries the re-polled state"
+                    );
+                }
+                other => panic!("{id}: unexpected event: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_reported_a3954_gesture_and_case_refresh_the_pages() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            state.set_device_name("Liberty 4 Pro".into());
+            state.set_device_code("A3954".into());
+            apply_outcome(
+                ui,
+                &inner,
+                ConnectOutcome::Connected(a3954_model(), Box::new(a3954_state())),
+            );
+
+            // A case-features and language write refills the Case page from the
+            // re-polled state.
+            state.set_page(Page::Case);
+            show_section_pages(&state, &inner);
+            let mut device = a3954_state();
+            let reported = device.a3954.as_mut().expect("the A3954 block");
+            reported.case_features = A3954CaseFeatures {
+                atmospheric: true,
+                remote_camera: true,
+                find_device: false,
+                case_spatial_audio: true,
+            };
+            reported.case_language = A3954CaseLanguage::Chinese;
+            apply_a3954_setting_outcome(
+                ui,
+                &inner,
+                A3954SettingCommand::CaseLanguage(A3954CaseLanguage::Chinese),
+                Ok(Box::new(device)),
+            );
+            let panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
+            assert_eq!(
+                panel_kinds(&panels),
+                vec![PanelKind::CaseScreen, PanelKind::CaseStatus]
+            );
+            let rows: Vec<SettingRow> = panels[0].rows.iter().collect();
+            assert_eq!(
+                rows[..4].iter().map(|row| row.checked).collect::<Vec<_>>(),
+                [true, true, false, true],
+                "the re-polled case-screen flags"
+            );
+            assert_eq!(rows[4].index, 2, "the re-polled case language");
+
+            // A gesture write refills the Controls page from the re-polled
+            // state; the other nibble of the byte stays the device's.
+            state.set_page(Page::Controls);
+            show_section_pages(&state, &inner);
+            let mut device = a3954_state();
+            device.a3954.as_mut().expect("the A3954 block").main_buttons[0] = 0x61;
+            apply_a3954_button_outcome(ui, &inner, A3954Button::LeftSingle, Ok(Box::new(device)));
+            let panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
+            let presses: Vec<SettingRow> = panels[0].rows.iter().collect();
+            assert_eq!(
+                presses[0].index, 2,
+                "the re-polled left-single action is volume down"
+            );
+            assert_eq!(
+                inner
+                    .device
+                    .borrow()
+                    .as_ref()
+                    .and_then(|device| device.a3954.as_ref())
+                    .expect("the A3954 state")
+                    .button_action_byte(A3954Button::LeftSingle)
+                    .byte(),
+                0x61,
+                "the controller's copy follows the device"
+            );
+        });
     }
 
     #[test]
@@ -19358,6 +20063,35 @@ mod tests {
             ))
         );
         assert_eq!(
+            toggle("atmospheric", true),
+            Some(A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                atmospheric: true,
+                ..state.case_features
+            })),
+            "a case-screen toggle keeps the other three measured flags"
+        );
+        assert_eq!(
+            toggle("remoteCamera", true),
+            Some(A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                remote_camera: true,
+                ..state.case_features
+            }))
+        );
+        assert_eq!(
+            toggle("findDevice", false),
+            Some(A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                find_device: false,
+                ..state.case_features
+            }))
+        );
+        assert_eq!(
+            toggle("caseSpatialAudio", true),
+            Some(A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                case_spatial_audio: true,
+                ..state.case_features
+            }))
+        );
+        assert_eq!(
             toggle("windNoiseSuppression", true),
             None,
             "the wind flag travels in the 06 81 body, not a settings frame"
@@ -19413,6 +20147,29 @@ mod tests {
                 DecibelReadingRefreshRate::TenSeconds
             ))
         );
+        assert_eq!(
+            option("caseLanguage", 0),
+            Some(A3954SettingCommand::CaseLanguage(
+                A3954CaseLanguage::Japanese
+            ))
+        );
+        assert_eq!(
+            option("caseLanguage", 2),
+            Some(A3954SettingCommand::CaseLanguage(
+                A3954CaseLanguage::Chinese
+            ))
+        );
+        assert_eq!(option("caseLanguage", 3), None);
+        for language in A3954CaseLanguage::ALL {
+            let index = a3954_case_language_index(language);
+            assert_eq!(index, i32::from(language.value()));
+            assert_eq!(
+                option("caseLanguage", index),
+                Some(A3954SettingCommand::CaseLanguage(language)),
+                "{language:?}"
+            );
+        }
+        assert_eq!(a3954_case_language_index(A3954CaseLanguage::English), 1);
         assert_eq!(option("doublePress", 0), None);
 
         let db_limit = DbLimit::new(95).expect("95 dB is a measured step");
@@ -19432,14 +20189,35 @@ mod tests {
         // The banner names the setting that failed.
         assert_eq!(a3954_setting_label(A3954SettingCommand::Ldac(true)), "LDAC");
         assert_eq!(
+            a3954_setting_label(A3954SettingCommand::CaseFeatures(state.case_features)),
+            "Case screen"
+        );
+        assert_eq!(
+            a3954_setting_label(A3954SettingCommand::CaseLanguage(
+                A3954CaseLanguage::English
+            )),
+            "Case language"
+        );
+        assert_eq!(
             SettingFailure::Disconnected.a3954_label(A3954SettingCommand::WearingDetection(false)),
             "Wearing detection (connection lost)"
+        );
+        assert_eq!(
+            SettingFailure::TimedOut.a3954_label(A3954SettingCommand::CaseLanguage(
+                A3954CaseLanguage::English
+            )),
+            "Case language (no answer)"
+        );
+        // A failed gesture write names the row it changed.
+        assert_eq!(
+            a3954_button_failure_label(SettingFailure::Disconnected, A3954Button::LeftSlideDown),
+            "Left slide down (connection lost)"
         );
     }
 
     #[test]
     fn each_a3954_settings_page_writes_one_measured_frame_and_re_polls() {
-        let cases: [(&str, A3954SettingCommand); 13] = [
+        let cases: [(&str, A3954SettingCommand); 15] = [
             ("LDAC off", A3954SettingCommand::Ldac(false)),
             (
                 "spatial audio on",
@@ -19515,6 +20293,19 @@ mod tests {
                     music_mode: A3954SpatialAudioMusicMode::Fixed,
                     mode: A3954SpatialAudioMode::Gaming,
                 }),
+            ),
+            (
+                "case screen features",
+                A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                    atmospheric: true,
+                    remote_camera: false,
+                    find_device: true,
+                    case_spatial_audio: false,
+                }),
+            ),
+            (
+                "case language",
+                A3954SettingCommand::CaseLanguage(A3954CaseLanguage::Japanese),
             ),
         ];
         for (label, setting) in cases {
@@ -19692,11 +20483,90 @@ mod tests {
                 other => panic!("unexpected command: {other:?}"),
             }
 
+            // A gesture row writes the measured `04 81` byte with the chosen
+            // TWS action, keeping the disconnected-state nibble the device
+            // reported: measured `0xFF` (both nibbles "no action") changed to
+            // volume up becomes `0xF0`.
+            actions.invoke_set_option("leftTriplePress".into(), 1);
+            match next("left triple press") {
+                DeviceCommand::SetA3954Button {
+                    request,
+                    button,
+                    action,
+                } => {
+                    assert_eq!(request, 4);
+                    assert_eq!(button, A3954Button::LeftTriple);
+                    assert_eq!(
+                        action.byte(),
+                        0xF0,
+                        "the high nibble the device reported is kept"
+                    );
+                    assert_eq!(
+                        action.tws(),
+                        A3954ButtonActionValue::Action(
+                            soundcore_models::A3954ButtonAction::VolumeUp
+                        )
+                    );
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+
+            // A slide row offers only the two measured volume actions; the
+            // measured `0x11` slide changed to volume up keeps its `1` high
+            // nibble and becomes `0x10`.
+            actions.invoke_set_option("rightSlideDown".into(), 0);
+            match next("right slide down") {
+                DeviceCommand::SetA3954Button {
+                    request,
+                    button,
+                    action,
+                } => {
+                    assert_eq!(request, 5);
+                    assert_eq!(button, A3954Button::RightSlideDown);
+                    assert_eq!(action.byte(), 0x10);
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+
+            // A case-screen toggle writes the four measured flags with one
+            // changed and the other three kept.
+            actions.invoke_set_toggle("findDevice".into(), false);
+            match next("case screen") {
+                DeviceCommand::SetA3954Setting { request, setting } => {
+                    assert_eq!(request, 6);
+                    assert_eq!(
+                        setting,
+                        A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                            find_device: false,
+                            ..a3954.case_features
+                        })
+                    );
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+
+            actions.invoke_set_option("caseLanguage".into(), 2);
+            match next("case language") {
+                DeviceCommand::SetA3954Setting { request, setting } => {
+                    assert_eq!(request, 7);
+                    assert_eq!(
+                        setting,
+                        A3954SettingCommand::CaseLanguage(A3954CaseLanguage::Chinese)
+                    );
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+
             // Ids the A3954 does not have, or that belong to the scale, never
             // write a settings frame.
             actions.invoke_set_toggle("dolbyAudio".into(), true);
             actions.invoke_set_toggle("sideTone".into(), true);
             actions.invoke_set_option("doublePress".into(), 0);
+            // An option outside a gesture row's measured choices, and ids that
+            // are not gesture rows, write no `04 81` frame.
+            actions.invoke_set_option("leftSinglePress".into(), 9);
+            actions.invoke_set_option("leftSlideUp".into(), 2);
+            actions.invoke_set_option("singlePress".into(), 1);
             assert!(queued.try_recv().is_err(), "no invented A3062 write");
 
             // The Sound mode tile path has no A3954 tiles, so it writes nothing.

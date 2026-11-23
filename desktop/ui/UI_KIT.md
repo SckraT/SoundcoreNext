@@ -128,7 +128,18 @@ actually supports and produces `AppState.overview-rows`, `quick-toggles`,
 - Sound mode and equalizer require their corresponding state: the A3062's
   `sound_mode`/`equalizer` blocks or the Liberty 4 Pro's own `a3954` block.
   Controls, Comfort, Sound and effects, Power, and Connections require a
-  settings surface: the A3062 `settings` block or the A3954 `a3954` block.
+  settings surface: the A3062 `settings` block or the A3954 `a3954` block. The
+  A3954 also exposes the Case page, because its state always parses the measured
+  case features and language; the A3062 has no case block and no Case page.
+- The A3954 Controls page shows both earbuds on one page: the eight measured
+  presses (left/right single, double, triple and long) as select rows in the
+  Presses panel, the four measured slides as select rows in the Slides
+  (`PanelKind.gestures`) panel, and the ambient-sound-mode cycle panel below.
+  Every gesture row names its side and writes exactly one measured `04 81`
+  frame on change; it keeps the action byte's disconnected-state nibble and
+  re-polls `01 01`. The case-page toggles write `07 87` with the other three
+  measured flags kept, and the language row writes `07 8A`. The case status
+  (battery and firmware) is read-only and never shows the case serial.
 - The A3954's ambient sound is one 1–11 scale, not three tiles: the Sound mode
   page sets `mode-scale` and `scale-position` from the device and shows its
   wind-noise suppression as a `ModeRow` toggle. The A3062 keeps the three tiles
@@ -143,8 +154,10 @@ actually supports and produces `AppState.overview-rows`, `quick-toggles`,
   localized by the UI through `LocalizedText.setting-reason` when it is one the
   kit knows (for example `Turn on spatial audio first`); unknown reasons pass
   through unchanged.
-- Quick presets and case blocks stay unsupported until the core supplies real
-  data and working behavior. Do not create decorative substitutes.
+- Quick presets and the Overview's case shortcut stay unsupported until the core
+  supplies real data and working behavior. Do not create decorative
+  substitutes. The A3954's case settings are a real Case page, not an Overview
+  block.
 - A model with no supported block keeps its device identity and batteries but
   gets no invented shortcut or quick toggle.
 
@@ -201,11 +214,17 @@ protocol value. Add a mapping there when a new row, option or mode label is
 introduced, and add the `@tr` strings to the locale documents. This includes the
 A3954 rows (`windNoiseSuppression`, `wearingDetection`, `easyChat`,
 `easyChatWaitTime`, `soundLeakCompensation`, `spatialAudio`,
-`spatialAudioMusicMode`, `spatialAudioMode`, `buttonRemapping`, the About
-battery/firmware ids) and its option values (`5/10/15 seconds`,
+`spatialAudioMusicMode`, `spatialAudioMode`, the twelve gesture ids
+`leftSinglePress`…`rightSlideDown`, the case ids `atmospheric`, `remoteCamera`,
+`findDevice`, `caseSpatialAudio` and `caseLanguage`, and the About
+battery/firmware ids), its option values (`5/10/15 seconds`,
 `10/20/30/60 minutes`, `Fixed`, `Head tracking`, `Music`, `Podcast`, `Movie`,
-`Gaming`). Do not translate protocol identifiers (`NoiseCanceling`, `ldac`,
-`dualDevices`) or product names.
+`Gaming`, `Volume up`, `Volume down`, `Previous song`, `Next song`,
+`Ambient sound mode`, `Voice assistant`, `Play/pause`, `Japanese`, `English`,
+`Chinese`), and the panel titles `Presses`, `Slides` and `Case screen`. The
+gesture row ids stay side-specific on this page because both earbuds are shown
+together; do not strip the side to the A3062 page's shorter `Single press`
+wording.
 The language picker intentionally shows each language in its own language.
 
 ### Capture tool

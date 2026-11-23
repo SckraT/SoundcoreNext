@@ -121,8 +121,13 @@ fn panel(kind: PanelKind, rows: Vec<SettingRow>) -> SettingsPanel {
     }
 }
 
-// The panels the controller fills for each section page of a connected A3062.
-fn panels(page: Page) -> ModelRc<SettingsPanel> {
+// The panels the controller fills for each section page of a connected A3062,
+// and the Liberty 4 Pro's own Controls and Case pages when the capture is an
+// A3954 one.
+fn panels(page: Page, a3954: bool) -> ModelRc<SettingsPanel> {
+    if a3954 {
+        return ModelRc::new(VecModel::from(a3954_panels(page)));
+    }
     let panels = match page {
         Page::Controls => vec![
             panel(
@@ -225,6 +230,90 @@ fn panels(page: Page) -> ModelRc<SettingsPanel> {
         )],
     };
     ModelRc::new(VecModel::from(panels))
+}
+
+// The A3954's own section pages: the twelve measured gestures and the case
+// page, with the same ids and English fallbacks the controller supplies.
+fn a3954_panels(page: Page) -> Vec<SettingsPanel> {
+    let press = |id: &str, label: &str, index: i32| {
+        select_row(
+            id,
+            label,
+            vec![
+                "None",
+                "Volume up",
+                "Volume down",
+                "Previous song",
+                "Next song",
+                "Ambient sound mode",
+                "Voice assistant",
+                "Play/pause",
+            ],
+            index,
+        )
+    };
+    let slide = |id: &str, label: &str, index: i32| {
+        select_row(id, label, vec!["Volume up", "Volume down"], index)
+    };
+    match page {
+        Page::Controls => vec![
+            panel(
+                PanelKind::Presses,
+                vec![
+                    press("leftSinglePress", "Left single press", 7),
+                    press("rightSinglePress", "Right single press", 7),
+                    press("leftDoublePress", "Left double press", 3),
+                    press("rightDoublePress", "Right double press", 4),
+                    press("leftTriplePress", "Left triple press", 0),
+                    press("rightTriplePress", "Right triple press", 0),
+                    press("leftLongPress", "Left long press", 5),
+                    press("rightLongPress", "Right long press", 5),
+                ],
+            ),
+            panel(
+                PanelKind::Gestures,
+                vec![
+                    slide("leftSlideUp", "Left slide up", 0),
+                    slide("rightSlideUp", "Right slide up", 0),
+                    slide("leftSlideDown", "Left slide down", 1),
+                    slide("rightSlideDown", "Right slide down", 1),
+                ],
+            ),
+            panel(
+                PanelKind::Cycle,
+                vec![
+                    toggle_row("noiseCancelingModeInCycle", "Noise canceling", true),
+                    toggle_row("transparencyModeInCycle", "Transparency", true),
+                    toggle_row("normalModeInCycle", "Normal", false),
+                ],
+            ),
+        ],
+        Page::Case => vec![
+            panel(
+                PanelKind::CaseScreen,
+                vec![
+                    toggle_row("atmospheric", "Atmospheric", false),
+                    toggle_row("remoteCamera", "Remote camera", false),
+                    toggle_row("findDevice", "Find device", true),
+                    toggle_row("caseSpatialAudio", "Spatial audio on case", false),
+                    select_row(
+                        "caseLanguage",
+                        "Case language",
+                        vec!["Japanese", "English", "Chinese"],
+                        1,
+                    ),
+                ],
+            ),
+            panel(
+                PanelKind::CaseStatus,
+                vec![
+                    info_row("caseBattery", "Case battery", "100%"),
+                    info_row("caseFirmware", "Case firmware", "01.58"),
+                ],
+            ),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 fn populate(ui: &AppWindow) {
@@ -535,7 +624,7 @@ fn populate(ui: &AppWindow) {
     // Windows, so the Connections aside renders its system-settings links and the
     // section pages are captured with the aside the real window shows.
     state.set_system_settings_available(true);
-    state.set_panels(panels(Page::Controls));
+    state.set_panels(panels(Page::Controls, false));
 }
 
 fn configure(ui: &AppWindow, capture: &Capture) {
@@ -564,6 +653,17 @@ fn configure(ui: &AppWindow, capture: &Capture) {
     if capture.a3954 {
         state.set_device_name("soundcore Liberty 4 Pro · Demo".into());
         state.set_device_code("A3954".into());
+        // The Case page's aside shows the measured case battery, and the sidebar
+        // lists the A3954's own six device pages.
+        state.set_case_battery("100%".into());
+        state.set_device_pages(ModelRc::new(VecModel::from(vec![
+            Page::Controls,
+            Page::Comfort,
+            Page::Power,
+            Page::Connections,
+            Page::Case,
+            Page::About,
+        ])));
     }
     // The Settings page's segmented control has to show the scale the capture
     // renders with, or a 150 % capture would claim the 100 % choice is selected.
@@ -576,7 +676,7 @@ fn configure(ui: &AppWindow, capture: &Capture) {
     } else {
         0
     });
-    state.set_panels(panels(capture.page));
+    state.set_panels(panels(capture.page, capture.a3954));
     state.set_diagnostic_step(capture.diagnostic_step);
     state.set_editing_layout(matches!(capture.dialog, Dialog::Layout));
     state.set_choosing_toggles(matches!(capture.dialog, Dialog::Toggles));
@@ -610,10 +710,20 @@ fn captures() -> Vec<Capture> {
                     "diagnostics-device",
                     false,
                 ),
-                (Page::SoundModes, DiagnosticStep::Device, "sound-mode", false),
+                (
+                    Page::SoundModes,
+                    DiagnosticStep::Device,
+                    "sound-mode",
+                    false,
+                ),
                 (Page::Comfort, DiagnosticStep::Device, "comfort", false),
                 (Page::Power, DiagnosticStep::Device, "power", false),
-                (Page::Connections, DiagnosticStep::Device, "connections", false),
+                (
+                    Page::Connections,
+                    DiagnosticStep::Device,
+                    "connections",
+                    false,
+                ),
                 (Page::About, DiagnosticStep::Device, "about", false),
                 (
                     Page::Effects,
@@ -638,6 +748,15 @@ fn captures() -> Vec<Capture> {
                     "a3954-overview",
                     true,
                 ),
+                // The Liberty 4 Pro's own Controls and Case pages: the twelve
+                // measured gestures and the case screen/language/status.
+                (
+                    Page::Controls,
+                    DiagnosticStep::Device,
+                    "a3954-controls",
+                    true,
+                ),
+                (Page::Case, DiagnosticStep::Device, "a3954-case", true),
             ] {
                 result.push(Capture {
                     width,
@@ -657,7 +776,12 @@ fn captures() -> Vec<Capture> {
         for scale in [1.0, 1.5] {
             for (page, step, label, a3954) in [
                 (Page::Overview, DiagnosticStep::Device, "overview", false),
-                (Page::SoundModes, DiagnosticStep::Device, "sound-mode", false),
+                (
+                    Page::SoundModes,
+                    DiagnosticStep::Device,
+                    "sound-mode",
+                    false,
+                ),
                 (Page::Settings, DiagnosticStep::Device, "settings", false),
                 (Page::Controls, DiagnosticStep::Device, "controls", false),
                 (Page::Devices, DiagnosticStep::Device, "devices", false),
@@ -679,6 +803,13 @@ fn captures() -> Vec<Capture> {
                     "a3954-scale",
                     true,
                 ),
+                (
+                    Page::Controls,
+                    DiagnosticStep::Device,
+                    "a3954-controls",
+                    true,
+                ),
+                (Page::Case, DiagnosticStep::Device, "a3954-case", true),
             ] {
                 result.push(Capture {
                     width: 1280.0,
