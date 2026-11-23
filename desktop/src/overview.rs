@@ -623,6 +623,7 @@ mod tests {
             sound_mode: None,
             equalizer: None,
             settings,
+            a3954: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,

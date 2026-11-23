@@ -1,0 +1,41 @@
+{
+  "model": "A3954",
+  "source": "real 03 87 bodies the Soundcore app wrote to a Liberty 4 Pro (firmware 04.29), from analysis/capabilities/a3954-eq-presets.json; body length 114, both channels carry the same ten bands and bytes 24-25 are FF FF",
+  "body_length": 114,
+  "frames": [
+    {
+      "id": 17,
+      "name": "Rock",
+      "bands": [
+        30,
+        20,
+        -10,
+        -10,
+        10,
+        30,
+        40,
+        50,
+        0,
+        -120
+      ],
+      "body_hex": "11 00 00 00 96 8C 6E 6E 82 96 A0 AA 78 00 96 8C 6E 6E 82 96 A0 AA 78 00 FF FF 00 FF FF FF FF FF FF FF FF FF 00 FF FF FF FF FF FF FF FF FF 00 00 00 00 00 00 FF FF FF FF FF FF FF FF FF 00 FF FF FF FF FF FF FF FF FF 00 96 00 8C 00 6E 00 6E 00 82 00 96 00 A0 00 AA 00 78 00 00 00 96 00 8C 00 6E 00 6E 00 82 00 96 00 A0 00 AA 00 78 00 00 00 00 00"
+    },
+    {
+      "id": 0,
+      "name": "Soundcore Signature",
+      "bands": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -120
+      ],
+      "body_hex": "00 00 00 00 78 78 78 78 78 78 78 78 78 00 78 78 78 78 78 78 78 78 78 00 FF FF 00 FF FF FF FF FF FF FF FF FF 00 FF FF FF FF FF FF FF FF FF 00 00 00 00 00 00 FF FF FF FF FF FF FF FF FF 00 FF FF FF FF FF FF FF FF FF 00 78 00 78 00 78 00 78 00 78 00 78 00 78 00 78 00 78 00 00 00 78 00 78 00 78 00 78 00 78 00 78 00 78 00 78 00 78 00 00 00 00 00"
+    }
+  ]
+}

@@ -1,8 +1,8 @@
 //! State parser tests against real and synthetic frames.
 
 use soundcore_models::{
-    A3954, AmbientSoundModeCycle, BatteryScale, DbLimit, HostDevice, Layout, NO_BUTTON_ACTION,
-    SoundMode, StateError, model_by_code, parse_state_body, parse_state_frame,
+    A3954, A3954_STATE_BODY_LEN, AmbientSoundModeCycle, BatteryScale, DbLimit, HostDevice, Layout,
+    NO_BUTTON_ACTION, SoundMode, StateError, model_by_code, parse_state_body, parse_state_frame,
 };
 use soundcore_protocol::{Command, Direction, encode};
 
@@ -201,11 +201,18 @@ fn the_a3062_sound_mode_command_is_the_measured_six_byte_body() {
 
 #[test]
 fn models_without_a_measured_sound_mode_have_no_command_body() {
-    for code in ["A3949", "A3947", "A3954", "A3035", "A3040"] {
+    for code in ["A3949", "A3947", "A3035", "A3040"] {
         let model = model_by_code(code).expect("the catalog lists the model");
         assert!(model.sound_mode.is_none(), "{code}");
         assert_eq!(model.sound_mode_body(SoundMode::Normal), None, "{code}");
     }
+
+    // The A3954's sound modes are the 1..=11 scale, not the A3062 three-mode
+    // control, so the A3062-shaped API stays empty; its scale body is covered
+    // in `a3954.rs`.
+    let a3954 = model_by_code("A3954").expect("A3954");
+    assert!(a3954.sound_mode.is_none());
+    assert_eq!(a3954.sound_mode_body(SoundMode::Normal), None);
 }
 
 #[test]
@@ -296,12 +303,13 @@ fn rejects_a_short_single_battery_body() {
 
 #[test]
 fn keeps_hundred_step_values_for_a3954() {
-    let body = synthetic_body(0, 1, 100, 75, [0, 1], *b"01.02", *b"03.04", [0; 16]);
+    let body = a3954_body(0, 1, 100, 75, [0, 1]);
     let state = parse_state_body(A3954, &body).expect("parse");
     let battery = state.battery.as_ref().expect("A3954 is a TWS layout");
     assert_eq!(battery.scale, BatteryScale::Hundred);
     assert_eq!((battery.left, battery.right), (100, 75));
     assert!(battery.right_charging);
+    assert!(state.a3954.is_some(), "the A3954 block parses");
 }
 
 #[test]
@@ -411,5 +419,24 @@ fn single_battery_body(battery: u8) -> Vec<u8> {
     }
     .byte();
     body[83] = DbLimit::MIN;
+    body
+}
+
+/// A minimal synthetic A3954 body that parses: the shared TWS prefix plus the
+/// enum values the A3954 parser validates. Every other byte stays zero, which
+/// the parser accepts as flags off, absent/zero bands and default modes.
+fn a3954_body(host: u8, tws: u8, left: u8, right: u8, charging: [u8; 2]) -> Vec<u8> {
+    let mut body = vec![0u8; A3954_STATE_BODY_LEN];
+    body[0] = host;
+    body[1] = tws;
+    body[2] = left;
+    body[3] = right;
+    body[4] = charging[0];
+    body[5] = charging[1];
+    // normal mode, manual airplane mode, 10-minute auto off, 75 dB limit
+    body[125] = 2;
+    body[126] = 6;
+    body[144] = 0;
+    body[146] = 75;
     body
 }

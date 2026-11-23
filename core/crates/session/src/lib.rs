@@ -12,7 +12,9 @@
 //! - write the measured settings frames (double press, ambient cycle, power,
 //!   prompts and effects) for models that have a settings block;
 //! - write the measured `03 87` equalizer preset and custom frames for models
-//!   that have one.
+//!   that have one;
+//! - write the measured A3954 scale, equalizer and setting frames for the
+//!   Liberty 4 Pro, whose bodies differ from the A3062 ones.
 //!
 //! Nothing here knows about Windows, sockets, threads or timers.
 //!
@@ -33,6 +35,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use soundcore_models::{
+    A3954_EQUALIZER_COMMAND_BODY_LEN, A3954EqualizerState, A3954SettingCommand, A3954SoundMode,
     DUAL_CONNECTIONS_LIST, DeviceModel, DeviceState, DualConnectionDevice, DualConnectionsError,
     DualConnectionsList, EQUALIZER_COMMAND_BODY_LEN, EqualizerPreset, EqualizerState,
     SettingCommand, SoundMode, StateError, VISIBLE_EQ_BANDS, dual_connections_connect_frame,
@@ -496,6 +499,123 @@ impl<T: Transport> DeviceSession<T> {
         let body = body.ok_or(SessionError::UnsupportedEqualizer)?;
         self.transport
             .write_all(&encode(Direction::Outbound, Command::EQUALIZER, &body))?;
+        Ok(())
+    }
+
+    /// Write the A3954 `06 81` sound-mode frame and return once every byte of it
+    /// is written.
+    ///
+    /// The body is the measured `[mode, position, airplane, wind, 0xFF]`; see
+    /// [`A3954SoundMode::command_body`]. This is the Liberty 4 Pro's 1..=11
+    /// scale write, not the A3062 three-mode [`Self::set_sound_mode`].
+    ///
+    /// This method never reads. The device acknowledges with an empty inbound
+    /// `06 81` frame and may also push notifications, but neither is a state
+    /// response: call [`Self::poll_state`] afterwards to read the new scale, and
+    /// it will skip those frames.
+    ///
+    /// Fails with [`SessionError::UnsupportedSoundMode`] when the model has no
+    /// measured A3954 state blocks (every model but the A3954), and writes
+    /// nothing in that case.
+    pub fn set_a3954_sound_mode(&mut self, sound_mode: A3954SoundMode) -> Result<(), SessionError> {
+        let body = self
+            .model
+            .a3954_sound_mode_body(sound_mode)
+            .ok_or(SessionError::UnsupportedSoundMode)?;
+        self.transport.write_all(&encode(
+            Direction::Outbound,
+            Command::ACK_AMBIENT_SOUND_MODE,
+            &body,
+        ))?;
+        Ok(())
+    }
+
+    /// Write one A3954 settings frame and return once every byte of it is
+    /// written.
+    ///
+    /// The exact command and body come from [`A3954SettingCommand`], so each
+    /// call writes exactly one frame. This is the Liberty 4 Pro's settings
+    /// block ([`Self::set_setting`] writes the A3062 one).
+    ///
+    /// This method never reads. The device acknowledges with an empty inbound
+    /// frame of the same command and may push a notification (LDAC is confirmed
+    /// by a separate `01 7F` notification); none of those is a state response.
+    /// Call [`Self::poll_state`] afterwards to read the new value, and it will
+    /// skip them.
+    ///
+    /// Fails with [`SessionError::UnsupportedSetting`] when the model has no
+    /// measured A3954 state blocks, and writes nothing in that case.
+    pub fn set_a3954_setting(&mut self, setting: A3954SettingCommand) -> Result<(), SessionError> {
+        let frame = self
+            .model
+            .a3954_setting_frame(setting)
+            .ok_or(SessionError::UnsupportedSetting)?;
+        self.transport.write_all(&frame)?;
+        Ok(())
+    }
+
+    /// Write the A3954 `03 87` equalizer preset frame exactly once and return
+    /// once every byte of it is written.
+    ///
+    /// The 114-byte body puts `preset`'s id and ten-band curve on both channels
+    /// and keeps the HearID fields of `current`; see
+    /// [`DeviceModel::a3954_equalizer_preset_body`](soundcore_models::DeviceModel::a3954_equalizer_preset_body).
+    ///
+    /// This method never reads. The device acknowledges with an empty inbound
+    /// `03 87` frame and may push notifications; call [`Self::poll_state`]
+    /// afterwards to read the preset and bands the device now reports, and it
+    /// will skip those frames.
+    ///
+    /// Fails with [`SessionError::UnsupportedEqualizer`] when the model has no
+    /// measured A3954 state blocks, and writes nothing in that case.
+    pub fn set_a3954_equalizer_preset(
+        &mut self,
+        current: &A3954EqualizerState,
+        preset: &EqualizerPreset,
+    ) -> Result<(), SessionError> {
+        let body = self
+            .model
+            .a3954_equalizer_preset_body(current, preset)
+            .ok_or(SessionError::UnsupportedEqualizer)?;
+        self.write_a3954_equalizer_body(&body)
+    }
+
+    /// Write the A3954 `03 87` custom equalizer frame exactly once and return
+    /// once every byte of it is written.
+    ///
+    /// `visible_bands` are the eight bands the Equalizer page shows in raw dB×10
+    /// units, clamped to the measured `-120..=134` range; both channels receive
+    /// the same curve and the two invisible bands are fixed at
+    /// [`A3954_FIXED_EQ_BANDS`](soundcore_models::A3954_FIXED_EQ_BANDS). The
+    /// body keeps the HearID fields of `current`; see
+    /// [`DeviceModel::a3954_custom_equalizer_body`](soundcore_models::DeviceModel::a3954_custom_equalizer_body).
+    ///
+    /// This method never reads. The device acknowledges with an empty inbound
+    /// `03 87` frame and may push notifications; call [`Self::poll_state`]
+    /// afterwards to read the preset id and bands the device now reports, and it
+    /// will skip those frames.
+    ///
+    /// Fails with [`SessionError::UnsupportedEqualizer`] when the model has no
+    /// measured A3954 state blocks, and writes nothing in that case.
+    pub fn set_a3954_custom_equalizer(
+        &mut self,
+        current: &A3954EqualizerState,
+        visible_bands: [i16; VISIBLE_EQ_BANDS],
+    ) -> Result<(), SessionError> {
+        let body = self
+            .model
+            .a3954_custom_equalizer_body(current, visible_bands)
+            .ok_or(SessionError::UnsupportedEqualizer)?;
+        self.write_a3954_equalizer_body(&body)
+    }
+
+    /// Encodes and writes one measured 114-byte A3954 `03 87` body.
+    fn write_a3954_equalizer_body(
+        &mut self,
+        body: &[u8; A3954_EQUALIZER_COMMAND_BODY_LEN],
+    ) -> Result<(), SessionError> {
+        self.transport
+            .write_all(&encode(Direction::Outbound, Command::EQUALIZER, body))?;
         Ok(())
     }
 

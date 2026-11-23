@@ -8479,6 +8479,7 @@ mod tests {
             sound_mode: None,
             equalizer: None,
             settings: None,
+            a3954: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,
@@ -8501,6 +8502,7 @@ mod tests {
             sound_mode: None,
             equalizer: None,
             settings: None,
+            a3954: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,
