@@ -188,6 +188,9 @@ export component Button inherits Rectangle {
     opacity: enabled ? 1 : 0.45;
     accessible-role: button;
     accessible-label: text;
+    // Accessibility back ends only expose a disabled state when it is bound, and
+    // only expose a checked state on an item marked checkable.
+    accessible-enabled: enabled;
     accessible-action-default => { if enabled { clicked(); } }
     forward-focus: focus;
 
@@ -311,6 +314,8 @@ export component Chip inherits Rectangle {
     opacity: enabled ? 1 : 0.55;
     accessible-role: button;
     accessible-label: text;
+    accessible-enabled: enabled;
+    accessible-checkable: true;
     accessible-checked: selected;
     accessible-action-default => { if enabled { clicked(); } }
     HorizontalLayout {
@@ -357,6 +362,8 @@ export component Toggle inherits Rectangle {
     opacity: enabled ? 1 : 0.45;
     accessible-role: switch;
     accessible-label: label;
+    accessible-enabled: enabled;
+    accessible-checkable: true;
     accessible-checked: checked;
     accessible-action-default => { if enabled { toggled(!checked); } }
     Rectangle {
@@ -558,6 +565,7 @@ export component CheckRow inherits Rectangle {
     min-height: 32px;
     accessible-role: checkbox;
     accessible-label: text;
+    accessible-checkable: true;
     accessible-checked: checked;
     accessible-action-default => { toggled(!checked); }
     HorizontalLayout {

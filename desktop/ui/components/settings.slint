@@ -77,12 +77,22 @@ export component RangeSlider inherits Rectangle {
     opacity: enabled ? 1 : 0.45;
     accessible-role: slider;
     accessible-label: label;
+    accessible-enabled: enabled;
     accessible-value: shown;
     accessible-value-minimum: minimum;
     accessible-value-maximum: maximum;
     accessible-value-step: step;
     accessible-action-increment => { send(min(maximum, shown + step)); }
     accessible-action-decrement => { send(max(minimum, shown - step)); }
+    // A range value is presented as settable, so setting it has to reach the same
+    // write as a drag; the text arrives as UIA's string value.
+    accessible-action-set-value(text) => {
+        if text.is-float() {
+            let wanted = round(text.to-float());
+            let snapped = minimum + round((wanted - minimum) / max(1, step)) * step;
+            send(max(minimum, min(maximum, snapped)));
+        }
+    }
     forward-focus: keys;
 
     function send(new-value: int) {
@@ -200,6 +210,8 @@ export component Segmented inherits Rectangle {
             drop-shadow-color: #30283b18;
             accessible-role: button;
             accessible-label: option;
+            accessible-enabled: root.enabled;
+            accessible-checkable: true;
             accessible-checked: i == root.index;
             accessible-action-default => { root.chosen(i); }
             HorizontalLayout {
@@ -392,6 +404,10 @@ export component SettingRowView inherits Rectangle {
                     font-weight: 600;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
+                    // The three row actions stay whole; a long remembered-device
+                    // name must elide instead of pushing them out of the panel.
+                    min-width: 0px;
+                    overflow: elide;
                 }
                 Button {
                     text: @tr("Connect");

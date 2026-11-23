@@ -30,6 +30,7 @@ component ModeTile inherits Rectangle {
     background: selected ? Theme.primary : touch.has-hover ? Theme.high : Theme.container;
     accessible-role: button;
     accessible-label: mode.label;
+    accessible-checkable: true;
     accessible-checked: selected;
     accessible-action-default => { Actions.set-option("ambientSoundMode", index); }
     Icon {

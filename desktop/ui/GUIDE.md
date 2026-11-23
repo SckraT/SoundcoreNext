@@ -162,6 +162,9 @@ Real-device acceptance still requires a paired supported device:
 - [ ] Tray and close-to-tray choices survive restart; a missing or malformed
       preferences document safely falls back to defaults.
 - [ ] Keyboard-only navigation, accessible names and 125/150% Windows scaling.
+- [ ] Accessibility states: disabled actions report disabled and switches,
+      check rows and selected options report their checked state in the
+      accessibility tree (a visual check does not prove the bindings exist).
 - [ ] Diagnostics capture and ZIP redaction; no address or serial leaks.
 
 A software demo and unit tests do not complete the real-device items.

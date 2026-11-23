@@ -70,6 +70,13 @@ file names and other literal identifiers, not for general body copy.
   `StatusKind.pending` while work is running and `success`/`error` only from
   the actual result. Progress and metrics must not imply data the core did not
   provide.
+- **Assistive state:** a shared control binds the state its visual already shows.
+  Bind `accessible-enabled` from `enabled`, and `accessible-checkable` before
+  `accessible-checked`/`accessible-value`. Slint exposes neither a disabled state
+  nor a checked state unless the corresponding accessibility property is bound,
+  so a disabled action or a switch would otherwise be announced as available and
+  stateless. A component review or a screenshot does not catch a missing binding:
+  check the state through the accessibility tree as well.
 
 Prefer one reusable component with an explicit `wide` or `compact` property over
 copying a control for another page. Layout variation belongs around the shared
@@ -83,7 +90,12 @@ content, not in duplicated action or state logic.
 - Wide pages may place large panels in two columns and keep a supporting aside
   aligned to the top rather than stretching it to the main column's height.
   Narrow pages use one column; larger action groups stack vertically. The outer
-  page `ScrollArea` keeps every action reachable.
+  page `ScrollArea` keeps every action reachable. Every two-column page decides
+  on the *scaled* usable width (the same `px * Theme.content-scale` rule as the
+  Overview), so raising the content scale stacks the aside instead of squeezing
+  the main column narrower than its rows. A row's label shrinks and elides
+  before its actions do: a long device or setting name must never push a button
+  out of its panel.
 - On Windows, quick settings occupy a separate panel below the device hero (and
   the one-earbud notice when present), not the sage device card. Their grid uses
   the compact control height, left-aligned rows and cell widths clamped to

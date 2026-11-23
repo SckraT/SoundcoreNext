@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 #[derive(Clone)]
 struct Capture {
@@ -63,6 +63,161 @@ fn toggle(id: &str, label: &str, on: bool) -> QuickToggle {
         reason: "".into(),
     }
 }
+
+// A representative settings row of each kind, so the section pages render the
+// same content their controller fills for the A3062 capture.
+fn setting_row(id: &str, kind: RowKind, label: &str) -> SettingRow {
+    SettingRow {
+        id: id.into(),
+        kind,
+        label: label.into(),
+        enabled: true,
+        reason: "".into(),
+        checked: false,
+        options: ModelRc::default(),
+        index: -1,
+        minimum: 0,
+        maximum: 0,
+        step: 0,
+        value: 0,
+        text: "".into(),
+    }
+}
+
+fn toggle_row(id: &str, label: &str, checked: bool) -> SettingRow {
+    SettingRow { checked, ..setting_row(id, RowKind::Toggle, label) }
+}
+
+fn select_row(id: &str, label: &str, options: Vec<&str>, index: i32) -> SettingRow {
+    SettingRow {
+        options: ModelRc::new(VecModel::from(
+            options
+                .into_iter()
+                .map(SharedString::from)
+                .collect::<Vec<_>>(),
+        )),
+        index,
+        ..setting_row(id, RowKind::Select, label)
+    }
+}
+
+fn info_row(id: &str, label: &str, text: &str) -> SettingRow {
+    SettingRow { text: text.into(), ..setting_row(id, RowKind::Info, label) }
+}
+
+fn panel(kind: PanelKind, rows: Vec<SettingRow>) -> SettingsPanel {
+    SettingsPanel {
+        kind,
+        rows: ModelRc::new(VecModel::from(rows)),
+    }
+}
+
+// The panels the controller fills for each section page of a connected A3062.
+fn panels(page: Page) -> ModelRc<SettingsPanel> {
+    let panels = match page {
+        Page::Controls => vec![
+            panel(
+                PanelKind::Presses,
+                vec![
+                    info_row("singlePress", "Single press", "Ambient sound mode"),
+                    select_row(
+                        "doublePress",
+                        "Double press",
+                        vec!["None", "Ambient sound mode", "Voice assistant"],
+                        0,
+                    ),
+                ],
+            ),
+            panel(
+                PanelKind::Cycle,
+                vec![
+                    toggle_row("noiseCancelingModeInCycle", "Noise canceling", true),
+                    toggle_row("transparencyModeInCycle", "Transparency", true),
+                    toggle_row("normalModeInCycle", "Normal", false),
+                ],
+            ),
+        ],
+        Page::Comfort => vec![
+            panel(
+                PanelKind::Plain,
+                vec![toggle_row("sideTone", "Side tone", true)],
+            ),
+            panel(
+                PanelKind::Volume,
+                vec![
+                    toggle_row("limitHighVolume", "Limit high volume", false),
+                    SettingRow {
+                        minimum: 75,
+                        maximum: 100,
+                        step: 5,
+                        value: 90,
+                        text: "90".into(),
+                        ..setting_row("limitHighVolumeDbLimit", RowKind::Range, "dB limit")
+                    },
+                    select_row(
+                        "limitHighVolumeRefreshRate",
+                        "Refresh rate",
+                        vec!["Real time", "Every 5 minutes"],
+                        0,
+                    ),
+                ],
+            ),
+        ],
+        Page::Power => vec![panel(
+            PanelKind::Plain,
+            vec![
+                select_row(
+                    "autoPowerOff",
+                    "Auto power off",
+                    vec!["5 minutes", "30 minutes", "60 minutes", "Never"],
+                    2,
+                ),
+                toggle_row("lowBatteryPrompt", "Low battery prompt", true),
+                toggle_row("voicePrompt", "Voice prompt", true),
+            ],
+        )],
+        Page::Connections => vec![
+            panel(
+                PanelKind::Plain,
+                vec![toggle_row("dualConnections", "Dual connections", true)],
+            ),
+            panel(
+                PanelKind::DualDevices,
+                vec![SettingRow {
+                    options: ModelRc::new(VecModel::from(vec![
+                        SharedString::from("Demo desktop — connected"),
+                        SharedString::from("Demo phone"),
+                    ])),
+                    ..setting_row("dualDevices", RowKind::List, "Paired devices")
+                }],
+            ),
+        ],
+        Page::About => vec![panel(
+            PanelKind::Info,
+            vec![
+                info_row("charging", "Charging", "Not charging"),
+                info_row("battery", "Battery", "20 %"),
+                info_row("firmware", "Firmware", "04.39"),
+            ],
+        )],
+        Page::Effects => vec![panel(
+            PanelKind::Plain,
+            vec![
+                toggle_row("ldac", "LDAC", true),
+                toggle_row("dolbyAudio", "Dolby audio", false),
+            ],
+        )],
+        _ => vec![panel(
+            PanelKind::Plain,
+            vec![
+                toggle_row("ldac", "LDAC", true),
+                toggle_row("dualConnections", "Dual connections", true),
+            ],
+        )],
+    };
+    ModelRc::new(VecModel::from(panels))
+}
+
 
 fn populate(ui: &AppWindow) {
     let state = ui.global::<AppState>();
@@ -250,6 +405,38 @@ fn populate(ui: &AppWindow) {
     state.set_diagnostic_archive_size("123 KB".into());
     state.set_diagnostic_file_name("openscl4-diagnostics-A3062.zip".into());
     state.set_diagnostic_note("Описание проблемы без личных данных".into());
+
+    // The Settings page's own choices and the section-page asides, so every
+    // page in the visual matrix renders populated content.
+    state.set_language_names(ModelRc::new(VecModel::from(vec![
+        SharedString::from("Follow system"),
+        SharedString::from("English"),
+        SharedString::from("Русский"),
+    ])));
+    state.set_app_language(1);
+    state.set_app_version("2.0.0".into());
+    state.set_app_theme(1);
+    state.set_app_content_scale(0);
+    state.set_app_device_color(0);
+    state.set_app_mode_view(0);
+    state.set_app_mode_view_applies(false);
+    state.set_one_earbud_badge_applies(false);
+    state.set_show_one_earbud_badge(true);
+    state.set_app_tray(true);
+    state.set_app_tray_available(true);
+    state.set_app_close_to_tray(true);
+    state.set_tray_battery(true);
+    state.set_tray_modes(true);
+    state.set_tray_presets(false);
+    state.set_tray_ldac(true);
+    state.set_has_ldac(true);
+    state.set_has_spatial(true);
+    state.set_has_sides(false);
+    state.set_controls_side(ControlSide::Left);
+    // Windows, so the Connections aside renders its system-settings links and the
+    // section pages are captured with the aside the real window shows.
+    state.set_system_settings_available(true);
+    state.set_panels(panels(Page::Controls));
 }
 
 fn configure(ui: &AppWindow, capture: &Capture) {
@@ -259,6 +446,7 @@ fn configure(ui: &AppWindow, capture: &Capture) {
     ui.global::<Theme>().set_dark(capture.dark);
     let state = ui.global::<AppState>();
     state.set_page(capture.page);
+    state.set_panels(panels(capture.page));
     state.set_diagnostic_step(capture.diagnostic_step);
     state.set_editing_layout(matches!(capture.dialog, Dialog::Layout));
     state.set_choosing_toggles(matches!(capture.dialog, Dialog::Toggles));
@@ -290,6 +478,12 @@ fn captures() -> Vec<Capture> {
                     "diagnostics-device",
                 ),
                 (Page::SoundModes, DiagnosticStep::Device, "sound-mode"),
+                (Page::Comfort, DiagnosticStep::Device, "comfort"),
+                (Page::Power, DiagnosticStep::Device, "power"),
+                (Page::Connections, DiagnosticStep::Device, "connections"),
+                (Page::About, DiagnosticStep::Device, "about"),
+                (Page::Effects, DiagnosticStep::Device, "sound-effects"),
+                (Page::Settings, DiagnosticStep::Device, "settings"),
             ] {
                 result.push(Capture {
                     width,
@@ -309,6 +503,9 @@ fn captures() -> Vec<Capture> {
             for (page, step, label) in [
                 (Page::Overview, DiagnosticStep::Device, "overview"),
                 (Page::SoundModes, DiagnosticStep::Device, "sound-mode"),
+                (Page::Settings, DiagnosticStep::Device, "settings"),
+                (Page::Controls, DiagnosticStep::Device, "controls"),
+                (Page::Devices, DiagnosticStep::Device, "devices"),
                 (
                     Page::Diagnostics,
                     DiagnosticStep::Review,

@@ -6,3 +6,7 @@ local.properties
 /android/.gradle/
 /android/build/
 /desktop/build/
+# Ticket 04 demo-acceptance automation output (generated captures and state)
+.scratch/wc04-uia/shots/
+.scratch/wc04-uia/state/
+.scratch/ui-validation/

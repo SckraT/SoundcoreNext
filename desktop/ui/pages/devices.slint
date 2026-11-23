@@ -57,7 +57,9 @@ component DeviceCardView inherits Rectangle {
             wrap: word-wrap;
         }
         Text {
-            text: root.live ? @tr("Connected") : root.connecting ? @tr("Connecting…")
+            // A simulated card stays recognisable as one while it is connected too.
+            text: root.live ? (root.card.demo ? @tr("Connected · Demo device") : @tr("Connected"))
+                : root.connecting ? @tr("Connecting…")
                 : root.card.demo ? @tr("Demo device · Not connected") : @tr("Saved device · Not connected");
             color: root.live ? Theme.on-sage : Theme.muted;
             font-size: Theme.font-caption;
