@@ -12,7 +12,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use slint::{ModelRc, VecModel};
-use soundcore_models::{A3062Settings, DeviceState};
+use soundcore_models::DeviceState;
 
 use crate::{BlockKind, LayoutBlock, OverviewBlockData, OverviewRow, Page, QuickToggle};
 
@@ -250,16 +250,30 @@ impl OverviewLayout {
 
 /// Whether the current device state has real data and a real destination page
 /// for a block. Quick presets and case data are not implemented by this core.
+///
+/// The A3062 keeps its sound mode in `sound_mode`, its equalizer in
+/// `equalizer` and its remaining settings in `settings`; the A3954 keeps all
+/// three in its own `a3954` block, so both models are checked before a block is
+/// offered.
 pub fn supported(block: OverviewBlock, device: &DeviceState) -> bool {
     match block {
-        OverviewBlock::SoundMode => device.sound_mode.is_some(),
-        OverviewBlock::Equalizer => device.equalizer.is_some(),
+        // The A3954's sound-mode block is optional: an unmeasured value (the
+        // airplane-mode slider byte) hides the scale block instead of the whole
+        // page showing a control the device cannot drive.
+        OverviewBlock::SoundMode => {
+            device.sound_mode.is_some()
+                || device
+                    .a3954
+                    .as_ref()
+                    .is_some_and(|a3954| a3954.sound_mode.is_some())
+        }
+        OverviewBlock::Equalizer => device.equalizer.is_some() || device.a3954.is_some(),
         OverviewBlock::QuickPresets | OverviewBlock::Case => false,
         OverviewBlock::Controls
         | OverviewBlock::Comfort
         | OverviewBlock::Spatial
         | OverviewBlock::Power
-        | OverviewBlock::Connections => device.settings.is_some(),
+        | OverviewBlock::Connections => device.settings.is_some() || device.a3954.is_some(),
     }
 }
 
@@ -269,6 +283,36 @@ fn summary(block: OverviewBlock, device: &DeviceState) -> OverviewBlockData {
         page: block.page(),
         ..OverviewBlockData::default()
     };
+    // The A3954's own block carries every setting its shortcut summarizes.
+    if let Some(a3954) = &device.a3954 {
+        match block {
+            OverviewBlock::Controls => data.has_mode_cycle = true,
+            OverviewBlock::Comfort => {
+                // The three comfort switches the page exposes.
+                data.total = 3;
+                data.number = i32::from(a3954.wearing_detection)
+                    + i32::from(a3954.easy_chat.enabled)
+                    + i32::from(a3954.sound_leak_compensation);
+            }
+            OverviewBlock::Spatial => {
+                // LDAC is the compact state label, as on the A3062; the page
+                // exposes LDAC, spatial audio and the sound-leak switch.
+                data.text = "LDAC".into();
+                data.on = a3954.ldac;
+            }
+            OverviewBlock::Power => {
+                data.text = if a3954.auto_power_off.enabled {
+                    format!("{} minutes", a3954.auto_power_off.duration.minutes())
+                } else {
+                    "Disabled".to_owned()
+                }
+                .into();
+            }
+            OverviewBlock::Connections => data.on = a3954.dual_connections,
+            _ => {}
+        }
+        return data;
+    }
     let Some(settings) = device.settings else {
         return data;
     };
@@ -351,6 +395,7 @@ pub fn layout_blocks(layout: &OverviewLayout, device: &DeviceState) -> Vec<Layou
         .collect()
 }
 
+/// The quick toggles of the A3062's settings block, in the chooser's order.
 pub const TOGGLE_IDS: [&str; 10] = [
     "ldac",
     "dolbyAudio",
@@ -364,9 +409,28 @@ pub const TOGGLE_IDS: [&str; 10] = [
     "normalModeInCycle",
 ];
 
+/// The quick toggles the A3954's own settings block can show: the ids that also
+/// name an A3954 setting, plus its comfort and spatial switches. The A3954 has
+/// no Dolby audio, side tone or voice prompt.
+pub const A3954_TOGGLE_IDS: [&str; 11] = [
+    "ldac",
+    "spatialAudio",
+    "dualConnections",
+    "wearingDetection",
+    "easyChat",
+    "soundLeakCompensation",
+    "limitHighVolume",
+    "lowBatteryPrompt",
+    "noiseCancelingModeInCycle",
+    "transparencyModeInCycle",
+    "normalModeInCycle",
+];
+
 pub fn available_toggle_ids(device: &DeviceState) -> Vec<&'static str> {
     if device.settings.is_some() {
         TOGGLE_IDS.to_vec()
+    } else if device.a3954.is_some() {
+        A3954_TOGGLE_IDS.to_vec()
     } else {
         Vec::new()
     }
@@ -387,28 +451,57 @@ pub fn quick_toggle_ids(stored: Option<&[String]>, available: &[&str]) -> Vec<St
     ids
 }
 
-fn toggle(device: &DeviceState, settings: &A3062Settings, id: &str) -> Option<QuickToggle> {
-    let (label, on) = match id {
-        "ldac" => ("LDAC", settings.ldac),
-        "dolbyAudio" => ("Dolby audio", settings.dolby_audio),
-        "dualConnections" => ("Dual connections", settings.dual_connections),
-        "sideTone" => ("Side tone", settings.side_tone),
-        "limitHighVolume" => ("Limit high volume", settings.limit_high_volume.enabled),
-        "lowBatteryPrompt" => ("Low battery prompt", settings.low_battery_prompt),
-        "voicePrompt" => ("Voice prompt", settings.voice_prompt),
-        "noiseCancelingModeInCycle" => (
-            "Noise canceling in mode cycle",
-            settings.ambient_sound_mode_cycle.noise_canceling,
-        ),
-        "transparencyModeInCycle" => (
-            "Transparency in mode cycle",
-            settings.ambient_sound_mode_cycle.transparency,
-        ),
-        "normalModeInCycle" => (
-            "Normal in mode cycle",
-            settings.ambient_sound_mode_cycle.normal,
-        ),
-        _ => return None,
+/// One visible quick toggle, from the A3062 settings block or the A3954 one;
+/// `None` for an id the connected model does not have.
+fn toggle(device: &DeviceState, id: &str) -> Option<QuickToggle> {
+    let (label, on) = if let Some(settings) = device.settings.as_ref() {
+        match id {
+            "ldac" => ("LDAC", settings.ldac),
+            "dolbyAudio" => ("Dolby audio", settings.dolby_audio),
+            "dualConnections" => ("Dual connections", settings.dual_connections),
+            "sideTone" => ("Side tone", settings.side_tone),
+            "limitHighVolume" => ("Limit high volume", settings.limit_high_volume.enabled),
+            "lowBatteryPrompt" => ("Low battery prompt", settings.low_battery_prompt),
+            "voicePrompt" => ("Voice prompt", settings.voice_prompt),
+            "noiseCancelingModeInCycle" => (
+                "Noise canceling in mode cycle",
+                settings.ambient_sound_mode_cycle.noise_canceling,
+            ),
+            "transparencyModeInCycle" => (
+                "Transparency in mode cycle",
+                settings.ambient_sound_mode_cycle.transparency,
+            ),
+            "normalModeInCycle" => (
+                "Normal in mode cycle",
+                settings.ambient_sound_mode_cycle.normal,
+            ),
+            _ => return None,
+        }
+    } else {
+        let a3954 = device.a3954.as_ref()?;
+        match id {
+            "ldac" => ("LDAC", a3954.ldac),
+            "spatialAudio" => ("Spatial audio", a3954.spatial_audio.enabled),
+            "dualConnections" => ("Dual connections", a3954.dual_connections),
+            "wearingDetection" => ("Wearing detection", a3954.wearing_detection),
+            "easyChat" => ("Easy chat", a3954.easy_chat.enabled),
+            "soundLeakCompensation" => ("Sound leak compensation", a3954.sound_leak_compensation),
+            "limitHighVolume" => ("Limit high volume", a3954.limit_high_volume.enabled),
+            "lowBatteryPrompt" => ("Low battery prompt", a3954.low_battery_prompt),
+            "noiseCancelingModeInCycle" => (
+                "Noise canceling in mode cycle",
+                a3954.ambient_sound_mode_cycle.noise_canceling,
+            ),
+            "transparencyModeInCycle" => (
+                "Transparency in mode cycle",
+                a3954.ambient_sound_mode_cycle.transparency,
+            ),
+            "normalModeInCycle" => (
+                "Normal in mode cycle",
+                a3954.ambient_sound_mode_cycle.normal,
+            ),
+            _ => return None,
+        }
     };
     let one_earbud = device.battery.is_some() && !device.tws_connected;
     let unavailable = one_earbud && id == "ldac";
@@ -431,19 +524,19 @@ pub fn quick_toggles(
     device: &DeviceState,
     stored: Option<&[String]>,
 ) -> (Vec<QuickToggle>, Vec<QuickToggle>) {
-    let Some(settings) = device.settings else {
-        return (Vec::new(), Vec::new());
-    };
     let available = available_toggle_ids(device);
+    if available.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
     let selected = quick_toggle_ids(stored, &available);
     let shown = selected
         .iter()
-        .filter_map(|id| toggle(device, &settings, id))
+        .filter_map(|id| toggle(device, id))
         .collect();
     let all = available
         .iter()
         .filter_map(|id| {
-            toggle(device, &settings, id).map(|toggle| QuickToggle {
+            toggle(device, id).map(|toggle| QuickToggle {
                 on: selected.iter().any(|selected| selected == id),
                 ..toggle
             })
@@ -513,7 +606,7 @@ pub fn save_preferences(path: &Path, preferences: &OverviewPreferences) -> io::R
 mod tests {
     use super::*;
     use soundcore_models::{
-        AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, DbLimit,
+        A3062Settings, AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, DbLimit,
         DecibelReadingRefreshRate, FirmwareVersions, HostDevice, LimitHighVolume,
     };
 
@@ -623,6 +716,7 @@ mod tests {
             sound_mode: None,
             equalizer: None,
             settings,
+            a3954: None,
             firmware: FirmwareVersions {
                 left: None,
                 right: None,

@@ -68,9 +68,37 @@ project, under GPL-3.0-or-later:
 - the A3949 equalizer block at state body 32..44, which is recorded as a
   deferred limitation (not implemented), from
   `lib/src/devices/soundcore/a3949/packets/inbound/state_update.rs` and
-  `lib/src/devices/soundcore/a3949/state.rs`.
+  `lib/src/devices/soundcore/a3949/state.rs`;
+- the A3954 (Liberty 4 Pro) `01 01` state offsets and blocks (the 165-byte body:
+  TWS batteries, case firmware/battery/serial, buttons, ambient-sound-mode
+  cycle, sound-mode scale block, case features, air pressure, low-battery
+  prompt, LDAC, dual connections, auto power off, limit high volume, spatial
+  audio, easy chat, sound leak, case language and wearing detection), the
+  sound-mode `06 81` `[mode, position, airplane, wind, 0xFF]` body layout, the
+  114-byte `03 87` equalizer preset/custom body layout (two ten-band channels
+  with the HearID block) and the measured settings command bodies (`01 FF`,
+  `0B 84`, `01 86`, `20 82`, `20 81`, `10 82`, `06 82`, `01 81`, `10 9A`,
+  `10 81`, `10 9D`), adapted from
+  `lib/src/devices/soundcore/a3954/state.rs`,
+  `lib/src/devices/soundcore/a3954/structures.rs`,
+  `lib/src/devices/soundcore/a3954/packets/outbound.rs`,
+  `lib/src/devices/soundcore/a3954/packets/inbound/state_update.rs`,
+  `lib/src/devices/soundcore/a3954/modules/` (sound modes, equalizer, spatial
+  audio, easy chat and the remaining settings handlers) and the A3954 device
+  setup in `lib/src/devices/soundcore/a3954.rs`;
+- the A3954 twenty-two-preset equalizer catalog (ids, English names and
+  ten-band curves), adapted from the shared
+  `common_settings_type_2()` table in
+  `lib/src/devices/soundcore/common/modules/equalizer.rs` (the table the
+  reference uses for the A3954) and its English labels from
+  `lib/i18n/en/openscq30-lib.ftl`;
+- the A3954 state and command fixtures under `core/data/a3954-*.json` are
+  derived from the app's own real capture of a Liberty 4 Pro (firmware 04.29,
+  case firmware 01.58) and the Soundcore app's own `03 87` writes, sanitized as
+  the other `core/data` fixtures are; the evidence, measurements and the
+  preserved/deferred fields are recorded in `.scratch/a3954-settings/`.
 
 The Rust implementations in `core/` are this project's own; the adapted data and
 its evidence are recorded in `.scratch/windows-eq-presets/`,
-`.scratch/windows-settings-import/` and `.scratch/windows-dual-tray/`, and in the
-commits that introduce them.
+`.scratch/windows-settings-import/`, `.scratch/windows-dual-tray/` and
+`.scratch/a3954-settings/`, and in the commits that introduce them.

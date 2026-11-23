@@ -19,6 +19,21 @@ export global LocalizedText {
         if id == "isCharging" { return @tr("Is charging"); }
         if id == "batteryLevel" { return @tr("Battery level"); }
         if id == "firmwareVersion" { return @tr("Firmware version"); }
+        if id == "windNoiseSuppression" { return @tr("Wind noise suppression"); }
+        if id == "wearingDetection" { return @tr("Wearing detection"); }
+        if id == "easyChat" { return @tr("Easy chat"); }
+        if id == "easyChatWaitTime" { return @tr("Easy chat wait time"); }
+        if id == "soundLeakCompensation" { return @tr("Sound leak compensation"); }
+        if id == "spatialAudio" { return @tr("Spatial audio"); }
+        if id == "spatialAudioMusicMode" { return @tr("Spatial audio music mode"); }
+        if id == "spatialAudioMode" { return @tr("Spatial audio mode"); }
+        if id == "buttonRemapping" { return @tr("Button remapping"); }
+        if id == "leftBattery" { return @tr("Left battery"); }
+        if id == "rightBattery" { return @tr("Right battery"); }
+        if id == "caseBattery" { return @tr("Case battery"); }
+        if id == "leftFirmware" { return @tr("Left firmware"); }
+        if id == "rightFirmware" { return @tr("Right firmware"); }
+        if id == "caseFirmware" { return @tr("Case firmware"); }
         return fallback;
     }
 
@@ -27,6 +42,17 @@ export global LocalizedText {
         if id == "isCharging" {
             return fallback == "Charging" ? @tr("Charging") : @tr("Not charging");
         }
+        if id == "buttonRemapping" {
+            return fallback == "Not available in this version" ? @tr("Not available in this version") : fallback;
+        }
+        return fallback;
+    }
+
+    // Why a row is disabled, when the controller supplies the device's reason.
+    public pure function setting-reason(id: string, fallback: string) -> string {
+        if (id == "spatialAudioMusicMode" || id == "spatialAudioMode") && fallback == "Turn on spatial audio first" {
+            return @tr("Turn on spatial audio first");
+        }
         return fallback;
     }
 
@@ -34,13 +60,23 @@ export global LocalizedText {
         if value == "None" { return @tr("None"); }
         if value == "Bass Up" { return @tr("Bass up"); }
         if value == "Disabled" { return @tr("Disabled"); }
+        if value == "5 seconds" { return @tr("5 seconds"); }
+        if value == "10 seconds" { return @tr("10 seconds"); }
+        if value == "15 seconds" { return @tr("15 seconds"); }
+        if value == "10 minutes" { return @tr("10 minutes"); }
+        if value == "20 minutes" { return @tr("20 minutes"); }
         if value == "30 minutes" { return @tr("30 minutes"); }
         if value == "60 minutes" { return @tr("60 minutes"); }
         if value == "90 minutes" { return @tr("90 minutes"); }
         if value == "120 minutes" { return @tr("120 minutes"); }
         if value == "Real time" { return @tr("Real time"); }
-        if value == "10 seconds" { return @tr("10 seconds"); }
         if value == "1 minute" { return @tr("1 minute"); }
+        if value == "Fixed" { return @tr("Fixed"); }
+        if value == "Head tracking" { return @tr("Head tracking"); }
+        if value == "Music" { return @tr("Music"); }
+        if value == "Podcast" { return @tr("Podcast"); }
+        if value == "Movie" { return @tr("Movie"); }
+        if value == "Gaming" { return @tr("Gaming"); }
         if value == "Unknown device" { return @tr("Unknown device"); }
         if value == "Noise canceling" { return @tr("Noise canceling"); }
         if value == "Transparency" { return @tr("Transparency"); }

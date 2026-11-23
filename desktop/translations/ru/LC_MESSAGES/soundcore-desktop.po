@@ -1398,3 +1398,86 @@ msgstr "Неизвестное устройство"
 
 msgid "Voice prompt"
 msgstr "Голосовые подсказки"
+
+# --- Liberty 4 Pro (A3954) settings and scale -------------------------------
+
+msgid "5 seconds"
+msgstr "5 секунд"
+
+msgid "15 seconds"
+msgstr "15 секунд"
+
+msgid "10 minutes"
+msgstr "10 минут"
+
+msgid "20 minutes"
+msgstr "20 минут"
+
+msgid "Button remapping"
+msgstr "Переназначение кнопок"
+
+msgid "Case battery"
+msgstr "Заряд кейса"
+
+msgid "Case firmware"
+msgstr "Прошивка кейса"
+
+msgid "Easy chat"
+msgstr "Лёгкий разговор"
+
+msgid "Easy chat wait time"
+msgstr "Задержка возврата после разговора"
+
+msgid "Fixed"
+msgstr "Фиксированный"
+
+msgid "Gaming"
+msgstr "Игры"
+
+msgid "Head tracking"
+msgstr "Отслеживание головы"
+
+msgid "Left battery"
+msgstr "Заряд левого наушника"
+
+msgid "Left firmware"
+msgstr "Прошивка левого наушника"
+
+msgid "Movie"
+msgstr "Кино"
+
+msgid "Music"
+msgstr "Музыка"
+
+msgid "Not available in this version"
+msgstr "Недоступно в этой версии"
+
+msgid "Podcast"
+msgstr "Подкаст"
+
+msgid "Right battery"
+msgstr "Заряд правого наушника"
+
+msgid "Right firmware"
+msgstr "Прошивка правого наушника"
+
+msgid "Sound leak compensation"
+msgstr "Компенсация утечки звука"
+
+msgid "Spatial audio"
+msgstr "Пространственный звук"
+
+msgid "Spatial audio mode"
+msgstr "Режим пространственного звука"
+
+msgid "Spatial audio music mode"
+msgstr "Режим пространственного звука для музыки"
+
+msgid "Wearing detection"
+msgstr "Обнаружение ношения"
+
+msgid "Wind noise suppression"
+msgstr "Подавление шума ветра"
+
+msgid "Turn on spatial audio first"
+msgstr "Сначала включите пространственный звук"

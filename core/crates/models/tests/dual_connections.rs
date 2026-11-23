@@ -406,9 +406,14 @@ fn every_write_frame_carries_its_address_bytes_unchanged_and_in_order() {
 }
 
 #[test]
-fn only_the_measured_a3062_has_dual_connections() {
-    assert!(model_by_code("A3062").expect("A3062").dual_connections);
-    for code in ["A3035", "A3040", "A3947", "A3949", "A3954"] {
+fn only_the_measured_a3062_and_a3954_have_dual_connections() {
+    for code in ["A3062", "A3954"] {
+        assert!(
+            model_by_code(code).expect("catalog model").dual_connections,
+            "{code} uses the measured dual-connections helpers"
+        );
+    }
+    for code in ["A3035", "A3040", "A3947", "A3949"] {
         let model = model_by_code(code).expect("catalog model");
         assert!(!model.dual_connections, "{code} must stay deferred");
     }

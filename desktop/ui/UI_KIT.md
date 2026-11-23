@@ -64,6 +64,10 @@ file names and other literal identifiers, not for general body copy.
 - **Toggles:** never hide a device failure by optimistically changing `checked`.
   The controller writes the setting, re-reads device state and only then updates
   the model. An unavailable toggle explains why in adjacent text.
+- **Mode rows:** the sound-mode page's rows under the mode control support a
+  select, a range and a toggle. The A3954 wind-noise suppression is such a
+  toggle and writes through the normal `set-toggle` path with a `01 01` re-poll;
+  it is never applied optimistically.
 - **Status and metrics:** `StatusIcon` and `MetricTile` are displays, not buttons.
   Metrics are borderless within their parent panel: use an accent-colored value,
   a muted `font-small` label and no second gray card background. Use
@@ -121,9 +125,24 @@ actually supports and produces `AppState.overview-rows`, `quick-toggles`,
 
 ### Capability filtering
 
-- Sound mode and equalizer require their corresponding `DeviceState` data.
-  Controls, Comfort, Sound and effects, Power, and Connections require the
-  settings state.
+- Sound mode and equalizer require their corresponding state: the A3062's
+  `sound_mode`/`equalizer` blocks or the Liberty 4 Pro's own `a3954` block.
+  Controls, Comfort, Sound and effects, Power, and Connections require a
+  settings surface: the A3062 `settings` block or the A3954 `a3954` block.
+- The A3954's ambient sound is one 1–11 scale, not three tiles: the Sound mode
+  page sets `mode-scale` and `scale-position` from the device and shows its
+  wind-noise suppression as a `ModeRow` toggle. The A3062 keeps the three tiles
+  and `mode-scale = false`.
+- The A3954 sound-mode block is optional. When the device reports a value this
+  slice has not measured for it (the real device reports an unmeasured slider
+  byte in airplane mode), `mode-scale` stays false, the mode rows are empty and
+  the Sound mode page and Overview block are hidden; the equalizer and the
+  device pages stay available instead of the connection failing. Do not invent
+  a scale position or send a `06 81` frame without a measured block.
+- A disabled row's device reason is English data from the controller and is
+  localized by the UI through `LocalizedText.setting-reason` when it is one the
+  kit knows (for example `Turn on spatial audio first`); unknown reasons pass
+  through unchanged.
 - Quick presets and case blocks stay unsupported until the core supplies real
   data and working behavior. Do not create decorative substitutes.
 - A model with no supported block keeps its device identity and batteries but
@@ -145,7 +164,11 @@ supported-only list while unsupported entries remain in stored order. Minimal,
 Standard and Full are presets, not separate layout implementations.
 
 Quick-toggle selection is per catalog model code and defaults to LDAC only when
-that model supports it. Changing the selection writes no device command;
+that model supports it. The A3062 offers its settings ids; the A3954 offers its
+own switch set (LDAC, spatial audio, wearing detection, easy chat, sound-leak
+compensation, limit high volume, low-battery prompt, dual connections and the
+mode-cycle bits), and stored ids the connected model does not have are filtered
+out. Changing the selection writes no device command;
 clicking a displayed chip still uses the normal `set-toggle` device workflow.
 Layout and selection persist in
 `%APPDATA%\OpenSCL4\overview-preferences.json`, separately from equalizer
@@ -175,8 +198,14 @@ English data at the protocol/controller boundary; the UI translates the ones it
 knows through `components/localized.slint` (`LocalizedText.setting-label`,
 `setting-text`, `option`, `mode-label`), keyed by the stable setting id or
 protocol value. Add a mapping there when a new row, option or mode label is
-introduced, and add the `@tr` strings to the locale documents. Do not translate
-protocol identifiers (`NoiseCanceling`, `ldac`, `dualDevices`) or product names.
+introduced, and add the `@tr` strings to the locale documents. This includes the
+A3954 rows (`windNoiseSuppression`, `wearingDetection`, `easyChat`,
+`easyChatWaitTime`, `soundLeakCompensation`, `spatialAudio`,
+`spatialAudioMusicMode`, `spatialAudioMode`, `buttonRemapping`, the About
+battery/firmware ids) and its option values (`5/10/15 seconds`,
+`10/20/30/60 minutes`, `Fixed`, `Head tracking`, `Music`, `Podcast`, `Movie`,
+`Gaming`). Do not translate protocol identifiers (`NoiseCanceling`, `ldac`,
+`dualDevices`) or product names.
 The language picker intentionally shows each language in its own language.
 
 ### Capture tool

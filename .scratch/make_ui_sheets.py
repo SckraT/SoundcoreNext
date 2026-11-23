@@ -33,6 +33,8 @@ groups = {
     "fields-dialogs-light": [p for stem, p in images.items() if stem.startswith(("add-device-dialog-", "save-profile-dialog-", "create-preset-dialog-"))],
     "diagnostics-device-light": [p for stem, p in images.items() if stem.startswith("diagnostics-device-") and ".light-" in stem],
     "sound-mode-light": [p for stem, p in images.items() if stem.startswith("sound-mode-") and ".light-" in stem],
+    "a3954-scale-light": [p for stem, p in images.items() if stem.startswith("a3954-scale-") and ".light-" in stem],
+    "a3954-overview-light": [p for stem, p in images.items() if stem.startswith("a3954-overview-") and ".light-" in stem],
     "dark-states": [p for stem, p in images.items() if ".dark-" in stem],
     "diagnostics-review-light": [p for stem, p in images.items() if stem.startswith("diagnostics-review-") and ".light-" in stem],
     "dialogs-light": [p for stem, p in images.items() if (stem.startswith("layout-dialog-") or stem.startswith("toggles-dialog-"))],

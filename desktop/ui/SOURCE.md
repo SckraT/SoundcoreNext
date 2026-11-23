@@ -144,3 +144,23 @@ reconnect. No hardware acceptance claim is implied by this source record.
   capture runner and Pillow contact-sheet tool for the Russian demo matrix. It
   does not change the UI; `desktop/translations/ru/...po` gained the strings the
   screens exposed as untranslated.
+- A3954 (Liberty 4 Pro) sound-mode scale and settings rows: the vendored
+  `components/modes.slint` already had the 1-to-11 `ModeScale`; its `ModeRow`
+  now also renders `RowKind.toggle` rows (a label, the localized description and
+  the shared `Toggle`), with `LocalizedText.setting-label` as the label fallback,
+  so the A3954's wind-noise suppression is a real row under the scale. The row
+  uses the vendored layout vocabulary (`Theme.space-*` spacing and cross-axis
+  centering) instead of manual child coordinates. No callback or existing A3062
+  tile/row behaviour changed. The A3954's own setting rows reuse the existing
+  `SettingsPanelView` and row kinds; only the labels and option values new to
+  the model were added to `components/localized.slint` (`Wind noise
+  suppression`, `Spatial audio`, the easy-chat/limit-high-volume rows, the
+  left/right/case battery and firmware About ids, and the `5/10/15 seconds`,
+  `10/20/30/60 minutes` and spatial-audio mode values). The disabled spatial
+  select rows' device reason (`Turn on spatial audio first`) is translated the
+  same way through `LocalizedText.setting-reason`, because it is English data
+  from the controller. `desktop/translations/ru/...po` gained their Russian
+  translations. The controller fills the rows and owns every device write; the
+  view still renders state only. The A3954's sound-mode block is optional: when
+  the device reports an unmeasured value for it, the controller hides the scale
+  and the page, so `modes.slint` only ever renders a measured scale.

@@ -1,0 +1,76 @@
+{
+  "model": "A3954",
+  "source": "real capture of Liberty 4 Pro (firmware 04.29) over the Windows btsnoop/A2DP capture analysis/captures/20261104-151814-A3954-Liberty4Pro; the 16-byte earbud serial is masked to ASCII zeroes, the 6-byte case serial is zeroed, the checksum is recalculated and no Bluetooth address is present",
+  "body_length": 165,
+  "frame_hex": "09 FF 00 00 01 01 01 AF 00 01 01 60 62 00 00 30 34 2E 32 39 30 34 2E 32 39 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 31 2E 35 38 09 00 00 00 00 00 00 FE FE 8A 80 78 78 78 78 78 78 78 78 FF FF FF FF FF FF FF FF FF FF 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 0A 66 66 32 33 FF FF 44 44 33 00 0B 00 01 FF 01 FF 00 00 01 00 62 01 31 01 01 01 01 01 02 00 5A 00 00 00 00 00 00 00 31 00 00 01 00 00 FF 00 00 11 11 81",
+  "expected": {
+    "host_device": "Right",
+    "tws_connected": true,
+    "left": 96,
+    "right": 98,
+    "scale": 100,
+    "left_charging": false,
+    "right_charging": false,
+    "firmware_left": "04.29",
+    "firmware_right": "04.29",
+    "case_firmware": "01.58",
+    "case_battery_level": 9,
+    "equalizer_preset_id": 65278,
+    "equalizer_left_bands": [
+      18,
+      8,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "equalizer_right_bands": null,
+    "ambient_sound_mode_cycle": {
+      "noise_canceling": true,
+      "transparency": true,
+      "normal": false
+    },
+    "sound_mode": "NoiseCanceling",
+    "slider_position": 11,
+    "airplane_mode": "ManualUpdate",
+    "wind_noise_suppression": true,
+    "wind_noise_detected": false,
+    "case_features": {
+      "atmospheric": false,
+      "remote_camera": false,
+      "find_device": true,
+      "case_spatial_audio": false
+    },
+    "air_pressure": 98,
+    "low_battery_prompt": true,
+    "ldac": true,
+    "dual_connections": true,
+    "auto_power_off": {
+      "enabled": true,
+      "minutes": 30
+    },
+    "limit_high_volume": {
+      "enabled": false,
+      "db_limit": 90,
+      "refresh_rate": "RealTime"
+    },
+    "spatial_audio": {
+      "enabled": false,
+      "music_mode": "Fixed",
+      "mode": "Music"
+    },
+    "easy_chat": {
+      "enabled": false,
+      "wait_time_seconds": 5
+    },
+    "sound_leak_compensation": false,
+    "case_language": "English",
+    "wearing_detection": false,
+    "main_buttons_hex": "66 66 32 33 FF FF 44 44",
+    "slide_buttons_hex": "00 00 11 11"
+  }
+}
