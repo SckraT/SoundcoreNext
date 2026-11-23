@@ -232,7 +232,10 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
 - The only device writes are the read-only `01 01` state request, the `06 81`
   sound-mode frame, the `03 87` equalizer frames (a built-in preset, the custom
   bands, and an applied saved profile's custom curve), the measured one-frame
-  settings writes behind the section pages, and the dual-connections writes
+  settings writes behind the section pages, the measured A3954 `04 81`
+  button-configuration frames (one per gesture, editing the action byte's live
+  TWS slot and keeping the other nibble), the A3954 `07 87` case-screen feature
+  and `07 8A` case-language frames, and the dual-connections writes
   (`0B 84` for the setting, `0B 82`/`0B 81`/`0B 83` for a list row); its `0B 01`
   list request is the only other read. In Demo mode these same requests and
   commands are answered in-process by the demo worker against its simulated
@@ -608,7 +611,14 @@ feature and walked the case language, re-polling after every write to a
 byte-for-byte match; the run is recorded in
 `.scratch/a3954-buttons-case/issues/03-live-acceptance.md`. The device reported
 its TWS link down during the run (only the left earbud active), so the Controls
-page shows the disconnected-state actions the device actually applies.
+page shows the disconnected-state actions the device actually applies. **Live
+limitation:** that TWS-down state means only the disconnected-state (high) action
+nibble was written on hardware; the TWS-connected (low-nibble) write path and
+the `01 01` TWS flag's connected branch are covered by the unit tests against the
+captured state, not by this live run. The ticket-04 review re-ran the ignored
+test on 2026-11-23 (1 passed / 0 reconnects, whole parsed state restored) and the
+device was still TWS-down, so the limitation stands. Re-run the ignored test
+with both earbuds active to exercise that branch on hardware.
 
 ![Controls with a connected Liberty 4 Pro](live-a3954-controls.png)
 

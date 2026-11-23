@@ -59,9 +59,18 @@ state and existing button/case structures.
   `(non_tws << 4) | tws`. `tws()`/`non_tws()` decode it to
   `A3954ButtonActionValue` (`Action`, `Disabled`, `Unknown(nibble)`), and
   `with_tws`/`with_non_tws` replace one nibble while keeping the other, so a
-  read→edit→write keeps the disconnected-state action and a restore sends
-  exactly the reported byte. Unknown nibbles never fail the poll and are kept
-  verbatim; only `A3954ButtonActionByte::from_byte` can carry one.
+  read→edit→write keeps the untouched slot and a restore sends exactly the
+  reported byte. Unknown nibbles never fail the poll and are kept verbatim; only
+  `A3954ButtonActionByte::from_byte` can carry one.
+- The live ticket-03 run measured that the device applies a `04 81` write only
+  to the live connection slot (with the TWS link down, only the high nibble
+  changed), so the controller picks `with_tws`/`with_non_tws` from the `01 01`
+  TWS flag rather than always editing the low nibble. See ticket 02.
+- OpenSCL4's A3954 table sets `ButtonDisableMode::IndividualDisable` for all
+  twelve gestures, slides included, so `0x0F` (`A3954_NO_BUTTON_ACTION`) is a
+  valid action value for every gesture even though the measured action catalogs
+  name no "none" entry; the ticket-04 review exposed that choice on the slide
+  rows too.
 - `A3954State::button_action_byte(button)` and `button_action_bytes()` read the
   main block 116..124 and the slide block 161..165 in gesture order.
 - `DeviceModel::a3954_button_frame(button, action)` builds the exact `04 81`
@@ -76,8 +85,12 @@ Measured action bytes in the committed capture: main
 ### Case commands
 
 - `A3954SettingCommand::CaseFeatures(A3954CaseFeatures)` → `07 87`, body
-  `[atmospheric, remote_camera, find_device, case_spatial_audio]` in state
-  order (`A3954CaseFeatures::command_body`).
+  `[remote_camera, find_device, case_spatial_audio, atmospheric]`, the Soundcore
+  app's command order (`A3954CaseFeatures::command_body`). **The body order is
+  not the state order**: the state reports `[atmospheric, remote_camera,
+  find_device, case_spatial_audio]`. The live ticket-03 run measured that a
+  state-order body toggles the neighbouring feature, so the app order above is
+  the implemented one and the exact-frame tests pin it.
 - `A3954SettingCommand::CaseLanguage(A3954CaseLanguage)` → `07 8A`, body
   `[language]`: Japanese `0`, English `1`, Chinese `2`
   (`A3954CaseLanguage::command_body`).
@@ -85,8 +98,10 @@ Measured action bytes in the committed capture: main
   parsed fields. Case battery/firmware remain read-only; nothing writes the
   serial or an address.
 
-Exact frame examples: case features `08 EE 00 00 00 07 87 0E 00 00 00 01 00 93`
-(the fixture's flags), language English `08 EE 00 00 00 07 8A 0B 00 01 93`.
+Exact frame examples with the corrected order: case features
+`08 EE 00 00 00 07 87 0E 00 00 01 00 00 93` (the fixture's flags — only find
+device is on, so it is the second body byte), language English
+`08 EE 00 00 00 07 8A 0B 00 01 93`.
 
 ### Session
 
@@ -114,6 +129,23 @@ Exact frame examples: case features `08 EE 00 00 00 07 87 0E 00 00 00 01 00 93`
 Case display brightness/color/style/text writes, the `07 88` display read and
 air-pressure writes stay out of this slice. No live hardware writes; no desktop
 UI wiring (ticket 02). `README.md` and the live-device record are ticket 03.
+
+### Live measured corrections (from ticket 03, applied after this ticket)
+
+The live run corrected two assumptions in the section above; the sections were
+edited in place and the tests/frames now pin the measured behavior:
+
+1. **`04 81` edits only the live connection slot.** With the TWS link down, a
+   write changed only the high (disconnected-state) nibble. Ticket 02's
+   controller now chooses `with_tws`/`with_non_tws` from the `01 01` TWS flag,
+   so the remap edits the slot the device applies and the other nibble is kept.
+2. **`07 87` uses the app command order, not the state order.** A state-order
+   body toggled the neighbouring case feature on the real device; the core
+   command body and the exact frames now use `[remote_camera, find_device,
+   case_spatial_audio, atmospheric]`.
+
+The live evidence is ticket 03; the real device reported its TWS link down for
+that run, so only the disconnected-state slot was exercised on hardware.
 
 ### Desktop impact (not touched, per the ticket)
 

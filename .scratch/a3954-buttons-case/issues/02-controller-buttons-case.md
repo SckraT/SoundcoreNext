@@ -46,11 +46,17 @@ Wire the A3954 button and case settings into the desktop UI.
 - Exhaustive matches: `SessionError::UnsupportedButtonConfiguration` maps to
   `Unreadable` (the four command failure kinds) and `Protocol` (connect); the
   ignored write-only reasons are documented in their comment.
-- `a3954_setting_label` names the two new commands `Case screen` and
-  `Case language`, so a failed case write's banner names the row.
-- Device pages: `device_pages` appends `Page::Case` for the A3954 between
-  Connections and About (its state always parses the measured case
-  features/language, so the block is present); the A3062 keeps its five pages.
+- `a3954_setting_label` keeps `Case screen` and `Case language` as the generic
+  names; a failed case-screen write's banner resolves the flag row the user
+  toggled through `a3954_setting_row_label` (e.g. `Find device`), the same
+  row-label mechanism the gesture writes use, and a failed language write names
+  `Case language` (review fix: the first version named only `Case screen`).
+- Device pages: `device_pages(has_settings, has_case)` appends `Page::Case`
+  between Connections and About when the parsed state carries the A3954 case
+  blocks (an A3954 state always parses the measured case features/language, so
+  its presence is the condition; the review named the parameter `has_case` so
+  the page is tied to the case capability, not a generic model flag). The A3062
+  keeps its five pages.
   The vendored Case visuals, including `AppState.case-battery` (the measured
   case level), already existed and now have a page to render on.
 - Controls: `PanelKind::Presses` with the eight measured press rows
@@ -59,14 +65,20 @@ Wire the A3954 button and case settings into the desktop UI.
   `PanelKind::Gestures` (titled "Slides") with the four slide rows
   (`leftSlideUp`, `rightSlideUp`, `leftSlideDown`, `rightSlideDown`), and the
   existing ambient-mode cycle panel. Press options are `None` plus
-  `A3954_COMMON_ACTIONS`; slide options are the two `A3954_SLIDE_ACTIONS`. The
-  shown index is the state's TWS nibble
-  (`A3954State::button_action_byte(..).tws()`); an unmeasured nibble stays
-  unselected rather than showing an action the device did not report.
+  `A3954_COMMON_ACTIONS`; slide options are `None` plus the two
+  `A3954_SLIDE_ACTIONS` (review fix: OpenSCL4's A3954 table sets
+  `IndividualDisable` for every gesture, so a slide accepts the measured `0x0F`
+  no-action value; no other slide action is offered). The shown index is the
+  action of the live connection slot the `01 01` TWS flag names
+  (`A3954State::button_action_byte(..).tws()` when the link is up,
+  `.non_tws()` when it is down); an unmeasured nibble stays unselected rather
+  than showing an action the device did not report.
 - Gesture writes: a gesture `set-option` queues
-  `DeviceCommand::SetA3954Button` carrying
-  `A3954ButtonActionByte::with_tws(value)`, so the disconnected-state nibble the
-  device reported is written back unchanged. The worker calls
+  `DeviceCommand::SetA3954Button` carrying the whole measured action byte with
+  the live connection slot replaced (`with_tws(value)` while the `01 01` state
+  reports the TWS link up, `with_non_tws(value)` while it reports it down), so
+  the other nibble is written back unchanged; the device applies the write only
+  to that slot (measured in ticket 03). The worker calls
   `Session::set_a3954_button` once, re-polls `01 01`, and reports
   `Event::A3954ButtonChanged`; the UI replaces its state copy and refills the
   pages, or names the row in the banner. One click is one measured `04 81`
@@ -132,3 +144,23 @@ Wire the A3954 button and case settings into the desktop UI.
   **195 passed / 0 failed**, `cargo clippy --all-targets -- -D warnings` clean.
 - No hardware writes and no live device were used; ticket 03 owns the live
   acceptance.
+
+### Review fixes (ticket 04)
+
+- The four slide rows now offer `None` (the measured `0x0F` no-action value)
+  next to the two volume actions; presses and slides share one option mapping
+  (`0` = None, then the measured catalog). The disabled slide `04 81` frame is
+  pinned in a core test and the TWS-nibble preservation is covered by the
+  controller queue test.
+- A failed case-screen write's banner names the flag row the user toggled
+  (`Find device`) through `a3954_setting_row_label`/ `a3954_setting_failure_label`,
+  not the `Case screen` panel title; a controller test covers the banner. A
+  failed case-language write still names `Case language`.
+- `Page::Case` is added from `has_case` (the parsed A3954 state, which always
+  carries the measured case blocks), not a generic model flag.
+- The gesture rows and writes choose the live TWS slot measured in ticket 03
+  (`with_tws` when the `01 01` TWS flag is up, `with_non_tws` when it is down);
+  the shown index and the written byte follow the same flag and keep the other
+  nibble.
+- The review-fix gates (desktop/core fmt/build/test/clippy) are recorded in
+  ticket 04 with the merge.

@@ -120,6 +120,25 @@ device was restored and how the script now avoids the hazard.)
 air-pressure writes stay out of this slice; no serial/address is read for output
 or shown on a page.
 
+**Limitation: the TWS-connected slot was not live-tested.** The device reported
+its TWS link down for the whole run (only the left earbud active), so every
+`04 81` write in this acceptance edited the disconnected-state (high) nibble.
+The live-connected (low) branch of the `with_tws` choice was therefore never
+exercised on hardware in this run; the TWS-down fixture regression in
+`desktop/src/controller.rs` covers the selection logic, and the connected branch
+stays unit-tested only. Re-running `manual_a3954_buttons_and_case` with both
+earbuds active is the way to close this gap; the run did verify the whole
+disconnected-state byte for value and exact restore.
+
+**Ticket-04 review re-run (2026-11-23, MSK).** The ignored test was run again on
+the same paired device after the review fixes: **1 passed / 0 failed / 0
+ignored, 0 reconnects, 18.34 s**. The device again reported its TWS link down
+(`01 01` TWS flag down; the disconnected-state action slot live), every write
+was re-polled and restored, and the extended final check compared the whole
+parsed `A3954State` and reported "every parsed A3954 field equals the connect
+state". The connected-slot limitation above is therefore unchanged: the
+TWS-connected branch still has unit-test coverage only.
+
 ## Gates
 
 - Desktop (from `desktop`): `cargo fmt --all -- --check` clean, `cargo build`
