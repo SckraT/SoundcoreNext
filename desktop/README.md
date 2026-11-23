@@ -534,6 +534,55 @@ verified these choices apply immediately, survive a quit and relaunch, and that
 the tray icon's tooltip reads “OpenSCL4 · soundcore Space One Pro” over
 “Battery 30 %” while connected.
 
+### Live A3954 acceptance captures (ticket 04, 2026-11-23)
+
+These five captures are from the finished build during the **real-device**
+acceptance run on the paired soundcore Liberty 4 Pro (A3954, firmware 04.29,
+case firmware 01.58; left/right/case batteries 69/69/80 % during the captures),
+connected over Windows RFCOMM through Add Device with Demo mode off. They show
+the pages ticket 04 covers; no Bluetooth address or serial number appears on any
+page or capture. The protocol run behind them (the ignored
+`manual_a3954_settings` test) wrote, re-polled and restored every supported
+control; the run is recorded in
+`.scratch/a3954-settings/issues/04-live-acceptance.md`.
+
+![Overview with a connected Liberty 4 Pro](live-a3954-overview.png)
+
+The real **Overview**: the hero shows “SOUNDCORE · A3954”, the device name, the
+connected badge and the left/right/case battery tiles (69/69/80 %). Quick
+settings holds the saved LDAC chip; the Sound mode panel shows the device's
+1–11 scale at position 6 (Normal) with wind-noise suppression off; the Your
+sound panel shows the device's Acoustic preset and its eight visible bands; the
+shortcuts are the four A3954 pages.
+
+![Sound mode scale with a connected Liberty 4 Pro](live-a3954-sound-mode.png)
+
+The **Sound mode** page: the 1–11 scale at the device's position 6, the
+Transparency/Normal/Noise canceling labels, the per-position numbers and the
+wind-noise suppression toggle. The acceptance wrote positions 1, 6 and 11 plus
+the wind toggle, re-polling after each and restoring the connect position.
+
+![Equalizer with a connected Liberty 4 Pro](live-a3954-equalizer.png)
+
+The **Equalizer** page: the A3954's own 22-preset catalog with Acoustic selected
+and the device's eight visible bands (4, 1, 2, 2, 4, 4, 4, 2 dB). The
+acceptance changed the preset to Rock and restored Acoustic; it did not run a
+custom-curve or HearID write.
+
+![Sound and effects with a connected Liberty 4 Pro](live-a3954-effects.png)
+
+The **Sound and effects** page: LDAC, Spatial audio with the music-mode and
+effect-mode selects disabled with the device reason “Turn on spatial audio
+first”, sound leak compensation, and the page note that changing the equalizer
+turns spatial audio off. The acceptance toggled LDAC and spatial audio (enable,
+music mode, effect mode) and restored each.
+
+![About with a connected Liberty 4 Pro](live-a3954-about.png)
+
+The **About the device** page: left/right/case battery (69/69/80 %), both earbud
+firmwares 04.29 and the case firmware 01.58. The serial row is deliberately
+absent; the capture carries no address or serial.
+
 ## Adaptive layout checks
 
 Every UI change is checked at the real window breakpoints, not only at the

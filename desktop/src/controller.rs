@@ -13227,6 +13227,1084 @@ mod tests {
         }
     }
 
+    /// Manual hardware check of the Liberty 4 Pro settings slice on the real
+    /// A3954:
+    ///
+    /// ```text
+    /// cargo test -p soundcore-desktop manual_a3954_settings -- --ignored --nocapture
+    /// ```
+    ///
+    /// Connects the paired Liberty 4 Pro through the same RFCOMM path as
+    /// [`manual_paired_connect`] and drives a real [`DeviceSession`]: it polls
+    /// and prints the parsed state, writes the 1..=11 scale positions 6 and 11,
+    /// the wind toggle, one equalizer preset and every supported settings
+    /// command, polls after each write and restores the value found on connect.
+    /// A write that drops the RFCOMM link (LDAC is documented to do so) is
+    /// reconnected and retried; a write the device silently drops is retried
+    /// after the measured command spacing, because the live device ignores a
+    /// setting command that arrives too soon after the previous one. The final
+    /// poll is compared field by field with the connect state, so the device is
+    /// left as found. The address is masked, the serial is never read for
+    /// output, and no frame bytes are printed.
+    #[test]
+    #[ignore = "manual hardware check: needs the paired Liberty 4 Pro (A3954)"]
+    fn manual_a3954_settings() {
+        let model = selected_model("A3954").expect("the catalog lists the A3954");
+        let protocol = model.protocol.expect("the A3954 has a state parser");
+        let found = enumerate_candidates(Some((model.code, model.name)))
+            .expect("the paired Bluetooth devices enumerate");
+        let candidate = found
+            .iter()
+            .find(|candidate| candidate.suggested)
+            .or_else(|| found.first())
+            .expect("a paired A3954");
+        println!(
+            "== A3954 {} {} ==",
+            model.name,
+            masked_mac(&format_mac(candidate.address))
+        );
+        let request = ConnectRequest {
+            address: candidate.address,
+            model_code: model.code.to_owned(),
+            protocol: Some(protocol),
+        };
+        let mut live = LiveA3954::connect(request);
+        let initial_state = live.poll();
+        let initial = a3954_of(&initial_state).clone();
+        let initial_firmware = initial_state.firmware.clone();
+        println!("  connected over RFCOMM; parsed state:");
+        print_a3954_state(&initial_state);
+
+        // --- The 1..=11 sound-mode scale: position 1 (the strongest
+        // transparency), 6 (normal), 11 (the strongest noise canceling), then
+        // the position found on connect.
+        let initial_sound_mode = initial.sound_mode;
+        let transparency = A3954SoundModeChange::Scale(1)
+            .apply(initial_sound_mode)
+            .expect("position 1");
+        let after_1 =
+            a3954_of(
+                &live.set_sound_mode_until("scale position 1", transparency, |sound_mode| {
+                    sound_mode.slider.value() == 1
+                        && sound_mode.mode == A3954AmbientSoundMode::Transparency
+                }),
+            )
+            .sound_mode;
+        let normal = A3954SoundModeChange::Scale(6)
+            .apply(after_1)
+            .expect("position 6");
+        let after_6 = a3954_of(&live.set_sound_mode_until(
+            "scale position 6",
+            normal,
+            |sound_mode| {
+                sound_mode.slider.value() == 6 && sound_mode.mode == A3954AmbientSoundMode::Normal
+            },
+        ))
+        .sound_mode;
+        let canceling = A3954SoundModeChange::Scale(11)
+            .apply(after_6)
+            .expect("position 11");
+        let after_11 =
+            a3954_of(
+                &live.set_sound_mode_until("scale position 11", canceling, |sound_mode| {
+                    sound_mode.slider.value() == 11
+                        && sound_mode.mode == A3954AmbientSoundMode::NoiseCanceling
+                }),
+            )
+            .sound_mode;
+        let restored_scale = a3954_of(&live.set_sound_mode_until(
+            "scale restore",
+            initial_sound_mode,
+            |sound_mode| sound_mode_core(sound_mode) == sound_mode_core(initial_sound_mode),
+        ))
+        .sound_mode;
+        println!(
+            "  scale: 1 -> position {} mode {:?}; 6 -> position {} mode {:?}; 11 -> position {} mode {:?}; restored position {} mode {:?}",
+            after_1.slider.value(),
+            after_1.mode,
+            after_6.slider.value(),
+            after_6.mode,
+            after_11.slider.value(),
+            after_11.mode,
+            restored_scale.slider.value(),
+            restored_scale.mode
+        );
+        assert_eq!(after_1.slider.value(), 1, "position 1 is written");
+        assert_eq!(
+            after_1.mode,
+            A3954AmbientSoundMode::Transparency,
+            "position 1 reads as transparency"
+        );
+        assert_eq!(after_6.slider.value(), 6, "position 6 is written");
+        assert_eq!(
+            after_6.mode,
+            A3954AmbientSoundMode::Normal,
+            "position 6 reads as normal"
+        );
+        assert_eq!(after_11.slider.value(), 11, "position 11 is written");
+        assert_eq!(
+            after_11.mode,
+            A3954AmbientSoundMode::NoiseCanceling,
+            "position 11 reads as noise canceling"
+        );
+        assert_eq!(
+            sound_mode_core(restored_scale),
+            sound_mode_core(initial_sound_mode),
+            "the connect scale, airplane mode and wind flag are restored"
+        );
+
+        // --- The wind toggle: the opposite of the connect flag and back.
+        let wind_opposite = A3954SoundModeChange::Wind(!initial_sound_mode.wind_noise_suppression)
+            .apply(initial_sound_mode)
+            .expect("the wind toggle");
+        let after_wind =
+            a3954_of(
+                &live.set_sound_mode_until("wind toggle", wind_opposite, |sound_mode| {
+                    sound_mode.wind_noise_suppression != initial_sound_mode.wind_noise_suppression
+                }),
+            )
+            .sound_mode;
+        let restored_wind = a3954_of(&live.set_sound_mode_until(
+            "wind restore",
+            initial_sound_mode,
+            |sound_mode| sound_mode_core(sound_mode) == sound_mode_core(initial_sound_mode),
+        ))
+        .sound_mode;
+        println!(
+            "  wind: suppression {} -> {}, restored {}",
+            initial_sound_mode.wind_noise_suppression,
+            after_wind.wind_noise_suppression,
+            restored_wind.wind_noise_suppression
+        );
+        assert_eq!(
+            after_wind.wind_noise_suppression, !initial_sound_mode.wind_noise_suppression,
+            "the opposite wind flag is written"
+        );
+        assert_eq!(
+            sound_mode_core(restored_wind),
+            sound_mode_core(initial_sound_mode),
+            "the connect sound mode is restored after the wind toggle"
+        );
+
+        // --- One built-in equalizer preset and back. A custom curve found on
+        // connect is restored with the measured custom body, because that is
+        // the only body that carries its `0xFEFE` id; no other custom write is
+        // run.
+        let initial_equalizer = initial.equalizer;
+        let target_preset = if initial_equalizer.preset_id != 17 {
+            soundcore_models::a3954_equalizer_preset(17).expect("Rock")
+        } else {
+            soundcore_models::a3954_equalizer_preset(9).expect("Flat")
+        };
+        let after_preset = a3954_of(&live.set_eq_preset_until(
+            "equalizer preset",
+            initial_equalizer,
+            target_preset,
+            |equalizer| {
+                equalizer.preset_id == target_preset.id
+                    && equalizer.visible_bands() == Some(preset_visible_bands(target_preset))
+            },
+        ))
+        .equalizer;
+        let (restore_kind, restored_equalizer) = match initial_equalizer.preset() {
+            Some(preset) => {
+                let state = live.set_eq_preset_until(
+                    "equalizer preset restore",
+                    after_preset,
+                    preset,
+                    |equalizer| {
+                        equalizer.preset_id == initial_equalizer.preset_id
+                            && equalizer.visible_bands() == initial_equalizer.visible_bands()
+                    },
+                );
+                ("preset", a3954_of(&state).equalizer)
+            }
+            None => {
+                let bands = initial_equalizer
+                    .visible_bands()
+                    .expect("the custom curve has a visible channel");
+                let state = live.set_custom_eq_until(
+                    "equalizer custom restore",
+                    after_preset,
+                    bands,
+                    |equalizer| {
+                        equalizer.preset_id == initial_equalizer.preset_id
+                            && equalizer.visible_bands() == initial_equalizer.visible_bands()
+                    },
+                );
+                ("custom curve", a3954_of(&state).equalizer)
+            }
+        };
+        println!(
+            "  equalizer: {} (id {}) -> {} (id {}) -> restored by {restore_kind} to id {}; visible bands {:?} -> {:?} -> {:?}",
+            initial_equalizer
+                .preset()
+                .map_or("custom", |preset| preset.name),
+            initial_equalizer.preset_id,
+            target_preset.name,
+            target_preset.id,
+            restored_equalizer.preset_id,
+            initial_equalizer.visible_bands(),
+            after_preset.visible_bands(),
+            restored_equalizer.visible_bands()
+        );
+        assert_eq!(
+            after_preset.preset_id, target_preset.id,
+            "the written preset id is re-polled"
+        );
+        assert_eq!(
+            after_preset.visible_bands(),
+            Some(preset_visible_bands(target_preset)),
+            "the written preset curve is re-polled"
+        );
+        assert_eq!(
+            restored_equalizer.preset_id, initial_equalizer.preset_id,
+            "the connect preset id is restored"
+        );
+        assert_eq!(
+            restored_equalizer.visible_bands(),
+            initial_equalizer.visible_bands(),
+            "the connect curve is restored"
+        );
+
+        // --- Every supported settings command: the connect value, the opposite
+        // or another value, then the connect value again.
+        check_a3954_toggle(
+            &mut live,
+            "low battery prompt",
+            initial.low_battery_prompt,
+            |a3954| a3954.low_battery_prompt,
+            A3954SettingCommand::LowBatteryPrompt,
+        );
+
+        let initial_auto_power_off = initial.auto_power_off;
+        let changed_auto_power_off = if initial_auto_power_off.enabled {
+            A3954AutoPowerOff {
+                enabled: false,
+                ..initial_auto_power_off
+            }
+        } else {
+            let duration = A3954AutoPowerOffDuration::ALL
+                .into_iter()
+                .find(|duration| *duration != initial_auto_power_off.duration)
+                .expect("another measured auto-power-off duration");
+            A3954AutoPowerOff {
+                enabled: true,
+                duration,
+            }
+        };
+        let after_auto = a3954_of(&live.set_setting_until(
+            "auto power off",
+            A3954SettingCommand::AutoPowerOff(changed_auto_power_off),
+            |state| a3954_of(state).auto_power_off == changed_auto_power_off,
+        ))
+        .auto_power_off;
+        let restored_auto = a3954_of(&live.set_setting_until(
+            "auto power off restore",
+            A3954SettingCommand::AutoPowerOff(initial_auto_power_off),
+            |state| a3954_of(state).auto_power_off == initial_auto_power_off,
+        ))
+        .auto_power_off;
+        println!(
+            "  auto power off: {initial_auto_power_off:?} -> {after_auto:?}, restored {restored_auto:?}"
+        );
+        assert_eq!(
+            after_auto, changed_auto_power_off,
+            "the auto power off write is re-polled"
+        );
+        assert_eq!(
+            restored_auto, initial_auto_power_off,
+            "the connect auto power off is restored"
+        );
+
+        let initial_limit = initial.limit_high_volume;
+        let changed_db_limit = if initial_limit.db_limit.value() == DbLimit::MIN {
+            DbLimit::new(DbLimit::MIN + DbLimit::STEP).expect("the next measured dB step")
+        } else {
+            DbLimit::new(DbLimit::MIN).expect("the lowest measured dB limit")
+        };
+        let changed_limit = LimitHighVolume {
+            enabled: !initial_limit.enabled,
+            db_limit: changed_db_limit,
+            refresh_rate: initial_limit.refresh_rate,
+        };
+        let after_limit = a3954_of(&live.set_setting_until(
+            "limit high volume",
+            A3954SettingCommand::LimitHighVolume {
+                enabled: changed_limit.enabled,
+                db_limit: changed_limit.db_limit,
+            },
+            |state| a3954_of(state).limit_high_volume == changed_limit,
+        ))
+        .limit_high_volume;
+        let restored_limit = a3954_of(&live.set_setting_until(
+            "limit high volume restore",
+            A3954SettingCommand::LimitHighVolume {
+                enabled: initial_limit.enabled,
+                db_limit: initial_limit.db_limit,
+            },
+            |state| a3954_of(state).limit_high_volume == initial_limit,
+        ))
+        .limit_high_volume;
+        println!(
+            "  limit high volume: {initial_limit:?} -> {after_limit:?}, restored {restored_limit:?}"
+        );
+        assert_eq!(
+            after_limit, changed_limit,
+            "the enable flag and dB limit are re-polled"
+        );
+        assert_eq!(
+            restored_limit, initial_limit,
+            "the connect limit high volume is restored"
+        );
+
+        let initial_refresh = initial_limit.refresh_rate;
+        let changed_refresh = DecibelReadingRefreshRate::ALL
+            .into_iter()
+            .find(|refresh| *refresh != initial_refresh)
+            .expect("another measured refresh rate");
+        let after_refresh = a3954_of(&live.set_setting_until(
+            "limit high volume refresh rate",
+            A3954SettingCommand::LimitHighVolumeRefreshRate(changed_refresh),
+            |state| {
+                let limit = a3954_of(state).limit_high_volume;
+                limit.refresh_rate == changed_refresh
+                    && limit.enabled == initial_limit.enabled
+                    && limit.db_limit == initial_limit.db_limit
+            },
+        ))
+        .limit_high_volume;
+        let restored_refresh = a3954_of(&live.set_setting_until(
+            "limit high volume refresh rate restore",
+            A3954SettingCommand::LimitHighVolumeRefreshRate(initial_refresh),
+            |state| a3954_of(state).limit_high_volume == initial_limit,
+        ))
+        .limit_high_volume;
+        println!(
+            "  refresh rate: {initial_refresh:?} -> {:?}, restored {:?}",
+            after_refresh.refresh_rate, restored_refresh.refresh_rate
+        );
+        assert_eq!(
+            after_refresh.refresh_rate, changed_refresh,
+            "the refresh rate write is re-polled"
+        );
+        assert_eq!(
+            after_refresh.enabled, initial_limit.enabled,
+            "the refresh write keeps the enable flag"
+        );
+        assert_eq!(
+            after_refresh.db_limit, initial_limit.db_limit,
+            "the refresh write keeps the dB limit"
+        );
+        assert_eq!(
+            restored_refresh, initial_limit,
+            "the connect refresh rate is restored"
+        );
+
+        let initial_cycle = initial.ambient_sound_mode_cycle;
+        let flipped_cycle = AmbientSoundModeCycle {
+            noise_canceling: !initial_cycle.noise_canceling,
+            transparency: !initial_cycle.transparency,
+            normal: !initial_cycle.normal,
+        };
+        // Never write the all-off cycle the scale may not accept.
+        let changed_cycle = if flipped_cycle.byte() == 0 {
+            AmbientSoundModeCycle {
+                normal: !initial_cycle.normal,
+                ..initial_cycle
+            }
+        } else {
+            flipped_cycle
+        };
+        let after_cycle = a3954_of(&live.set_setting_until(
+            "ambient sound mode cycle",
+            A3954SettingCommand::AmbientSoundModeCycle(changed_cycle),
+            |state| a3954_of(state).ambient_sound_mode_cycle == changed_cycle,
+        ))
+        .ambient_sound_mode_cycle;
+        let restored_cycle = a3954_of(&live.set_setting_until(
+            "ambient sound mode cycle restore",
+            A3954SettingCommand::AmbientSoundModeCycle(initial_cycle),
+            |state| a3954_of(state).ambient_sound_mode_cycle == initial_cycle,
+        ))
+        .ambient_sound_mode_cycle;
+        println!(
+            "  ambient cycle: {initial_cycle:?} -> {after_cycle:?}, restored {restored_cycle:?}"
+        );
+        assert_eq!(
+            after_cycle, changed_cycle,
+            "the cycle bits are written and re-polled"
+        );
+        assert_eq!(
+            restored_cycle, initial_cycle,
+            "the connect cycle bits are restored"
+        );
+
+        check_a3954_toggle(
+            &mut live,
+            "wearing detection",
+            initial.wearing_detection,
+            |a3954| a3954.wearing_detection,
+            A3954SettingCommand::WearingDetection,
+        );
+        check_a3954_toggle(
+            &mut live,
+            "sound leak compensation",
+            initial.sound_leak_compensation,
+            |a3954| a3954.sound_leak_compensation,
+            A3954SettingCommand::SoundLeakCompensation,
+        );
+
+        let initial_spatial = initial.spatial_audio;
+        let toggled_spatial = A3954SpatialAudio {
+            enabled: !initial_spatial.enabled,
+            ..initial_spatial
+        };
+        let after_spatial_toggle = a3954_of(&live.set_setting_until(
+            "spatial audio enable",
+            A3954SettingCommand::SpatialAudio(toggled_spatial),
+            |state| a3954_of(state).spatial_audio.enabled == toggled_spatial.enabled,
+        ))
+        .spatial_audio;
+        // The measured music and effect modes are written while spatial audio is
+        // on, so the device reports them.
+        let enabled_spatial = A3954SpatialAudio {
+            enabled: true,
+            ..initial_spatial
+        };
+        let after_spatial_enable = a3954_of(&live.set_setting_until(
+            "spatial audio enable with the connect modes",
+            A3954SettingCommand::SpatialAudio(enabled_spatial),
+            |state| a3954_of(state).spatial_audio.enabled,
+        ))
+        .spatial_audio;
+        let changed_music_mode = match initial_spatial.music_mode {
+            A3954SpatialAudioMusicMode::Fixed => A3954SpatialAudioMusicMode::HeadTracking,
+            A3954SpatialAudioMusicMode::HeadTracking => A3954SpatialAudioMusicMode::Fixed,
+        };
+        let changed_spatial_mode = A3954SpatialAudioMode::ALL
+            .into_iter()
+            .find(|mode| *mode != initial_spatial.mode)
+            .expect("another measured spatial effect mode");
+        let changed_spatial = A3954SpatialAudio {
+            enabled: true,
+            music_mode: changed_music_mode,
+            mode: changed_spatial_mode,
+        };
+        let after_spatial_modes = a3954_of(&live.set_setting_until(
+            "spatial audio modes",
+            A3954SettingCommand::SpatialAudio(changed_spatial),
+            |state| a3954_of(state).spatial_audio == changed_spatial,
+        ))
+        .spatial_audio;
+        let restored_spatial = a3954_of(&live.set_setting_until(
+            "spatial audio restore",
+            A3954SettingCommand::SpatialAudio(initial_spatial),
+            |state| a3954_of(state).spatial_audio == initial_spatial,
+        ))
+        .spatial_audio;
+        println!(
+            "  spatial audio: {initial_spatial:?} -> enable {after_spatial_toggle:?} -> modes {after_spatial_modes:?} -> restored {restored_spatial:?}"
+        );
+        assert_eq!(
+            after_spatial_toggle.enabled, !initial_spatial.enabled,
+            "the spatial audio enable flag is written and re-polled"
+        );
+        assert!(
+            after_spatial_enable.enabled,
+            "spatial audio is on for the music and effect mode writes"
+        );
+        assert_eq!(
+            after_spatial_modes, changed_spatial,
+            "the spatial audio music mode and effect mode are re-polled"
+        );
+        assert_eq!(
+            restored_spatial, initial_spatial,
+            "the connect spatial audio is restored"
+        );
+
+        let initial_easy_chat = initial.easy_chat;
+        let toggled_easy_chat = A3954EasyChat {
+            enabled: !initial_easy_chat.enabled,
+            wait_time: initial_easy_chat.wait_time,
+        };
+        let after_easy_chat_toggle = a3954_of(&live.set_setting_until(
+            "easy chat enable",
+            A3954SettingCommand::EasyChat(toggled_easy_chat),
+            |state| a3954_of(state).easy_chat.enabled == toggled_easy_chat.enabled,
+        ))
+        .easy_chat;
+        let changed_wait = A3954EasyChatWaitTime::ALL
+            .into_iter()
+            .find(|wait| *wait != initial_easy_chat.wait_time)
+            .expect("another measured easy-chat wait time");
+        let changed_easy_chat = A3954EasyChat {
+            enabled: true,
+            wait_time: changed_wait,
+        };
+        let after_easy_chat_wait = a3954_of(&live.set_setting_until(
+            "easy chat wait time",
+            A3954SettingCommand::EasyChat(changed_easy_chat),
+            |state| a3954_of(state).easy_chat == changed_easy_chat,
+        ))
+        .easy_chat;
+        let restored_easy_chat = a3954_of(&live.set_setting_until(
+            "easy chat restore",
+            A3954SettingCommand::EasyChat(initial_easy_chat),
+            |state| a3954_of(state).easy_chat == initial_easy_chat,
+        ))
+        .easy_chat;
+        println!(
+            "  easy chat: {initial_easy_chat:?} -> enable {after_easy_chat_toggle:?} -> wait {after_easy_chat_wait:?} -> restored {restored_easy_chat:?}"
+        );
+        assert_eq!(
+            after_easy_chat_toggle.enabled, !initial_easy_chat.enabled,
+            "the easy chat enable flag is written and re-polled"
+        );
+        assert_eq!(
+            after_easy_chat_wait, changed_easy_chat,
+            "the easy chat wait time is written and re-polled"
+        );
+        assert_eq!(
+            restored_easy_chat, initial_easy_chat,
+            "the connect easy chat is restored"
+        );
+
+        // The case display language has no page in this slice. It is exercised
+        // only when the state reports a case: the guarded check restores the
+        // connect value if the device reports the write, and leaves an ignored
+        // out-of-scope write alone.
+        if initial.case_firmware.is_some() {
+            let initial_language = initial.case_language;
+            let target_language = soundcore_models::A3954CaseLanguage::ALL
+                .into_iter()
+                .find(|language| *language != initial_language)
+                .expect("another measured case language");
+            let after_language = a3954_of(&live.set_setting_until(
+                "case language (optional, no page in this slice)",
+                A3954SettingCommand::CaseLanguage(target_language),
+                |state| a3954_of(state).case_language == target_language,
+            ))
+            .case_language;
+            if after_language == initial_language {
+                println!(
+                    "  case language: the device ignored the out-of-scope write; state still {after_language:?}, nothing to restore"
+                );
+            } else {
+                let restored_language = a3954_of(&live.set_setting_until(
+                    "case language restore",
+                    A3954SettingCommand::CaseLanguage(initial_language),
+                    |state| a3954_of(state).case_language == initial_language,
+                ))
+                .case_language;
+                println!(
+                    "  case language: {initial_language:?} -> {after_language:?}, restored {restored_language:?}"
+                );
+                assert_eq!(
+                    restored_language, initial_language,
+                    "the connect case language is restored"
+                );
+            }
+        } else {
+            println!("  case language: no case in the state; not written");
+        }
+
+        // LDAC may reset the RFCOMM link; the helper reconnects and retries.
+        check_a3954_toggle(
+            &mut live,
+            "LDAC",
+            initial.ldac,
+            |a3954| a3954.ldac,
+            A3954SettingCommand::Ldac,
+        );
+
+        // The remembered-device list is read first; the dual-connections toggle
+        // is written only when no second device is connected, because turning it
+        // off would disconnect that device.
+        match live.read_dual_devices("dual connections list") {
+            Some(devices) => {
+                let connected = devices.iter().filter(|device| device.connected).count();
+                println!(
+                    "  connections list: {} remembered device(s), {} connected",
+                    devices.len(),
+                    connected
+                );
+                if connected > 0 {
+                    println!("  dual connections: toggle skipped, another device is connected");
+                } else {
+                    check_a3954_toggle(
+                        &mut live,
+                        "dual connections",
+                        initial.dual_connections,
+                        |a3954| a3954.dual_connections,
+                        A3954SettingCommand::DualConnections,
+                    );
+                }
+            }
+            None => println!("  dual connections: toggle skipped, the list did not answer"),
+        }
+
+        // --- The final poll must match the connect state for every field this
+        // check wrote or read, plus the fields it never touched.
+        let final_state = live.poll();
+        let final_a3954 = a3954_of(&final_state).clone();
+        println!("  final state:");
+        print_a3954_state(&final_state);
+        assert_eq!(
+            sound_mode_core(final_a3954.sound_mode),
+            sound_mode_core(initial_sound_mode),
+            "the final scale, airplane mode and wind flag match the connect state"
+        );
+        assert_eq!(
+            final_a3954.equalizer.preset_id, initial_equalizer.preset_id,
+            "the final equalizer preset id matches the connect state"
+        );
+        assert_eq!(
+            final_a3954.equalizer.visible_bands(),
+            initial_equalizer.visible_bands(),
+            "the final equalizer curve matches the connect state"
+        );
+        assert_eq!(
+            final_a3954.low_battery_prompt, initial.low_battery_prompt,
+            "the low battery prompt is restored"
+        );
+        assert_eq!(final_a3954.ldac, initial.ldac, "LDAC is restored");
+        assert_eq!(
+            final_a3954.dual_connections, initial.dual_connections,
+            "dual connections are restored"
+        );
+        assert_eq!(
+            final_a3954.auto_power_off, initial_auto_power_off,
+            "auto power off is restored"
+        );
+        assert_eq!(
+            final_a3954.limit_high_volume, initial_limit,
+            "limit high volume is restored"
+        );
+        assert_eq!(
+            final_a3954.ambient_sound_mode_cycle, initial_cycle,
+            "the ambient sound mode cycle is restored"
+        );
+        assert_eq!(
+            final_a3954.wearing_detection, initial.wearing_detection,
+            "wearing detection is restored"
+        );
+        assert_eq!(
+            final_a3954.sound_leak_compensation, initial.sound_leak_compensation,
+            "sound leak compensation is restored"
+        );
+        assert_eq!(
+            final_a3954.spatial_audio, initial_spatial,
+            "spatial audio is restored"
+        );
+        assert_eq!(
+            final_a3954.easy_chat, initial_easy_chat,
+            "easy chat is restored"
+        );
+        assert_eq!(
+            final_a3954.case_language, initial.case_language,
+            "the case language matches the connect state"
+        );
+        // Nothing outside the written settings changed: the deferred raw
+        // button blocks, case features and air pressure, and the identity.
+        assert_eq!(
+            final_a3954.case_features, initial.case_features,
+            "the case features were not touched"
+        );
+        assert_eq!(
+            final_a3954.air_pressure, initial.air_pressure,
+            "the air pressure reading was not touched"
+        );
+        assert_eq!(
+            final_a3954.main_buttons, initial.main_buttons,
+            "the deferred main-button block was not touched"
+        );
+        assert_eq!(
+            final_a3954.slide_buttons, initial.slide_buttons,
+            "the deferred slide-button block was not touched"
+        );
+        assert_eq!(
+            final_a3954.case_firmware, initial.case_firmware,
+            "the case firmware is unchanged"
+        );
+        assert_eq!(
+            final_state.firmware, initial_firmware,
+            "the earbud firmware is unchanged"
+        );
+        println!(
+            "  restored: every checked field equals the connect state; {} reconnect(s); pairing untouched",
+            live.reconnects
+        );
+        drop(live);
+        println!("  disconnected: the RFCOMM socket is closed");
+    }
+
+    /// The spacing between two live setting commands: the measured minimum is
+    /// 250 ms, with a margin for the RFCOMM round trip. The live A3954 ignores a
+    /// setting command that arrives too soon after the previous one.
+    const A3954_WRITE_SPACING: Duration = Duration::from_millis(350);
+
+    /// How many times a live write is retried before it is treated as not
+    /// applied; the final poll then reports what the device really holds.
+    const A3954_WRITE_ATTEMPTS: usize = 4;
+
+    /// A live A3954 session with the one reconnect path every write of
+    /// [`manual_a3954_settings`] shares.
+    ///
+    /// A settings write can drop the RFCOMM link (the Soundcore-app-measured
+    /// LDAC toggle does); the next [`DeviceSession::poll_state`] then fails, so
+    /// the helper closes the socket, opens a fresh session through
+    /// [`open_session`] and retries the write once. A write the device silently
+    /// drops is retried after [`A3954_WRITE_SPACING`] until the re-poll shows
+    /// the expected value, so a dropped command never leaves a value changed.
+    struct LiveA3954 {
+        request: ConnectRequest,
+        session: Option<DeviceSession<WindowsRfcommTransport>>,
+        reconnects: usize,
+    }
+
+    impl LiveA3954 {
+        /// Opens the first real session and nothing else: the caller polls.
+        fn connect(request: ConnectRequest) -> Self {
+            let mut live = Self {
+                request,
+                session: None,
+                reconnects: 0,
+            };
+            live.reconnect("the initial connect");
+            live
+        }
+
+        /// Drops the current socket (if any) and opens a new one through the
+        /// same connect path the window's worker uses.
+        fn reconnect(&mut self, what: &str) {
+            self.session = None;
+            match open_session(&self.request, &AtomicBool::new(false)) {
+                OpenOutcome::Opened(session) => self.session = Some(session),
+                OpenOutcome::Failed(failure) => panic!("{what}: {}", failure.text()),
+                OpenOutcome::Cancelled => panic!("{what}: the connect was cancelled"),
+            }
+        }
+
+        fn session(&mut self) -> &mut DeviceSession<WindowsRfcommTransport> {
+            self.session.as_mut().expect("the session is open")
+        }
+
+        /// Polls the state; a dropped link is reconnected and polled once more.
+        fn poll(&mut self) -> DeviceState {
+            match self.session().poll_state() {
+                Ok(state) => state,
+                Err(error) => {
+                    self.reconnects += 1;
+                    println!("  state poll dropped the link ({error}); reconnecting");
+                    self.reconnect("the reconnect after a dropped poll");
+                    self.session()
+                        .poll_state()
+                        .unwrap_or_else(|error| panic!("the re-poll failed: {error}"))
+                }
+            }
+        }
+
+        /// Runs `write`, then polls the state, retrying once on a new session
+        /// when the write or its poll reports a failure. A failed write may or
+        /// may not have reached the device, so the retry is the only way to
+        /// re-apply it deterministically.
+        fn write_then_poll(
+            &mut self,
+            what: &str,
+            mut write: impl FnMut(
+                &mut DeviceSession<WindowsRfcommTransport>,
+            ) -> Result<(), SessionError>,
+        ) -> DeviceState {
+            for attempt in 1..=2 {
+                let outcome = {
+                    let session = self.session();
+                    write(session).and_then(|()| session.poll_state())
+                };
+                match outcome {
+                    Ok(state) => return state,
+                    Err(error) if attempt == 1 => {
+                        self.reconnects += 1;
+                        println!("  {what}: the link dropped ({error}); reconnecting and retrying");
+                        self.reconnect(&format!("{what}: reconnect"));
+                    }
+                    Err(error) => panic!("{what}: the write failed twice ({error})"),
+                }
+            }
+            unreachable!("the retry loop returns or panics")
+        }
+
+        /// Writes one A3954 settings frame and re-polls.
+        fn set_setting(&mut self, what: &str, setting: A3954SettingCommand) -> DeviceState {
+            self.write_then_poll(what, |session| session.set_a3954_setting(setting))
+        }
+
+        /// Writes one A3954 settings frame and polls until `expected` holds,
+        /// retrying the write after [`A3954_WRITE_SPACING`]. Returns the last
+        /// polled state when the write still does not show up, so the caller can
+        /// print and assert what the device really holds.
+        fn set_setting_until(
+            &mut self,
+            what: &str,
+            setting: A3954SettingCommand,
+            expected: impl Fn(&DeviceState) -> bool,
+        ) -> DeviceState {
+            for attempt in 1..=A3954_WRITE_ATTEMPTS {
+                std::thread::sleep(A3954_WRITE_SPACING);
+                let state = self.set_setting(what, setting);
+                if expected(&state) {
+                    return state;
+                }
+                println!(
+                    "  {what}: the device did not report the write; retrying ({attempt}/{A3954_WRITE_ATTEMPTS})"
+                );
+            }
+            self.poll()
+        }
+
+        /// Writes one sound mode and polls until `expected` holds, with the
+        /// same spacing and retry as [`Self::set_setting_until`].
+        fn set_sound_mode_until(
+            &mut self,
+            what: &str,
+            sound_mode: A3954SoundMode,
+            expected: impl Fn(A3954SoundMode) -> bool,
+        ) -> DeviceState {
+            for attempt in 1..=A3954_WRITE_ATTEMPTS {
+                std::thread::sleep(A3954_WRITE_SPACING);
+                let state =
+                    self.write_then_poll(what, |session| session.set_a3954_sound_mode(sound_mode));
+                if expected(a3954_of(&state).sound_mode) {
+                    return state;
+                }
+                println!(
+                    "  {what}: the device still reports {:?}; retrying ({attempt}/{A3954_WRITE_ATTEMPTS})",
+                    a3954_of(&state).sound_mode
+                );
+            }
+            self.poll()
+        }
+
+        /// Writes one A3954 equalizer preset and polls until `expected` holds,
+        /// with the same spacing and retry as [`Self::set_setting_until`].
+        fn set_eq_preset_until(
+            &mut self,
+            what: &str,
+            current: A3954EqualizerState,
+            preset: &'static EqualizerPreset,
+            expected: impl Fn(&A3954EqualizerState) -> bool,
+        ) -> DeviceState {
+            for attempt in 1..=A3954_WRITE_ATTEMPTS {
+                std::thread::sleep(A3954_WRITE_SPACING);
+                let state = self.write_then_poll(what, move |session| {
+                    session.set_a3954_equalizer_preset(&current, preset)
+                });
+                if expected(&a3954_of(&state).equalizer) {
+                    return state;
+                }
+                println!(
+                    "  {what}: the device still reports equalizer id {}; retrying ({attempt}/{A3954_WRITE_ATTEMPTS})",
+                    a3954_of(&state).equalizer.preset_id
+                );
+            }
+            self.poll()
+        }
+
+        /// Writes the A3954 custom equalizer curve and polls until `expected`
+        /// holds; used only to restore a custom curve found on connect.
+        fn set_custom_eq_until(
+            &mut self,
+            what: &str,
+            current: A3954EqualizerState,
+            bands: [i16; VISIBLE_EQ_BANDS],
+            expected: impl Fn(&A3954EqualizerState) -> bool,
+        ) -> DeviceState {
+            for attempt in 1..=A3954_WRITE_ATTEMPTS {
+                std::thread::sleep(A3954_WRITE_SPACING);
+                let state = self.write_then_poll(what, move |session| {
+                    session.set_a3954_custom_equalizer(&current, bands)
+                });
+                if expected(&a3954_of(&state).equalizer) {
+                    return state;
+                }
+                println!(
+                    "  {what}: the device still reports equalizer id {}; retrying ({attempt}/{A3954_WRITE_ATTEMPTS})",
+                    a3954_of(&state).equalizer.preset_id
+                );
+            }
+            self.poll()
+        }
+
+        /// Reads the remembered-device list; a failure is reported and retried
+        /// once on a fresh socket before giving up.
+        fn read_dual_devices(&mut self, what: &str) -> Option<Vec<DualConnectionDevice>> {
+            for attempt in 1..=2 {
+                match self.session().read_dual_connections_devices() {
+                    Ok(devices) => return Some(devices),
+                    Err(error) if attempt == 1 => {
+                        self.reconnects += 1;
+                        println!("  {what}: the read failed ({error}); reconnecting");
+                        self.reconnect(&format!("{what}: reconnect"));
+                    }
+                    Err(error) => {
+                        println!("  {what}: the read failed again ({error}); skipped");
+                        return None;
+                    }
+                }
+            }
+            None
+        }
+    }
+
+    /// The A3954 block of a parsed state.
+    fn a3954_of(state: &DeviceState) -> &A3954State {
+        state
+            .a3954
+            .as_ref()
+            .expect("the connected A3954 state has its A3954 block")
+    }
+
+    /// The four sound-mode fields the scale and wind checks restore; the
+    /// read-only wind-detection bit is not part of a write.
+    fn sound_mode_core(sound_mode: A3954SoundMode) -> (A3954AmbientSoundMode, u8, u8, bool) {
+        (
+            sound_mode.mode,
+            sound_mode.slider.value(),
+            sound_mode.airplane_mode.value(),
+            sound_mode.wind_noise_suppression,
+        )
+    }
+
+    /// The eight visible bands of a catalog preset.
+    fn preset_visible_bands(preset: &EqualizerPreset) -> [i16; VISIBLE_EQ_BANDS] {
+        let mut bands = [0i16; VISIBLE_EQ_BANDS];
+        bands.copy_from_slice(&preset.bands[..VISIBLE_EQ_BANDS]);
+        bands
+    }
+
+    /// Writes the opposite of a boolean setting, polls until the device reports
+    /// it, restores the connect value, polls again, and asserts both read-backs.
+    fn check_a3954_toggle(
+        live: &mut LiveA3954,
+        label: &str,
+        initial: bool,
+        read: impl Fn(&A3954State) -> bool,
+        command: fn(bool) -> A3954SettingCommand,
+    ) {
+        let changed = !initial;
+        let after = live.set_setting_until(label, command(changed), |state| {
+            read(a3954_of(state)) == changed
+        });
+        let after_value = read(a3954_of(&after));
+        let restored =
+            live.set_setting_until(&format!("{label} restore"), command(initial), |state| {
+                read(a3954_of(state)) == initial
+            });
+        let restored_value = read(a3954_of(&restored));
+        println!(
+            "  {label}: {initial} -> {after_value} (asked {changed}), restored {restored_value}"
+        );
+        assert_eq!(after_value, changed, "{label}: the write is re-polled");
+        assert_eq!(
+            restored_value, initial,
+            "{label}: the connect value is restored"
+        );
+    }
+
+    /// Prints a parsed A3954 state with only the labels and values the
+    /// acceptance record needs: no serial, no Bluetooth address, no frame
+    /// bytes.
+    fn print_a3954_state(state: &DeviceState) {
+        if let Some(battery) = state.battery.as_ref() {
+            println!(
+                "  earbuds: left={}% right={}% charging left={} right={}",
+                battery.left, battery.right, battery.left_charging, battery.right_charging
+            );
+        }
+        println!(
+            "  firmware: left={} right={}",
+            state.firmware.left.as_deref().unwrap_or("unknown"),
+            state.firmware.right.as_deref().unwrap_or("unknown")
+        );
+        let a3954 = a3954_of(state);
+        println!(
+            "  case: firmware={} battery={}",
+            a3954.case_firmware.as_deref().unwrap_or("unknown"),
+            a3954.case_battery_level.map_or_else(
+                || "unknown".to_owned(),
+                |level| format!("{}%", (u16::from(level) + 1) * 10)
+            )
+        );
+        println!(
+            "  sound mode: position={} mode={:?} airplane={:?} wind={} detected={}",
+            a3954.sound_mode.slider.value(),
+            a3954.sound_mode.mode,
+            a3954.sound_mode.airplane_mode,
+            a3954.sound_mode.wind_noise_suppression,
+            a3954.sound_mode.wind_noise_detected
+        );
+        println!(
+            "  equalizer: {} (id {}) left={:?} right={:?} visible={:?}",
+            a3954
+                .equalizer
+                .preset()
+                .map_or("custom", |preset| preset.name),
+            a3954.equalizer.preset_id,
+            a3954.equalizer.left,
+            a3954.equalizer.right,
+            a3954.equalizer.visible_bands()
+        );
+        println!(
+            "  low battery prompt={} ldac={} dual connections={}",
+            a3954.low_battery_prompt, a3954.ldac, a3954.dual_connections
+        );
+        println!(
+            "  auto power off: enabled={} duration={} min",
+            a3954.auto_power_off.enabled,
+            a3954.auto_power_off.duration.minutes()
+        );
+        println!(
+            "  limit high volume: enabled={} db={} refresh={:?}",
+            a3954.limit_high_volume.enabled,
+            a3954.limit_high_volume.db_limit.value(),
+            a3954.limit_high_volume.refresh_rate
+        );
+        println!(
+            "  ambient cycle: noise canceling={} transparency={} normal={}",
+            a3954.ambient_sound_mode_cycle.noise_canceling,
+            a3954.ambient_sound_mode_cycle.transparency,
+            a3954.ambient_sound_mode_cycle.normal
+        );
+        println!(
+            "  wearing detection={} sound leak compensation={}",
+            a3954.wearing_detection, a3954.sound_leak_compensation
+        );
+        println!(
+            "  spatial audio: enabled={} music mode={:?} effect mode={:?}",
+            a3954.spatial_audio.enabled, a3954.spatial_audio.music_mode, a3954.spatial_audio.mode
+        );
+        println!(
+            "  easy chat: enabled={} wait={}s case language={:?}",
+            a3954.easy_chat.enabled,
+            a3954.easy_chat.wait_time.seconds(),
+            a3954.case_language
+        );
+        println!(
+            "  case features: atmospheric={} remote camera={} find device={} case spatial audio={}",
+            a3954.case_features.atmospheric,
+            a3954.case_features.remote_camera,
+            a3954.case_features.find_device,
+            a3954.case_features.case_spatial_audio
+        );
+        println!(
+            "  air pressure={} raw ({} atm) main buttons={:?} slide buttons={:?}",
+            a3954.air_pressure,
+            f32::from(a3954.air_pressure) / 100.0,
+            a3954.main_buttons,
+            a3954.slide_buttons
+        );
+    }
+
     /// Manual hardware check of the controller's `disconnect` and `retry`
     /// callbacks, not part of the automated suite:
     ///
