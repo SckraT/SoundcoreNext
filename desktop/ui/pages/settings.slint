@@ -86,7 +86,7 @@ component AppearancePanel inherits Panel {
         text: @tr("Larger text and elements");
         Segmented {
             label: @tr("Content scale");
-            options: ["100%", "110%", "125%"];
+            options: ["100%", "110%", "125%", "150%"];
             index: AppState.app-content-scale;
             chosen(i) => { Actions.set-content-scale(i); }
         }

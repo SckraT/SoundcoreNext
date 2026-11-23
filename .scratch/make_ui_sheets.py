@@ -21,6 +21,8 @@ for raw in sorted(root.glob("*.rgba")):
 groups = {
     "overview-light": [p for stem, p in images.items() if stem.startswith("overview-") and ".light-" in stem],
     "devices-light": [p for stem, p in images.items() if stem.startswith("devices-") and ".light-" in stem],
+    "equalizer-light": [p for stem, p in images.items() if stem.startswith("equalizer-") and ".light-" in stem],
+    "presets-light": [p for stem, p in images.items() if stem.startswith("presets-") and ".light-" in stem],
     "controls-light": [p for stem, p in images.items() if stem.startswith("controls-") and ".light-" in stem],
     "comfort-light": [p for stem, p in images.items() if stem.startswith("comfort-") and ".light-" in stem],
     "power-light": [p for stem, p in images.items() if stem.startswith("power-") and ".light-" in stem],
