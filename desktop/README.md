@@ -150,6 +150,23 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   which is why the vendored note warns that forgetting this computer ends control
   of the earbuds. The list is A3062-only; the P20i (A3949) never reads or writes a
   `0B` frame and keeps the Connections page without the list.
+- **Demo mode** is available in the Add Device dialog's paired-device step: switching
+  it on replaces the Windows paired-device list with one simulated Space One Pro
+  (A3062, address `00:00:00:00:00:01`, name “soundcore Space One Pro · Demo”).
+  Connecting to it needs no pairing, no RFCOMM link and no device worker: the state
+  is parsed from the committed sanitized A3062 capture
+  (`core/data/a3062-state.json`), and every page and control is served on the same
+  event and command path a real device uses, so the UI wiring is the same. Sound
+  mode, equalizer presets, custom bands, the settings rows and the
+  dual-connections list update only the simulated state; the app never writes a
+  frame, never looks up a Windows device for it and never produces diagnostics from
+  it. The Diagnostics page is marked unavailable with a demo-mode explanation
+  because there is no radio to probe. My Devices keeps the card marked
+  “Demo device”, and Disconnect / Connect work without hardware; each connect
+  starts from the captured state again, so demo writes do not persist
+  (demo-only behaviour). Demo mode is offered for the Space One Pro only, the one
+  model with a committed demo capture; choosing another model keeps the real
+  paired-device list and says demo data is not available.
 - The **notification-area tray** uses the vendored `ui/tray.slint` component and
   Slint's Windows `SystemTrayIcon`: the OpenSCL4 icon with a tooltip naming the
   device and, while connected, its battery (“OpenSCL4 · soundcore Space One Pro”

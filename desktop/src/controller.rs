@@ -27,8 +27,9 @@ use soundcore_diagnostics::{
 };
 use soundcore_models::{
     A3062Settings, AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, ButtonAction,
-    DbLimit, DecibelReadingRefreshRate, DeviceModel, DeviceState, DualConnectionDevice,
-    EqualizerPreset, EqualizerState, SettingCommand, SoundMode, VISIBLE_EQ_BANDS,
+    CUSTOM_EQUALIZER_PRESET_ID, DbLimit, DecibelReadingRefreshRate, DeviceModel, DeviceState,
+    DualConnectionDevice, EqualizerPreset, EqualizerState, FIXED_EQ_BANDS, LimitHighVolume,
+    SettingCommand, SoundMode, VISIBLE_EQ_BANDS,
 };
 use soundcore_profiles::{
     EqualizerProfile, ImportPreview, ProfileSet, export_json, preview_import,
@@ -38,6 +39,7 @@ use soundcore_session::{DeviceSession, SessionError, Transport};
 use windows::core::GUID;
 
 use crate::catalog_adapter::{self, Chip};
+use crate::demo;
 use crate::overview::{self, OverviewBlock, OverviewLayout, OverviewPreferences, OverviewPreset};
 use crate::settings::{
     self, Accent, AppTheme, ContentScale, DesktopSettings, DeviceColor, SoundModeView,
@@ -1805,6 +1807,10 @@ struct Inner {
     enumeration: Cell<u64>,
     /// The newest connect attempt; results of older attempts are stale.
     connect: Cell<u64>,
+    /// Whether the current connection is the simulated demo device. A demo
+    /// connection has no transport and no device worker behind it, so the
+    /// Diagnostics page stays unavailable and no RFCOMM path may be reached.
+    demo: Cell<bool>,
     /// Cancels the in-flight connect attempt without waiting for it.
     cancel: RefCell<Option<Arc<AtomicBool>>>,
     /// The command channel of the connected device worker; dropping it stops the
@@ -2003,6 +2009,37 @@ impl Inner {
         }
     }
 
+    /// Serves the simulated device on a worker thread: the same event channel,
+    /// command channel and attempt number a real connection uses, but with no
+    /// transport, no Windows worker and no device I/O. The worker owns the only
+    /// copy of the simulated state, so a later connect starts from the fixture
+    /// again.
+    fn request_demo(&self, model: DeviceModel, state: DeviceState) {
+        let attempt = self.connect.get() + 1;
+        self.connect.set(attempt);
+        self.mode_change.set(0);
+        self.preset_change.set(0);
+        self.curve_change.set(0);
+        self.setting_change.set(0);
+        *self.cancel.borrow_mut() = None;
+        let (commands, command_receiver) = mpsc::channel();
+        // Replacing the channel stops a worker of an older attempt.
+        *self.commands.borrow_mut() = Some(commands);
+        let sender = self.sender.clone();
+        let spawned = std::thread::Builder::new()
+            .name("demo-device".into())
+            .spawn(move || serve_demo_device(model, state, attempt, sender, command_receiver));
+        if spawned.is_err() {
+            self.stop_worker();
+            let _ = self.sender.send(Event::Connected {
+                attempt,
+                outcome: ConnectOutcome::Failed(ConnectFailure::Transport(
+                    "could not start the demo device worker".into(),
+                )),
+            });
+        }
+    }
+
     /// Forgets the in-flight connect attempt; its eventual result is stale.
     fn cancel_connect(&self) {
         if let Some(cancel) = self.cancel.borrow_mut().take() {
@@ -2115,6 +2152,7 @@ impl Controller {
             receiver: RefCell::new(receiver),
             enumeration: Cell::new(0),
             connect: Cell::new(0),
+            demo: Cell::new(false),
             cancel: RefCell::new(None),
             commands: RefCell::new(None),
             mode_change: Cell::new(0),
@@ -2368,6 +2406,15 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         move || {
             if let Some(window) = inner.ui.upgrade() {
                 refresh_paired(&window, &inner);
+            }
+        }
+    });
+
+    actions.on_set_demo({
+        let inner = Rc::clone(inner);
+        move |on| {
+            if let Some(window) = inner.ui.upgrade() {
+                set_demo(&window, &inner, on);
             }
         }
     });
@@ -3313,6 +3360,12 @@ fn drain_events(inner: &Rc<Inner>) {
                 if attempt == inner.connect.get()
                     && let Some(window) = inner.ui.upgrade()
                 {
+                    // A demo connection has no session behind it: its state
+                    // still fills every page, but the Diagnostics probes have
+                    // no device to ask. The flag is read here because the event
+                    // itself is exactly what a real connect reports.
+                    let demo_connected =
+                        inner.demo.get() && matches!(&outcome, ConnectOutcome::Connected(..));
                     // Only a connected model with a measured mode, a supported
                     // equalizer or the settings block keeps its worker (and
                     // socket) for writes; everything else ends as in the MVP.
@@ -3329,6 +3382,14 @@ fn drain_events(inner: &Rc<Inner>) {
                     apply_outcome(&window, inner, outcome);
                     if !keeps_worker {
                         window.global::<AppState>().set_diagnostic_available(false);
+                    }
+                    if demo_connected {
+                        // `apply_outcome` fills the Diagnostics card from the
+                        // connected state; demo mode must undo that availability
+                        // and say why, after the card was filled.
+                        let state = window.global::<AppState>();
+                        state.set_diagnostic_available(false);
+                        state.set_diagnostic_error(demo::DEMO_DIAGNOSTICS_UNAVAILABLE.into());
                     }
                     // A connected A3062 shows the Saved profiles panel, so the
                     // loaded rows and their Applied tags are filled here.
@@ -3880,12 +3941,298 @@ fn serve_device_with_heartbeat<T: Transport>(
     }
 }
 
+/// Serves one simulated device connection on the demo worker.
+///
+/// It reports the same events as [`serve_device`], so the controller's event
+/// handling, page filling and request superseding are exercised unchanged, but
+/// it writes no frame anywhere: every command mutates the worker's copy of the
+/// state and answers with the value a device would have reported. The demo
+/// worker performs no connects, no session and no context; dropping the command
+/// channel (a disconnect, a reconnect or closing the app) ends it.
+fn serve_demo_device(
+    model: DeviceModel,
+    mut state: DeviceState,
+    attempt: u64,
+    events: Sender<Event>,
+    commands: Receiver<DeviceCommand>,
+) {
+    if events
+        .send(Event::Connected {
+            attempt,
+            outcome: ConnectOutcome::Connected(model, Box::new(state.clone())),
+        })
+        .is_err()
+    {
+        return;
+    }
+    // The Connections page's remembered-device list is part of the simulated
+    // device, so it arrives right after the state, like a real A3062 with dual
+    // connections on.
+    let mut dual_devices = demo::demo_dual_devices();
+    if events
+        .send(Event::DualConnectionsRead {
+            attempt,
+            outcome: Ok(dual_devices.clone()),
+        })
+        .is_err()
+    {
+        return;
+    }
+    while let Ok(command) = commands.recv() {
+        match command {
+            DeviceCommand::ChangeSoundMode { request, mode } => {
+                state.sound_mode = Some(mode);
+                if events
+                    .send(Event::ModeChanged {
+                        attempt,
+                        request,
+                        outcome: Ok(mode),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            DeviceCommand::ChangeEqualizerPreset { request, preset_id } => {
+                // Only a preset of the model's catalog can be selected, exactly
+                // as the real worker treats an unknown id.
+                let preset = model
+                    .equalizer_presets()
+                    .iter()
+                    .find(|preset| preset.id == preset_id);
+                let outcome = match (preset, state.equalizer) {
+                    (Some(preset), Some(mut equalizer)) => {
+                        equalizer.preset_id = preset.id;
+                        equalizer.bands = preset.bands;
+                        state.equalizer = Some(equalizer);
+                        Ok(equalizer)
+                    }
+                    _ => Err(EqFailure::Unreadable),
+                };
+                let failed = outcome.is_err();
+                if events
+                    .send(Event::PresetChanged {
+                        attempt,
+                        request,
+                        outcome,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                if failed {
+                    // Same rule as the real worker: a session that cannot
+                    // answer a change is not written to again.
+                    return;
+                }
+            }
+            DeviceCommand::WriteCustomCurve { request, bands } => {
+                let outcome = match state.equalizer {
+                    Some(mut equalizer) => {
+                        equalizer.preset_id = CUSTOM_EQUALIZER_PRESET_ID;
+                        equalizer.bands[..VISIBLE_EQ_BANDS].copy_from_slice(&bands);
+                        equalizer.bands[VISIBLE_EQ_BANDS..].copy_from_slice(&FIXED_EQ_BANDS);
+                        state.equalizer = Some(equalizer);
+                        Ok(equalizer)
+                    }
+                    None => Err(EqFailure::Unreadable),
+                };
+                let failed = outcome.is_err();
+                if events
+                    .send(Event::CurveChanged {
+                        attempt,
+                        request,
+                        outcome,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                if failed {
+                    return;
+                }
+            }
+            DeviceCommand::SetSetting { request, setting } => {
+                let dual_turned_on = matches!(setting, SettingCommand::DualConnections(true));
+                let has_settings = match state.settings.as_mut() {
+                    Some(settings) => {
+                        apply_demo_setting(settings, setting);
+                        true
+                    }
+                    None => false,
+                };
+                let outcome = if has_settings {
+                    Ok(Box::new(state.clone()))
+                } else {
+                    Err(SettingFailure::Unreadable)
+                };
+                let failed = outcome.is_err();
+                if events
+                    .send(Event::SettingChanged {
+                        attempt,
+                        request,
+                        setting,
+                        outcome,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                if failed {
+                    return;
+                }
+                if dual_turned_on {
+                    // Turning dual connections on makes the Connections page
+                    // show its list; a real worker reads it straight away.
+                    if events
+                        .send(Event::DualConnectionsRead {
+                            attempt,
+                            outcome: Ok(dual_devices.clone()),
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            DeviceCommand::ReadDualConnections => {
+                if events
+                    .send(Event::DualConnectionsRead {
+                        attempt,
+                        outcome: Ok(dual_devices.clone()),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            DeviceCommand::DualConnectionWrite(action) => {
+                match action {
+                    DualAction::Connect(mac) => {
+                        if let Some(device) =
+                            dual_devices.iter_mut().find(|device| device.mac == mac)
+                        {
+                            device.connected = true;
+                        }
+                    }
+                    DualAction::Disconnect(mac) => {
+                        if let Some(device) =
+                            dual_devices.iter_mut().find(|device| device.mac == mac)
+                        {
+                            device.connected = false;
+                        }
+                    }
+                    DualAction::Forget(mac) => {
+                        dual_devices.retain(|device| device.mac != mac);
+                    }
+                }
+                if events
+                    .send(Event::DualConnectionsWritten {
+                        attempt,
+                        action,
+                        outcome: Ok(dual_devices.clone()),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // The probes are read-only reads of a real radio link, which a
+            // simulated device does not have. The Diagnostics page is marked
+            // unavailable after a demo connect and never queues this command;
+            // ignoring it here keeps the demo worker from inventing a capture.
+            DeviceCommand::RunDiagnostics { .. } => {}
+        }
+    }
+}
+
+/// Applies one settings write to the simulated state, exactly as the device
+/// would report it on the following state poll. Every measured setting is
+/// covered; the payload types are the same validated ones the real bodies use.
+fn apply_demo_setting(settings: &mut A3062Settings, setting: SettingCommand) {
+    match setting {
+        SettingCommand::ButtonDoublePress(action) => settings.button_double_press = action,
+        SettingCommand::AmbientSoundModeCycle(cycle) => settings.ambient_sound_mode_cycle = cycle,
+        SettingCommand::LowBatteryPrompt(on) => settings.low_battery_prompt = on,
+        SettingCommand::DolbyAudio(on) => settings.dolby_audio = on,
+        SettingCommand::Ldac(on) => settings.ldac = on,
+        SettingCommand::DualConnections(on) => settings.dual_connections = on,
+        SettingCommand::AutoPowerOff(auto_power_off) => settings.auto_power_off = auto_power_off,
+        SettingCommand::LimitHighVolume { enabled, db_limit } => {
+            settings.limit_high_volume = LimitHighVolume {
+                enabled,
+                db_limit,
+                refresh_rate: settings.limit_high_volume.refresh_rate,
+            };
+        }
+        SettingCommand::LimitHighVolumeRefreshRate(refresh_rate) => {
+            settings.limit_high_volume.refresh_rate = refresh_rate;
+        }
+        SettingCommand::SideTone(on) => settings.side_tone = on,
+        SettingCommand::VoicePrompt(on) => settings.voice_prompt = on,
+    }
+}
+
+/// Answers the Add Device dialog's Demo mode switch. Turning it on replaces the
+/// Windows paired-device list with the one simulated A3062, which is the only
+/// model the committed demo capture describes; a different chosen model is
+/// refused with the dialog's own error line. Turning it off clears the
+/// simulated row and asks the real enumeration again.
+fn set_demo(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
+    let state = window.global::<AppState>();
+    state.set_add_demo(on);
+    state.set_add_failure_kind(FailureKind::None);
+    state.set_add_error("".into());
+    state.set_add_bluetooth_off(false);
+    if !on {
+        state.set_paired_options(ModelRc::default());
+        state.set_add_loading(true);
+        request_paired_for_selection(&state, inner);
+        return;
+    }
+    match chosen_model(&state) {
+        Some(model) => {
+            show_demo_options(&state, &model);
+        }
+        None => {
+            state.set_paired_options(ModelRc::default());
+            state.set_add_loading(false);
+        }
+    }
+}
+
+/// Fills the paired-device step with the single simulated A3062, or shows the
+/// dialog's error line when the chosen model has no committed demo capture.
+/// Returns whether the simulated device was listed.
+fn show_demo_options(state: &AppState<'_>, model: &SelectedModel) -> bool {
+    if model.code != demo::demo_model().code {
+        state.set_paired_options(ModelRc::default());
+        state.set_add_loading(false);
+        state.set_add_failure_kind(FailureKind::Other);
+        state.set_add_error(demo::DEMO_UNAVAILABLE.into());
+        return false;
+    }
+    state.set_paired_options(ModelRc::new(VecModel::from(vec![PairedOption {
+        mac: demo::DEMO_MAC.into(),
+        name: demo::DEMO_NAME.into(),
+        suggested: true,
+    }])));
+    state.set_add_loading(false);
+    state.set_add_bluetooth_off(false);
+    state.set_add_failure_kind(FailureKind::None);
+    state.set_add_error("".into());
+    true
+}
+
 /// Resets the dialog to its model step and starts the paired enumeration.
 fn open_add_device(window: &AppWindow, inner: &Rc<Inner>) {
     let state = window.global::<AppState>();
     state.set_adding(true);
     state.set_add_step(0);
     state.set_add_loading(true);
+    // Demo mode belongs to one dialog visit: opening the dialog again starts
+    // from the real paired-device list.
+    state.set_add_demo(false);
     state.set_add_bluetooth_off(false);
     state.set_add_failure_kind(FailureKind::None);
     state.set_add_error("".into());
@@ -3903,7 +4250,7 @@ fn choose_model(window: &AppWindow, inner: &Rc<Inner>, code: &str) {
     let state = window.global::<AppState>();
     state.set_add_model_name(model.name.into());
     state.set_add_model_code(model.code.into());
-    state.set_add_model_art(model.art);
+    state.set_add_model_art(model.art.clone());
     state.set_add_model_is_speaker(model.is_speaker);
     state.set_add_step(1);
     state.set_add_bluetooth_off(false);
@@ -3914,15 +4261,34 @@ fn choose_model(window: &AppWindow, inner: &Rc<Inner>, code: &str) {
     // The confirmation card already carries the chosen color; a filter or a
     // theme change before the next step must not reset it to silver.
     paint_device_art(&state, paint_black(inner));
+    if state.get_add_demo() {
+        // Demo mode lists only the simulated model, so switching models while
+        // it is on refills the row or explains that there is no demo data.
+        show_demo_options(&state, &model);
+        return;
+    }
     inner.request_paired(Some((model.code.to_owned(), model.name.to_owned())));
 }
 
-/// Repeats the enumeration for the current selection.
+/// Repeats the enumeration for the current selection, or refills the simulated
+/// row while Demo mode is on.
 fn refresh_paired(window: &AppWindow, inner: &Rc<Inner>) {
     let state = window.global::<AppState>();
     state.set_add_failure_kind(FailureKind::None);
     state.set_add_error("".into());
     state.set_add_bluetooth_off(false);
+    if state.get_add_demo() {
+        match chosen_model(&state) {
+            Some(model) => {
+                show_demo_options(&state, &model);
+            }
+            None => {
+                state.set_paired_options(ModelRc::default());
+                state.set_add_loading(false);
+            }
+        }
+        return;
+    }
     request_paired_for_selection(&state, inner);
 }
 
@@ -3939,7 +4305,9 @@ fn chosen_model(state: &AppState<'_>) -> Option<SelectedModel> {
 }
 
 /// Pairs the picked Windows device with the chosen catalog model and starts the
-/// connection attempt.
+/// connection attempt. In demo mode the picked row is the simulated device, so
+/// the demo connection starts before the address is parsed: no real address is
+/// required and nothing is opened.
 fn pair(window: &AppWindow, inner: &Rc<Inner>, mac: &str, name: &str) {
     let state = window.global::<AppState>();
     let Some(model) = chosen_model(&state) else {
@@ -3947,6 +4315,10 @@ fn pair(window: &AppWindow, inner: &Rc<Inner>, mac: &str, name: &str) {
         state.set_add_error("Choose a model before picking a paired device.".into());
         return;
     };
+    if state.get_add_demo() {
+        begin_demo_connect(window, inner, model);
+        return;
+    }
     let Some(address) = parse_mac(mac) else {
         state.set_add_failure_kind(FailureKind::Other);
         state.set_add_error(
@@ -4010,8 +4382,14 @@ fn retry(window: &AppWindow, inner: &Rc<Inner>) {
     begin_card_connect(window, inner, card);
 }
 
-/// Starts the connection of a saved card.
+/// Starts the connection of a saved card. A demo card reconnects to the
+/// simulated device; its stored address is never parsed and no radio is opened.
 fn begin_card_connect(window: &AppWindow, inner: &Rc<Inner>, card: DeviceCard) {
+    if card.demo {
+        let model = selected_model(card.code.as_str()).unwrap_or_else(demo_selection);
+        begin_demo_connect(window, inner, model);
+        return;
+    }
     let state = window.global::<AppState>();
     show_current_card(
         &state,
@@ -4052,6 +4430,9 @@ fn begin_card_connect(window: &AppWindow, inner: &Rc<Inner>, card: DeviceCard) {
 /// Puts the window into "connecting" and starts the worker; the timer applies
 /// the result later.
 fn begin_connecting(state: &AppState<'_>, inner: &Rc<Inner>, request: ConnectRequest) {
+    // A real connection replaces any simulated one: from here on the attempt
+    // reaches the Windows worker, so the demo-only rules must not apply.
+    inner.demo.set(false);
     state.set_connection(Connection::Connecting);
     state.set_connection_reason("".into());
     state.set_failure_kind(FailureKind::None);
@@ -4067,6 +4448,65 @@ fn begin_connecting(state: &AppState<'_>, inner: &Rc<Inner>, request: ConnectReq
     render_settings(state, inner);
     refresh_tray(inner, state);
     inner.request_connect(request);
+}
+
+/// The catalog selection of the simulated model, for a saved demo card whose
+/// code the catalog no longer lists.
+fn demo_selection() -> SelectedModel {
+    selected_model(demo::demo_model().code).expect("the demo model is a catalog model")
+}
+
+/// Starts the simulated A3062 connection: the same connecting and connected
+/// event path a real device uses, but the device state comes from the committed
+/// capture and the worker has no transport. The saved card carries `demo: true`
+/// so My Devices and later reconnects stay on the demo path.
+fn begin_demo_connect(window: &AppWindow, inner: &Rc<Inner>, model: SelectedModel) {
+    let state = window.global::<AppState>();
+    let demo_model = demo::demo_model();
+    if model.code != demo_model.code {
+        state.set_add_failure_kind(FailureKind::Other);
+        state.set_add_error(demo::DEMO_UNAVAILABLE.into());
+        return;
+    }
+    let device_state = demo::demo_state();
+    show_current_card(
+        &state,
+        DeviceCard {
+            mac: demo::DEMO_MAC.into(),
+            name: demo::DEMO_NAME.into(),
+            code: demo_model.code.into(),
+            art: model.art.clone(),
+            current: true,
+            demo: true,
+        },
+    );
+    state.set_device_name(demo::DEMO_NAME.into());
+    state.set_device_code(demo_model.code.into());
+    state.set_device_art(model.art);
+    state.set_device_is_speaker(model.is_speaker);
+    state.set_one_earbud(false);
+    state.set_adding(false);
+    state.set_add_step(0);
+    state.set_add_failure_kind(FailureKind::None);
+    state.set_add_error("".into());
+    state.set_page(Page::Overview);
+    state.set_connection(Connection::Connecting);
+    state.set_connection_reason("".into());
+    state.set_failure_kind(FailureKind::None);
+    state.set_failure_text("".into());
+    state.set_error_label("".into());
+    state.set_batteries(ModelRc::default());
+    inner.device.borrow_mut().take();
+    inner.clear_dual_devices();
+    show_sound_mode(&state, None, false, false);
+    show_equalizer(&state, &EqualizerDisplay::default());
+    reset_diagnostics(&state);
+    clear_section_pages(&state);
+    render_settings(&state, inner);
+    paint_device_art(&state, paint_black(inner));
+    refresh_tray(inner, &state);
+    inner.demo.set(true);
+    inner.request_demo(demo_model, device_state);
 }
 
 /// Stops a pending attempt; its worker result no longer matches the attempt the
@@ -11609,6 +12049,7 @@ mod tests {
             receiver: RefCell::new(receiver),
             enumeration: Cell::new(0),
             connect: Cell::new(0),
+            demo: Cell::new(false),
             cancel: RefCell::new(None),
             commands: RefCell::new(None),
             mode_change: Cell::new(0),
@@ -15020,5 +15461,568 @@ mod tests {
             }
         }
         panic!("no paired A3062 answered");
+    }
+
+    /// Drains the worker channel until `done` holds, or the timeout expires.
+    fn pump_until(inner: &Rc<Inner>, done: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            drain_events(inner);
+            if done() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Starts the demo connection through the wired Add Device callbacks, as
+    /// the dialog's Demo mode switch and simulated row do, and returns the
+    /// controller state once the Overview shows the simulated device.
+    fn connect_demo(ui: &AppWindow) -> Rc<Inner> {
+        let inner = test_inner(ui);
+        wire_actions(ui, &inner);
+        let state = ui.global::<AppState>();
+        state.set_add_model_code(demo::DEMO_MODEL_CODE.into());
+        state.set_add_model_name("Space One Pro".into());
+        ui.global::<Actions>().invoke_set_demo(true);
+        let option: PairedOption = state
+            .get_paired_options()
+            .iter()
+            .next()
+            .expect("Demo mode lists the simulated device");
+        ui.global::<Actions>().invoke_pair(option.mac, option.name);
+        assert!(
+            wait_for_connection(&inner, ui, Connection::Connected, Duration::from_secs(5)),
+            "the simulated device connects without any hardware"
+        );
+        inner
+    }
+
+    #[test]
+    fn demo_mode_lists_the_simulated_device_and_refuses_other_models() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            wire_actions(ui, &inner);
+            let actions = ui.global::<Actions>();
+            let state = ui.global::<AppState>();
+
+            // A model the committed capture does not describe is refused with
+            // the dialog's own error line and no simulated row.
+            state.set_add_model_code("A3949".into());
+            actions.invoke_set_demo(true);
+            assert!(state.get_add_demo());
+            assert_eq!(0, state.get_paired_options().row_count());
+            assert_eq!(FailureKind::Other, state.get_add_failure_kind());
+            assert_eq!(demo::DEMO_UNAVAILABLE, state.get_add_error().as_str());
+
+            // The Space One Pro lists exactly one suggested simulated device,
+            // and the list is not a loading state.
+            state.set_add_model_code(demo::DEMO_MODEL_CODE.into());
+            actions.invoke_set_demo(true);
+            assert_eq!(1, state.get_paired_options().row_count());
+            let option: PairedOption = state.get_paired_options().iter().next().unwrap();
+            assert_eq!(demo::DEMO_MAC, option.mac.as_str());
+            assert_eq!(demo::DEMO_NAME, option.name.as_str());
+            assert!(option.suggested);
+            assert!(!state.get_add_loading());
+            assert_eq!(FailureKind::None, state.get_add_failure_kind());
+            assert_eq!("", state.get_add_error().as_str());
+
+            // Choosing another model while Demo mode is on repeats the refusal
+            // instead of listing the Windows paired devices.
+            actions.invoke_choose_model("A3949".into());
+            assert_eq!(demo::DEMO_UNAVAILABLE, state.get_add_error().as_str());
+            assert_eq!(0, state.get_paired_options().row_count());
+            actions.invoke_choose_model(demo::DEMO_MODEL_CODE.into());
+            assert_eq!(1, state.get_paired_options().row_count());
+
+            // Turning Demo mode off clears the simulated row and asks the real
+            // paired-device enumeration again.
+            let enumeration = inner.enumeration.get();
+            actions.invoke_set_demo(false);
+            assert!(!state.get_add_demo());
+            assert_eq!(0, state.get_paired_options().row_count());
+            assert!(state.get_add_loading());
+            assert_eq!(enumeration + 1, inner.enumeration.get());
+        });
+    }
+
+    #[test]
+    fn the_demo_connection_fills_every_implemented_page() {
+        with_ui_window(|ui| {
+            let inner = connect_demo(ui);
+            let state = ui.global::<AppState>();
+
+            // The saved card is the simulated device and is current; the demo
+            // flag is what My Devices and later reconnects read.
+            assert!(inner.demo.get());
+            let cards: Vec<DeviceCard> = state.get_devices().iter().collect();
+            assert_eq!(1, cards.len());
+            assert!(cards[0].demo);
+            assert!(cards[0].current);
+            assert_eq!(demo::DEMO_MAC, cards[0].mac.as_str());
+            assert_eq!(demo::DEMO_NAME, cards[0].name.as_str());
+            assert_eq!(demo::DEMO_MODEL_CODE, cards[0].code.as_str());
+            assert_eq!(demo::DEMO_NAME, state.get_device_name().as_str());
+            assert_eq!(demo::DEMO_MODEL_CODE, state.get_device_code().as_str());
+            assert_eq!(Page::Overview, state.get_page());
+            assert_eq!(Connection::Connected, state.get_connection());
+            assert!(state.get_batteries().row_count() > 0);
+            assert_eq!(2, state.get_mode_index(), "the capture reports Normal");
+            assert!(state.get_eq_available());
+
+            // The fixture state, not an invented one, is what the controller
+            // keeps and what every page is filled from.
+            {
+                let device = inner.device.borrow();
+                let device = device.as_deref().expect("the demo state is kept");
+                assert_eq!(Some(SoundMode::Normal), device.sound_mode);
+                assert_eq!(
+                    device
+                        .single_battery
+                        .as_ref()
+                        .and_then(|single| single.firmware.as_deref()),
+                    Some("04.39")
+                );
+                assert_eq!(None, device.serial);
+            }
+            let sound_pages: Vec<Page> = state.get_sound_pages().iter().collect();
+            assert_eq!(
+                vec![Page::SoundModes, Page::Equalizer, Page::Effects],
+                sound_pages
+            );
+            let device_pages: Vec<Page> = state.get_device_pages().iter().collect();
+            assert_eq!(
+                vec![
+                    Page::Controls,
+                    Page::Comfort,
+                    Page::Power,
+                    Page::Connections,
+                    Page::About,
+                ],
+                device_pages
+            );
+            assert!(state.get_eq_presets().row_count() > 1);
+            assert!(state.get_overview_rows().row_count() > 0);
+
+            // The Connections page's remembered-device list arrives on connect
+            // and is made of neutral names and addresses.
+            assert_eq!(*inner.dual_devices.borrow(), demo::demo_dual_devices());
+            for page in [
+                Page::Controls,
+                Page::Comfort,
+                Page::Power,
+                Page::Effects,
+                Page::About,
+            ] {
+                ui.global::<Actions>().invoke_navigate(page);
+                drain_events(&inner);
+                assert!(
+                    state.get_panels().row_count() > 0,
+                    "{page:?} is filled from the demo state"
+                );
+            }
+            ui.global::<Actions>().invoke_navigate(Page::Connections);
+            assert!(
+                pump_until(&inner, || {
+                    state
+                        .get_panels()
+                        .iter()
+                        .any(|panel| panel.kind == PanelKind::DualDevices)
+                }),
+                "the Connections page shows the simulated remembered devices"
+            );
+
+            // A demo connection has no session to probe: Diagnostics says so
+            // and its capture button stays disabled.
+            assert!(!state.get_diagnostic_available());
+            assert_eq!(
+                demo::DEMO_DIAGNOSTICS_UNAVAILABLE,
+                state.get_diagnostic_error().as_str()
+            );
+            assert!(
+                inner.commands.borrow().is_some(),
+                "the demo command channel stays open for writes"
+            );
+        });
+    }
+
+    #[test]
+    fn demo_writes_update_only_the_simulated_state() {
+        with_ui_window(|ui| {
+            let inner = connect_demo(ui);
+            let state = ui.global::<AppState>();
+            let actions = ui.global::<Actions>();
+
+            // Sound mode tile: the reported mode follows the click.
+            click_mode(ui, 1);
+            assert_eq!(Some(1), wait_for_mode(ui, &inner, 1));
+
+            // Equalizer preset: the page shows the preset the simulated device
+            // reports, from the model's own catalog.
+            actions.invoke_eq_preset("3".into());
+            assert!(
+                pump_until(&inner, || state.get_eq_preset().as_str() == "3"),
+                "the simulated device reports the chosen preset"
+            );
+            assert_eq!("Bass Reducer", state.get_eq_name().as_str());
+
+            // Custom curve: the visible bands are the written ones, and the two
+            // invisible bands keep their measured fixed values.
+            let custom_preset = CUSTOM_EQUALIZER_PRESET_ID.to_string();
+            actions.invoke_eq_commit(0, 30);
+            assert!(
+                pump_until(&inner, || state.get_eq_preset().as_str()
+                    == custom_preset.as_str()),
+                "the simulated device reports custom bands"
+            );
+            let bands: Vec<EqBand> = state.get_eq_bands().iter().collect();
+            assert_eq!(30, bands[0].value);
+
+            // A settings page toggle: the re-polled state and the page follow.
+            // LDAC is off in the capture, so toggling it on must come from the
+            // simulated write's re-poll, not from the page's own click.
+            actions.invoke_navigate(Page::Effects);
+            drain_events(&inner);
+            click_toggle(ui, "ldac", true);
+            assert!(
+                wait_for_settings(ui, &inner, |settings| settings.ldac, "LDAC on").is_some(),
+                "the simulated settings change"
+            );
+            assert_eq!("", state.get_error_label().as_str());
+            // The re-polled state carries the simulated equalizer too.
+            {
+                let device = inner.device.borrow();
+                let equalizer = device
+                    .as_deref()
+                    .and_then(|device| device.equalizer)
+                    .expect("the demo state keeps an equalizer");
+                assert_eq!(CUSTOM_EQUALIZER_PRESET_ID, equalizer.preset_id);
+                assert_eq!(30, equalizer.bands[0]);
+                assert_eq!(
+                    FIXED_EQ_BANDS,
+                    [
+                        equalizer.bands[VISIBLE_EQ_BANDS],
+                        equalizer.bands[VISIBLE_EQ_BANDS + 1]
+                    ]
+                );
+            }
+
+            // The Connections page's list actions run against the simulated
+            // list: connect the remembered phone, then forget the desktop.
+            actions.invoke_navigate(Page::Connections);
+            assert!(pump_until(&inner, || {
+                state
+                    .get_panels()
+                    .iter()
+                    .any(|panel| panel.kind == PanelKind::DualDevices)
+            }));
+            actions.invoke_connect_item(DUAL_DEVICES_ROW_ID.into(), 1);
+            assert!(
+                pump_until(&inner, || {
+                    inner
+                        .dual_devices
+                        .borrow()
+                        .get(1)
+                        .is_some_and(|device| device.connected)
+                }),
+                "the simulated phone connects"
+            );
+            actions.invoke_remove_item(DUAL_DEVICES_ROW_ID.into(), 0);
+            assert!(
+                pump_until(&inner, || inner.dual_devices.borrow().len() == 1),
+                "the simulated desktop is forgotten"
+            );
+
+            // The writes went through the demo worker only: the connection is
+            // still established, its channel is still open and nothing can
+            // have reached a radio.
+            assert_eq!(Connection::Connected, state.get_connection());
+            assert!(inner.demo.get());
+            assert!(inner.commands.borrow().is_some());
+            assert!(!state.get_diagnostic_available());
+        });
+    }
+
+    #[test]
+    fn the_demo_worker_answers_every_command_locally() {
+        let model = demo::demo_model();
+        let state = demo::demo_state();
+        let preset = model.equalizer_presets()[1];
+        let curve = [30, -30, 60, 0, -60, 20, 0, -20];
+        let (events, received) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        commands
+            .send(DeviceCommand::ChangeSoundMode {
+                request: 1,
+                mode: SoundMode::Transparency,
+            })
+            .expect("the mode click is queued");
+        commands
+            .send(DeviceCommand::ChangeEqualizerPreset {
+                request: 2,
+                preset_id: preset.id,
+            })
+            .expect("the preset click is queued");
+        commands
+            .send(DeviceCommand::WriteCustomCurve {
+                request: 3,
+                bands: curve,
+            })
+            .expect("the curve release is queued");
+        commands
+            .send(DeviceCommand::SetSetting {
+                request: 4,
+                setting: SettingCommand::Ldac(false),
+            })
+            .expect("the settings toggle is queued");
+        commands
+            .send(DeviceCommand::ReadDualConnections)
+            .expect("the Connections refresh is queued");
+        commands
+            .send(DeviceCommand::DualConnectionWrite(DualAction::Disconnect(
+                demo::DEMO_DESKTOP_MAC,
+            )))
+            .expect("the disconnect row action is queued");
+        commands
+            .send(DeviceCommand::DualConnectionWrite(DualAction::Forget(
+                demo::DEMO_PHONE_MAC,
+            )))
+            .expect("the forget row action is queued");
+        commands
+            .send(DeviceCommand::RunDiagnostics { request: 9 })
+            .expect("a stray diagnostics request is queued");
+        drop(commands);
+
+        serve_demo_device(model, state, 7, events, command_receiver);
+
+        // The connect report and the remembered-device list arrive first, in
+        // the same order a real A3062 worker sends them.
+        match received.try_recv().expect("the connect report") {
+            Event::Connected {
+                attempt: 7,
+                outcome: ConnectOutcome::Connected(reported_model, reported),
+            } => {
+                assert_eq!("A3062", reported_model.code);
+                assert_eq!(Some(SoundMode::Normal), reported.sound_mode);
+                assert_eq!(None, reported.serial);
+            }
+            other => panic!("unexpected connect report: {other:?}"),
+        }
+        match received.try_recv().expect("the dual list") {
+            Event::DualConnectionsRead {
+                attempt: 7,
+                outcome: Ok(devices),
+            } => assert_eq!(demo::demo_dual_devices(), devices),
+            other => panic!("unexpected dual list: {other:?}"),
+        }
+        match received.try_recv().expect("the mode change") {
+            Event::ModeChanged {
+                attempt: 7,
+                request: 1,
+                outcome: Ok(mode),
+            } => assert_eq!(SoundMode::Transparency, mode),
+            other => panic!("unexpected mode event: {other:?}"),
+        }
+        match received.try_recv().expect("the preset change") {
+            Event::PresetChanged {
+                attempt: 7,
+                request: 2,
+                outcome: Ok(equalizer),
+            } => {
+                assert_eq!(preset.id, equalizer.preset_id);
+                assert_eq!(preset.bands, equalizer.bands);
+            }
+            other => panic!("unexpected preset event: {other:?}"),
+        }
+        match received.try_recv().expect("the curve change") {
+            Event::CurveChanged {
+                attempt: 7,
+                request: 3,
+                outcome: Ok(equalizer),
+            } => {
+                assert_eq!(CUSTOM_EQUALIZER_PRESET_ID, equalizer.preset_id);
+                assert_eq!(curve, equalizer.visible_bands());
+                assert_eq!(
+                    FIXED_EQ_BANDS,
+                    [
+                        equalizer.bands[VISIBLE_EQ_BANDS],
+                        equalizer.bands[VISIBLE_EQ_BANDS + 1]
+                    ]
+                );
+            }
+            other => panic!("unexpected curve event: {other:?}"),
+        }
+        match received.try_recv().expect("the setting change") {
+            Event::SettingChanged {
+                attempt: 7,
+                request: 4,
+                setting: SettingCommand::Ldac(false),
+                outcome: Ok(reported),
+            } => {
+                assert_eq!(Some(false), reported.settings.map(|settings| settings.ldac));
+            }
+            other => panic!("unexpected setting event: {other:?}"),
+        }
+        match received.try_recv().expect("the list refresh") {
+            Event::DualConnectionsRead {
+                attempt: 7,
+                outcome: Ok(devices),
+            } => assert_eq!(demo::demo_dual_devices(), devices),
+            other => panic!("unexpected list refresh: {other:?}"),
+        }
+        match received.try_recv().expect("the disconnect write") {
+            Event::DualConnectionsWritten {
+                attempt: 7,
+                action: DualAction::Disconnect(mac),
+                outcome: Ok(devices),
+            } => {
+                assert_eq!(demo::DEMO_DESKTOP_MAC, mac);
+                assert!(
+                    devices
+                        .iter()
+                        .all(|device| device.mac != demo::DEMO_DESKTOP_MAC || !device.connected)
+                );
+            }
+            other => panic!("unexpected disconnect event: {other:?}"),
+        }
+        match received.try_recv().expect("the forget write") {
+            Event::DualConnectionsWritten {
+                attempt: 7,
+                action: DualAction::Forget(mac),
+                outcome: Ok(devices),
+            } => {
+                assert_eq!(demo::DEMO_PHONE_MAC, mac);
+                assert_eq!(1, devices.len());
+            }
+            other => panic!("unexpected forget event: {other:?}"),
+        }
+        // The stray diagnostics request was ignored: no capture is invented.
+        assert!(
+            received.try_recv().is_err(),
+            "demo diagnostics are never run"
+        );
+    }
+
+    #[test]
+    fn every_demo_setting_write_changes_its_field() {
+        let mut settings = demo::demo_state()
+            .settings
+            .expect("the demo capture reports settings");
+        apply_demo_setting(
+            &mut settings,
+            SettingCommand::ButtonDoublePress(Some(ButtonAction::BassUp)),
+        );
+        assert_eq!(Some(ButtonAction::BassUp), settings.button_double_press);
+        apply_demo_setting(
+            &mut settings,
+            SettingCommand::AmbientSoundModeCycle(AmbientSoundModeCycle {
+                noise_canceling: false,
+                transparency: true,
+                normal: false,
+            }),
+        );
+        assert!(!settings.ambient_sound_mode_cycle.noise_canceling);
+        assert!(settings.ambient_sound_mode_cycle.transparency);
+        apply_demo_setting(&mut settings, SettingCommand::LowBatteryPrompt(false));
+        assert!(!settings.low_battery_prompt);
+        apply_demo_setting(&mut settings, SettingCommand::DolbyAudio(true));
+        assert!(settings.dolby_audio);
+        apply_demo_setting(&mut settings, SettingCommand::Ldac(false));
+        assert!(!settings.ldac);
+        apply_demo_setting(&mut settings, SettingCommand::DualConnections(false));
+        assert!(!settings.dual_connections);
+        apply_demo_setting(
+            &mut settings,
+            SettingCommand::AutoPowerOff(AutoPowerOff {
+                enabled: false,
+                duration: AutoPowerOffDuration::NinetyMinutes,
+            }),
+        );
+        assert!(!settings.auto_power_off.enabled);
+        assert_eq!(
+            AutoPowerOffDuration::NinetyMinutes,
+            settings.auto_power_off.duration
+        );
+        let refresh_rate = settings.limit_high_volume.refresh_rate;
+        apply_demo_setting(
+            &mut settings,
+            SettingCommand::LimitHighVolume {
+                enabled: true,
+                db_limit: DbLimit::new(85).expect("85 is a measured dB limit"),
+            },
+        );
+        assert!(settings.limit_high_volume.enabled);
+        assert_eq!(85, settings.limit_high_volume.db_limit.value());
+        assert_eq!(
+            refresh_rate, settings.limit_high_volume.refresh_rate,
+            "the dB limit keeps the chosen refresh rate"
+        );
+        apply_demo_setting(
+            &mut settings,
+            SettingCommand::LimitHighVolumeRefreshRate(DecibelReadingRefreshRate::OneMinute),
+        );
+        assert_eq!(
+            DecibelReadingRefreshRate::OneMinute,
+            settings.limit_high_volume.refresh_rate
+        );
+        apply_demo_setting(&mut settings, SettingCommand::SideTone(false));
+        assert!(!settings.side_tone);
+        apply_demo_setting(&mut settings, SettingCommand::VoicePrompt(false));
+        assert!(!settings.voice_prompt);
+    }
+
+    #[test]
+    fn a_demo_disconnect_keeps_the_card_and_reconnects_without_windows_pairing() {
+        with_ui_window(|ui| {
+            let inner = connect_demo(ui);
+            let state = ui.global::<AppState>();
+            let actions = ui.global::<Actions>();
+
+            // Change something so the fresh demo state after a reconnect is
+            // observable.
+            click_mode(ui, 1);
+            assert_eq!(Some(1), wait_for_mode(ui, &inner, 1));
+            let attempt = inner.connect.get();
+            let enumeration = inner.enumeration.get();
+
+            // Disconnect returns to My Devices, keeps the saved demo card and
+            // stops the demo worker.
+            actions.invoke_disconnect();
+            assert_eq!(Page::Devices, state.get_page());
+            assert_eq!(Connection::Off, state.get_connection());
+            let cards: Vec<DeviceCard> = state.get_devices().iter().collect();
+            assert_eq!(1, cards.len());
+            assert!(cards[0].demo);
+            assert!(!cards[0].current);
+            assert!(inner.commands.borrow().is_none());
+
+            // Retry reconnects the demo card: no Windows paired device is
+            // looked up and no address is parsed, yet the connection succeeds.
+            actions.invoke_retry();
+            assert_eq!(Connection::Connecting, state.get_connection());
+            assert!(
+                wait_for_connection(&inner, ui, Connection::Connected, Duration::from_secs(5)),
+                "the saved demo card reconnects without hardware"
+            );
+            assert_eq!(
+                enumeration,
+                inner.enumeration.get(),
+                "no Windows enumeration"
+            );
+            assert!(inner.connect.get() > attempt);
+            assert!(inner.demo.get());
+            // Each demo connect starts from the committed capture again, so
+            // the previous mode click is gone; this demo-only behaviour is
+            // documented on the demo module.
+            assert_eq!(2, state.get_mode_index());
+            assert_eq!(Page::Overview, state.get_page());
+            assert_eq!(1, state.get_devices().row_count());
+            assert!(state.get_devices().iter().next().unwrap().demo);
+            assert!(!state.get_diagnostic_available());
+        });
     }
 }

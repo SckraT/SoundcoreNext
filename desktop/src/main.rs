@@ -25,6 +25,7 @@ macro_rules! app_log {
 
 mod catalog_adapter;
 mod controller;
+mod demo;
 mod logs;
 mod overview;
 mod settings;
