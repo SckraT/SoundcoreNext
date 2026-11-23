@@ -162,3 +162,14 @@ the UI runs or the captures.
   `cargo test --workspace` **186 passed / 0 failed / 0 ignored**.
 - The release merge of `feature/a3954-settings` into `master` is the next
   release step, reported from the release worktree.
+### Release result
+
+`feature/a3954-settings` was merged into `master` as `c377854` ("Add Liberty 4
+Pro settings"). The final master tree was re-gated: desktop fmt/build/clippy
+clean, 288 passed / 14 ignored; core fmt/build/clippy clean, 186 passed / 0
+ignored. Ticket worktrees a3954-core/controller/live/review were removed. The
+real A3954 was left as found; custom EQ and every supported setting were
+restored and re-polled. Deferred: button remapping, case display/features/case
+language writes, air-pressure writes, HearID editing; an airplane-mode state
+whose slider byte is not 1..=11 now parses with the scale hidden instead of
+failing the connection.
