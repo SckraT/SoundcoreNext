@@ -268,3 +268,78 @@ reconnect. No hardware acceptance claim is implied by this source record.
     `UiMessage` + `Messages`; `LocalizedText` remains for device-id labels and
     option values; keys are identifiers, not UI copy. Errors, failure text and
     diagnostics copy stay as they are for ticket 04.
+- UI-polish ticket 04 (controller copy migrated to the catalog):
+  - `types.slint`: `connection-reason`, `failure-text`, `add-error`, `error-label`,
+    `diagnostic-device-meta`, `diagnostic-status` and `diagnostic-error` are
+    `UiMessage` instead of `string`; `DiagnosticProbe.status` is a `UiMessage`
+    too. The technical fields stay data: device/model names, `diagnostic-file-name`,
+    `diagnostic-issue-url`, `diagnostic-note`, `diagnostic-archive-size` and the
+    numeric fields. No renderer shows a raw controller sentence any more.
+  - `messages.slint`: the `Messages` half of the catalog gained the full banner
+    sentence (`Could not change “{} ({})”. The device kept its previous value.`,
+    warning the saved-profile document failure separately), one branch per
+    `ConnectFailure`, the Add Device errors, the Diagnostics errors/status/meta
+    line and the probe status words. The new `MessageParts` global resolves the
+    words a sentence quotes from argument keys: `subject.*` (the setting or
+    action a failed write names), `reason.no-answer`/`connection-lost`/
+    `unreadable-answer`, and `part.unknown`; any other value argument is a
+    technical reading passed through unchanged.
+  - `src/messages.rs`: typed constants and constructors for every new branch
+    (`setting_write_failure`, the `connect_*`/`add_*`/`demo_*`/`diagnostics_*`
+    set, the `SUBJECT_*`/`REASON_*`/`PART_UNKNOWN` keys, probe statuses). Tests
+    assert the key/argument shape, that every key has a catalog branch with a
+    non-empty Russian translation, that the migrated `AppState` fields are
+    `UiMessage` (a compiler-level guard against re-adding a string field), and
+    that the English sentences of the `Messages` catalog do not appear in
+    `controller.rs`/`overview.rs`/`demo.rs`. A window test selects the bundled
+    Russian translation, resolves the composed failed-write banner through the
+    compiled `Messages` global (proving `@tr`, `MessageParts` and the `.po`
+    chain work end to end) and restores English.
+  - `src/controller.rs`: `ModeFailure`/`EqFailure`/`SettingFailure`/`DualFailure`
+    expose `message()`/`bands_message()`/`list_message()`/`action_message()`
+    instead of English label builders; `setting_subject`, `a3954_setting_subject`,
+    `a3954_setting_row_subject` and `a3954_button_subject` map a command to its
+    banner subject key, including the specific case-screen flag. `ConnectFailure`
+    gained `WorkerStart`, `DemoWorkerStart` and `SavedAddress` so the app's own
+    failures are catalog keys rather than English transport details; the OS
+    detail of `Transport` is a technical argument. Every `AppState` sentence
+    setter now receives a message; the clear paths use `messages::empty()`.
+    `diagnostic_probe_rows` statuses are catalog keys; the meta line passes the
+    firmware/battery readings (or `part.unknown`) to the catalog, removing the
+    former hardcoded Russian/English branch in `show_diagnostics_device`.
+    `EqPage`, `SaveDialogPage` and `ImportPage` test seams take `UiMessage`.
+    `src/demo.rs` no longer contains the demo texts or the language branch.
+  - `pages/`: `app.slint` banner and reconnecting line, `devices.slint`
+    connection state, `add_device.slint` error line, `diagnostics.slint` status,
+    meta, error and probe status, and `pages/overview.slint`'s power/spatial
+    shortcut values all render through `Messages.text` (the Overview values are
+    localized option data, not sentences). The old `FailureText` global is gone.
+  - `translations/ru/...po`: translations for every new source (connection
+    failures, Add Device, Diagnostics, subjects/reasons), and the banner msgid
+    now has two placeholders. `desktop/tests/translations.rs` (ticket 05) keeps
+    the document complete.
+  - Not migrated on purpose: stderr/log lines, URLs and file names, protocol ids,
+    the GitHub-issue body, and the native surfaces (notification-area menu
+    wording and OS file-dialog titles/filter names); the README records them.
+- UI-polish ticket 05 (translation completeness test):
+  - `desktop/tests/translations.rs` (new): scans every `@tr` source from
+    `desktop/ui/**/*.slint` (comments skipped, escapes decoded, plural forms both
+    captured), parses the `.po` documents with continuation lines, escapes and
+    plurals, and fails with a readable list when a source has no entry or an empty
+    `msgstr`/`msgstr[0]` in any locale of `REQUIRED_TRANSLATIONS` (`ru`). It also
+    asserts every `src/messages.rs` key has a `Messages`/`MessageParts` branch and
+    that the source the catalog returns for it has a non-empty translation, and
+    that a required document has no duplicate msgid. The scanner's own rules are
+    pinned by tests; the file documents how to add a locale.
+  - `tools/ui-capture/capture-ui.ps1`: the preflight parses the `.po` the same way
+    and fails on a missing **or empty** required translation before launching the
+    app (it used to check msgid presence only); `tools/ui-capture/README.md`
+    records the non-empty rule.
+  - Demonstration: emptying the Russian `msgstr` of `Could not build the
+    archive: {}` made both the UI-source test and the `messages.rs` key test fail
+    with `empty msgstr for "Could not build the archive: {}"` / `empty msgstr
+    for ..., the source of messages.rs key "diagnostics.build-failed"`; the
+    string was restored and the suite went green again.
+  - `UI_KIT.md`/`GUIDE.md`/`README.md` record the contract, the migrated fields
+    and how to add a locale; `README.md` drops the outdated "Diagnostics and
+    Demo-mode copy stay English" limitation.

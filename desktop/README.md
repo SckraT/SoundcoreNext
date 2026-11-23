@@ -212,10 +212,21 @@ vendored-file changes are recorded in `ui/SOURCE.md`.
   `%APPDATA%\OpenSCL4\desktop-preferences.json`, the one document that also
   holds the notification-area choices. On the next start the saved theme,
   palette, content scale, art color, language, badge and tray choices come back;
-  a missing or malformed document starts from the defaults. The bundled
-  translation documents predate the Diagnostics panel and the Demo-mode copy, so
-  those few newer strings are shown in English in every language; the language
-  choice itself is applied to the whole window.
+  a missing or malformed document starts from the defaults. The language choice
+  applies to the whole window: static `@tr` copy and runtime copy go through the
+  same bundled translation documents. Rust never supplies a user-facing English
+  sentence — the controller's error, connection, Add Device, Diagnostics and
+  status sentences are `UiMessage` keys resolved by `Messages.text`
+  (`ui/messages.slint`) and the `.po` documents; only technical values (the OS
+  transport detail, an archive error, firmware/battery readings, file names,
+  URLs, protocol ids) travel as arguments. `desktop/tests/translations.rs`
+  enforces a non-empty translation for every `@tr` source in every required
+  locale (`ru` today) and every `messages.rs` key, and the screenshot capture
+  preflight uses the same rule. The native notification-area menu is worded in
+  tray data outside the Slint catalog, so its static items stay English; the same
+  applies to the native file-dialog titles and filter names, which are created on
+  worker threads for the import, export and Diagnostics save dialogs. These
+  native surfaces, not the window copy, are the remaining untranslated paths.
 - The P20i (A3949) equalizer is deliberately deferred in this slice: the
   committed A3949 state carries an equalizer block at body 32..44, but no A3949
   `03 87` write body is verified, so the page stays hidden and no equalizer
@@ -593,7 +604,11 @@ turns spatial audio off. The acceptance toggled LDAC and spatial audio (enable,
 music mode, effect mode) and restored each. The reason is a message key from the
 controller, resolved by the view through `Messages.text` (`ui/messages.slint`,
 the runtime message catalog); the Russian UI shows “Сначала включите
-пространственный звук”.
+пространственный звук”. The same catalog now words the error banner (composed
+from a subject key such as `subject.ldac` and a reason key such as
+`reason.no-answer`), connection failures, Add Device errors and the Diagnostics
+status/meta/probe lines, so a failed write or a demo-mode warning follows the app
+language too.
 
 ![About with a connected Liberty 4 Pro](live-a3954-about.png)
 

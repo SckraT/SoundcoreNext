@@ -2,7 +2,7 @@
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { AppState, Actions, ModelOption, PairedOption, FailureKind, SystemPage } from "../types.slint";
-import { FailureText } from "devices.slint";
+import { Messages } from "../messages.slint";
 import { Icon, Button, ButtonKind, IconButton, Chip, Toggle, Banner, TextField } from "../components/basics.slint";
 import { ScrollArea } from "../components/scrollarea.slint";
 
@@ -309,7 +309,7 @@ export component AddDeviceDialog inherits DialogFrame {
             }
         }
         if AppState.add-failure-kind != FailureKind.none: Text {
-            text: @tr("Could not add the device.") + " " + FailureText.describe(AppState.add-failure-kind, AppState.add-error);
+            text: @tr("Could not add the device.") + " " + Messages.text(AppState.add-error);
             color: Theme.error;
             font-size: Theme.font-caption;
             wrap: word-wrap;

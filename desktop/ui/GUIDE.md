@@ -40,8 +40,10 @@ main/aside layout.
 5. Use `@tr` for user-visible copy. A sentence the Rust model composes is a
    `UiMessage` key resolved by `Messages.text` (add the key in
    `../src/messages.rs` and the branch with its English source in
-   `messages.slint`); never put an English sentence in a Rust model field. Set an
-   accessible `label` on `TextField`, `Toggle` and icon-only controls.
+   `messages.slint`); never put an English sentence in a Rust model field. When a
+   sentence quotes a translatable word, pass the *word's key* as an argument
+   (`subject.*`/`reason.*`, resolved by `MessageParts`) instead of the word. Set
+   an accessible `label` on `TextField`, `Toggle` and icon-only controls.
 6. Replace existing local copies only after the shared component supports their
    actual behavior; do not change callbacks or device semantics as a side effect.
 7. Update the component table or state rules in `UI_KIT.md` and record the change
@@ -74,8 +76,12 @@ dialog-local name, pass `name.text` to the action as above.
 4. Put page copy and error text behind `@tr`. A sentence the controller composes
    arrives as a `UiMessage` (`key`, `arg0`, `arg1`) and is rendered with
    `Messages.text`; the English source stays in `messages.slint` and the `.po`
-   documents, so a translated build never falls back to Rust English. A disabled
-   device control needs a reason from state, not an invented explanation.
+   documents, so a translated build never falls back to Rust English. The
+   migrated `AppState` sentence fields are `connection-reason`, `failure-text`,
+   `add-error`, `error-label`, `diagnostic-device-meta`, `diagnostic-status` and
+   `diagnostic-error`, plus `DiagnosticProbe.status`; keep a new one a
+   `UiMessage` rather than adding a string back. A disabled device control needs
+   a reason from state, not an invented explanation.
 5. Give dialogs a bounded height and a scrollable list when content can grow.
    Their primary action must remain reachable at 800×700 and 150% scale.
 6. Wire the callback in Rust and add tests for accepted, rejected, cancelled,
@@ -128,14 +134,20 @@ Run the same relevant check/clippy/test sequence from `core` when shared session
 protocol or model behavior changes. The repository root has no Cargo workspace
 manifest; run each crate tree explicitly.
 
+`cargo test` includes `desktop/tests/translations.rs`, which fails when a `@tr`
+source has a missing or empty translation in a required locale (`ru` today) or
+when a `messages.rs` key has no catalog source. When adding UI copy, run it
+before the capture tool: it prints the complete missing/empty list.
+
 ### Full Russian screenshot matrix
 
 For a reviewable Windows matrix, use `tools/ui-capture/capture-ui.ps1`. It
 launches the app in an isolated profile, connects the demo A3062, captures every
 page and the core dialogs at 100/110/125/150 % in both themes, and generates
 `index.html` plus contact sheets grouped by theme×scale, page and feature area.
-It verifies that every `@tr` string has a Russian translation first and fails
-the capture if the window is not in Russian. See `tools/ui-capture/README.md`.
+It verifies that every `@tr` string has a **non-empty** Russian translation first
+(the same rule as the translation test) and fails the capture if the window is not
+in Russian. See `tools/ui-capture/README.md`.
 ### Visual matrix
 
 The preview harness lives in `.scratch/ui-preview`. From that directory:

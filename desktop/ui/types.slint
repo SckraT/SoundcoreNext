@@ -37,7 +37,10 @@ export enum DiagnosticStep { device, capture, review, done }
 export struct DiagnosticProbe {
     label: string,
     command: string,
-    status: string,
+    // whether the probe answered, or why it did not; a sentence from the
+    // controller's `Messages` catalog, not UI copy
+    status: UiMessage,
+    // technical detail: the elapsed time, or the low-level reason (protocol id)
     detail: string,
     ok: bool,
     failed: bool,
@@ -226,16 +229,16 @@ export global AppState {
     in property <[Page]> device-pages;
 
     in property <Connection> connection: Connection.no-device;
-    // why the connection is recovering or was lost, empty otherwise
-    in property <string> connection-reason;
+    // why the connection is recovering or was lost; the empty message otherwise
+    in property <UiMessage> connection-reason;
     in property <string> device-name;
     in property <string> device-code;
     in property <image> device-art;
     in property <bool> device-is-speaker;
     in property <bool> one-earbud;
     in property <FailureKind> failure-kind;
-    // the library's own words, for failures the window has no name for
-    in property <string> failure-text;
+    // why a connection attempt failed: a sentence from the message catalog
+    in property <UiMessage> failure-text;
 
     in property <[DeviceCard]> devices;
 
@@ -253,7 +256,8 @@ export global AppState {
     in property <bool> add-loading;
     in property <[PairedOption]> paired-options;
     in property <FailureKind> add-failure-kind;
-    in property <string> add-error;
+    // the Add Device dialog's error sentence, from the message catalog
+    in property <UiMessage> add-error;
     in property <bool> add-bluetooth-off;
 
     // the current page's settings
@@ -362,8 +366,9 @@ export global AppState {
     in property <bool> has-spatial;
     in property <string> case-battery;
 
-    // a change the device did not take, shown above the page
-    in property <string> error-label;
+    // a change the device did not take, shown above the page; a sentence from
+    // the message catalog, not UI copy
+    in property <UiMessage> error-label;
 
     // Diagnostics: read-only probes, a local ZIP and a prefilled issue. The
     // page keeps the device's own report; nothing is uploaded by the app.
@@ -373,9 +378,10 @@ export global AppState {
     in property <bool> diagnostic-busy;
     in property <string> diagnostic-device-name;
     in property <string> diagnostic-device-code;
-    in property <string> diagnostic-device-meta;
-    in property <string> diagnostic-status;
-    in property <string> diagnostic-error;
+    // firmware and battery of the connected device, as a catalog sentence
+    in property <UiMessage> diagnostic-device-meta;
+    in property <UiMessage> diagnostic-status;
+    in property <UiMessage> diagnostic-error;
     in property <int> diagnostic-answered;
     in property <int> diagnostic-frames;
     in property <int> diagnostic-timeouts;

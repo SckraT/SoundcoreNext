@@ -240,6 +240,39 @@ Adding a runtime sentence means three changes: a constant and constructor in
 `messages.slint`, and the source string in every required `.po` document. A
 branch that uses placeholders passes `message.arg0`/`message.arg1`.
 
+A sentence that quotes a translatable word takes that word as a message argument
+*as another key*, resolved inside `messages.slint` by the `MessageParts` global
+(subjects such as `subject.ldac` or `subject.equalizer-bands`, reasons such as
+`reason.no-answer`, and `part.unknown` for a missing reading). This is how the
+failed-write banner is composed: Rust sends `error.setting-write` with the
+setting/action subject key and the failure reason key, and the catalog returns
+`Could not change “{} ({})”. The device kept its previous value.` — no English is
+composed on the Rust side. Every model field that used to carry a sentence is a
+`UiMessage`: `connection-reason`, `failure-text`, `add-error`, `error-label`,
+`diagnostic-device-meta`, `diagnostic-status`, `diagnostic-error`, and
+`DiagnosticProbe.status`. Fields that carry values or identifiers stay strings:
+device and model names, file names, the issue URL, the archive size (`12.3 KB`),
+the note the user types, and technical arguments a sentence quotes (the OS
+transport detail, an archive build/write error, a firmware version, a battery
+reading). `failure-kind`, `add-failure-kind`, `Connection`, `ToastKind` and the
+other enums stay page data; the renderer gets the sentence from `Messages.text`.
+
+`desktop/tests/translations.rs` enforces the contract in `cargo test`: every
+`@tr` source in `desktop/ui/**/*.slint` (static pages, `messages.slint` and
+`localized.slint` alike) has a non-empty translation in each locale of
+`REQUIRED_TRANSLATIONS` (currently `ru`), every `messages.rs` key has a catalog
+branch, and the English source for that key has a non-empty `.po` translation.
+The test fails with a list of every missing or empty source. A unit test in
+`messages.rs` also resolves a composed message through the compiled window in
+Russian (`slint::select_bundled_translation("ru")`) and restores English, so the
+`@tr` + `MessageParts` + `.po` chain is exercised end to end, not only as data.
+`tools/ui-capture/capture-ui.ps1` runs the same non-empty rule for Russian before
+it launches the app. A new language is added by translating a full `.po` document
+and adding its code to both lists. The native notification-area menu and the OS
+file-dialog titles/filter names are worded in Rust/Tray or `rfd` data and are not
+part of this Slint catalog; they are the remaining untranslated surfaces (see
+`desktop/README.md`).
+
 Names and values that come from the device model are
 English data at the protocol/controller boundary; the UI translates the ones it
 knows through `components/localized.slint` (`LocalizedText.setting-label`,

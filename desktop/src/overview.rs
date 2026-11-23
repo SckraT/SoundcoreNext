@@ -302,6 +302,9 @@ fn summary(block: OverviewBlock, device: &DeviceState) -> OverviewBlockData {
                 data.on = a3954.ldac;
             }
             OverviewBlock::Power => {
+                // Enumerated option data, not a sentence: the shortcut renders it
+                // through `LocalizedText.option`, which translates "60 minutes"
+                // and "Disabled" like the setting row's options.
                 data.text = if a3954.auto_power_off.enabled {
                     format!("{} minutes", a3954.auto_power_off.duration.minutes())
                 } else {
@@ -335,6 +338,8 @@ fn summary(block: OverviewBlock, device: &DeviceState) -> OverviewBlockData {
             data.on = settings.ldac;
         }
         OverviewBlock::Power => {
+            // Enumerated option data rendered through `LocalizedText.option` in
+            // the Overview shortcut (see the A3954 branch above).
             data.text = if settings.auto_power_off.enabled {
                 format!("{} minutes", settings.auto_power_off.duration.minutes())
             } else {

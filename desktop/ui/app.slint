@@ -4,6 +4,7 @@ import { Theme, PaletteChoice } from "theme.slint";
 import { Icons } from "icons.slint";
 import { AppState, Actions, Page, Connection, FailureKind, ToastKind, DeviceCard, ModelOption, PairedOption } from "types.slint";
 import { Strings } from "strings.slint";
+import { Messages } from "messages.slint";
 import { Button, ButtonKind, Banner } from "components/basics.slint";
 import { ScrollArea } from "components/scrollarea.slint";
 import { Sidebar, StatusBar } from "shell.slint";
@@ -16,7 +17,7 @@ import { SettingsPage } from "pages/settings.slint";
 import { PresetsPage, CreatePresetDialog, PresetEditorDialog, LoadPresetDialog, DeletePresetDialog } from "pages/presets.slint";
 import { DiagnosticsPage } from "pages/diagnostics.slint";
 
-export { Theme, PaletteChoice, AppState, Actions, Page, Connection, FailureKind, DeviceCard, ModelOption, PairedOption, Strings }
+export { Theme, PaletteChoice, AppState, Actions, Page, Connection, FailureKind, DeviceCard, ModelOption, PairedOption, Strings, Messages }
 export { RowKind, SettingRow, PanelKind, SettingsPanel, ModeOption, ToastKind, BlockKind, Battery, QuickToggle, OverviewBlockData, OverviewRow, LayoutBlock, PresetItem, EqBand, EqLine, EqProfile, ImportItem, TransferNote, PresetCard, PresetFieldRow, PresetGroup, SystemPage } from "types.slint";
 
 export component AppWindow inherits Window {
@@ -64,10 +65,10 @@ export component AppWindow inherits Window {
                     padding-top: 24px;
                     spacing: 16px;
                     alignment: start;
-                    if root.device-page && AppState.error-label != "": Banner {
+                    if root.device-page && AppState.error-label.key != "": Banner {
                         error: true;
                         icon: Icons.warning;
-                        text: @tr("Could not change “{}”. The device kept its previous value.", AppState.error-label);
+                        text: Messages.text(AppState.error-label);
                         Button {
                             text: @tr("Retry");
                             kind: ButtonKind.soft;
@@ -83,7 +84,7 @@ export component AppWindow inherits Window {
                     if root.device-page && AppState.connection != Connection.connected && AppState.connection != Connection.recovering: ConnectionState { }
                     if root.device-page && AppState.connection == Connection.recovering: Banner {
                         icon: Icons.info;
-                        text: @tr("Reconnecting:") + " " + (AppState.connection-reason == "" ? @tr("changes are paused until the device is back.") : AppState.connection-reason);
+                        text: @tr("Reconnecting:") + " " + (AppState.connection-reason.key == "" ? @tr("changes are paused until the device is back.") : Messages.text(AppState.connection-reason));
                     }
                     if AppState.page == Page.overview && (AppState.connection == Connection.connected || AppState.connection == Connection.recovering): OverviewPage {
                         wide: root.width - sidebar.width > 900px * Theme.content-scale;

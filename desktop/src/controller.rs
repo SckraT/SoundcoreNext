@@ -59,7 +59,7 @@ use crate::{
     Actions, AppState, AppWindow, Battery, Connection, DeviceCard, DiagnosticProbe, DiagnosticStep,
     EqBand, EqLine, EqProfile, FailureKind, ImportItem, ModeOption, ModelOption, Page,
     PairedOption, PaletteChoice, PanelKind, RowKind, SettingRow, SettingsPanel, Strings,
-    SystemPage, Theme, ToastKind, TransferNote,
+    SystemPage, Theme, ToastKind, TransferNote, UiMessage,
 };
 
 /// The model chosen in the Add Device dialog: what the catalog card shows plus
@@ -990,8 +990,8 @@ trait EqPage {
     /// Shows the equalizer state the device reported: its preset id and name
     /// (empty for custom bands) and its curve.
     fn show_reported_curve(&self, equalizer: &EqualizerState);
-    /// Shows a readable error banner label; `""` clears the banner.
-    fn show_error(&self, label: &str);
+    /// Shows a readable error banner message; the empty message clears the banner.
+    fn show_error(&self, message: UiMessage);
 }
 
 impl EqPage for AppState<'_> {
@@ -1017,8 +1017,8 @@ impl EqPage for AppState<'_> {
         show_equalizer_state(self, equalizer);
     }
 
-    fn show_error(&self, label: &str) {
-        self.set_error_label(label.into());
+    fn show_error(&self, message: UiMessage) {
+        self.set_error_label(message);
     }
 }
 
@@ -1122,7 +1122,7 @@ fn write_curve(page: &impl EqPage, writer: &impl BandWriter, values: &[i16]) -> 
     if writer.write_curve(bands) {
         true
     } else {
-        page.show_error(EqFailure::Disconnected.bands_label());
+        page.show_error(EqFailure::Disconnected.bands_message());
         false
     }
 }
@@ -1138,11 +1138,11 @@ fn apply_curve_outcome(
     match outcome {
         Ok(reported) => {
             page.show_reported_curve(&reported);
-            page.show_error("");
+            page.show_error(messages::empty());
         }
         Err(failure) => {
             stop();
-            page.show_error(failure.bands_label());
+            page.show_error(failure.bands_message());
         }
     }
 }
@@ -1203,13 +1203,19 @@ impl ModeFailure {
         }
     }
 
-    /// The `AppState.error-label` of a failed change; the vendored banner wraps
-    /// it as "Could not change “{}”.".
-    pub fn label(self) -> &'static str {
+    /// The `AppState.error-label` message of a failed change: the catalog names
+    /// the sound mode and this failure's reason. The banner sentence lives in
+    /// `ui/messages.slint`, so Rust holds only the two keys.
+    pub fn message(self) -> UiMessage {
+        messages::setting_write_failure(messages::SUBJECT_SOUND_MODE, self.reason_key())
+    }
+
+    /// The [`messages::REASON_*`] key the banner shows for this failure.
+    const fn reason_key(self) -> &'static str {
         match self {
-            Self::TimedOut => "Sound mode (no answer)",
-            Self::Disconnected => "Sound mode (connection lost)",
-            Self::Unreadable => "Sound mode (unreadable answer)",
+            Self::TimedOut => messages::REASON_NO_ANSWER,
+            Self::Disconnected => messages::REASON_CONNECTION_LOST,
+            Self::Unreadable => messages::REASON_UNREADABLE_ANSWER,
         }
     }
 }
@@ -1258,36 +1264,25 @@ impl EqFailure {
         }
     }
 
-    /// The banner labels of a failed equalizer change: the preset wording and
-    /// the custom-band wording. They share one table so the two settings cannot
-    /// drift apart; [`Self::label`] and [`Self::bands_label`] pick one each.
-    fn labels(self) -> (&'static str, &'static str) {
+    /// The `AppState.error-label` message of a failed preset change: the catalog
+    /// names the equalizer profile and this failure's reason.
+    pub fn message(self) -> UiMessage {
+        messages::setting_write_failure(messages::SUBJECT_EQUALIZER_PROFILE, self.reason_key())
+    }
+
+    /// The `AppState.error-label` message of a failed custom-curve change, worded
+    /// like [`Self::message`] but naming the bands that were being written.
+    pub fn bands_message(self) -> UiMessage {
+        messages::setting_write_failure(messages::SUBJECT_EQUALIZER_BANDS, self.reason_key())
+    }
+
+    /// The [`messages::REASON_*`] key the banner shows for this failure.
+    const fn reason_key(self) -> &'static str {
         match self {
-            Self::TimedOut => (
-                "Equalizer profile (no answer)",
-                "Equalizer bands (no answer)",
-            ),
-            Self::Disconnected => (
-                "Equalizer profile (connection lost)",
-                "Equalizer bands (connection lost)",
-            ),
-            Self::Unreadable => (
-                "Equalizer profile (unreadable answer)",
-                "Equalizer bands (unreadable answer)",
-            ),
+            Self::TimedOut => messages::REASON_NO_ANSWER,
+            Self::Disconnected => messages::REASON_CONNECTION_LOST,
+            Self::Unreadable => messages::REASON_UNREADABLE_ANSWER,
         }
-    }
-
-    /// The `AppState.error-label` of a failed preset change; the vendored banner
-    /// wraps it as "Could not change “{}”.".
-    pub fn label(self) -> &'static str {
-        self.labels().0
-    }
-
-    /// The `AppState.error-label` of a failed custom-curve change, worded like
-    /// [`Self::label`] but naming the bands that were being written.
-    pub fn bands_label(self) -> &'static str {
-        self.labels().1
     }
 }
 
@@ -1357,43 +1352,43 @@ impl SettingFailure {
         }
     }
 
-    /// The parenthesised reason the banner appends to the setting's name.
-    pub fn reason(self) -> &'static str {
+    /// The [`messages::REASON_*`] key the banner appends to the setting's name.
+    pub const fn reason_key(self) -> &'static str {
         match self {
-            Self::TimedOut => "no answer",
-            Self::Disconnected => "connection lost",
-            Self::Unreadable => "unreadable answer",
+            Self::TimedOut => messages::REASON_NO_ANSWER,
+            Self::Disconnected => messages::REASON_CONNECTION_LOST,
+            Self::Unreadable => messages::REASON_UNREADABLE_ANSWER,
         }
     }
 
-    /// The `AppState.error-label` of a failed write, naming the setting the row
-    /// names; the vendored banner wraps it as "Could not change “{}”.".
-    pub fn label(self, setting: SettingCommand) -> String {
-        self.row_label(setting_label(setting))
+    /// The `AppState.error-label` message of a failed write, naming the setting
+    /// the row names; the catalog resolves the subject and reason keys.
+    pub fn message(self, setting: SettingCommand) -> UiMessage {
+        self.row_message(setting_subject(setting))
     }
 
-    /// The `AppState.error-label` of a failed write whose row name is already
-    /// resolved, e.g. a gesture or a case-screen flag; worded like
-    /// [`Self::label`].
-    pub fn row_label(self, row: &str) -> String {
-        format!("{row} ({})", self.reason())
+    /// The `AppState.error-label` message of a failed write whose row subject is
+    /// already resolved, e.g. a gesture or a case-screen flag.
+    pub fn row_message(self, subject: &'static str) -> UiMessage {
+        messages::setting_write_failure(subject, self.reason_key())
     }
 }
 
-/// The row name a failed write's banner shows, matching the setting it wrote.
-pub fn setting_label(setting: SettingCommand) -> &'static str {
+/// The [`messages::SUBJECT_*`] key a failed write's banner names, matching the
+/// setting it wrote.
+pub const fn setting_subject(setting: SettingCommand) -> &'static str {
     match setting {
-        SettingCommand::ButtonDoublePress(_) => "Double press",
-        SettingCommand::AmbientSoundModeCycle(_) => "Mode cycle",
-        SettingCommand::LowBatteryPrompt(_) => "Low battery prompt",
-        SettingCommand::DolbyAudio(_) => "Dolby audio",
-        SettingCommand::Ldac(_) => "LDAC",
-        SettingCommand::DualConnections(_) => "Dual connections",
-        SettingCommand::AutoPowerOff(_) => "Auto power off",
-        SettingCommand::LimitHighVolume { .. } => "Limit high volume",
-        SettingCommand::LimitHighVolumeRefreshRate(_) => "Refresh rate",
-        SettingCommand::SideTone(_) => "Side tone",
-        SettingCommand::VoicePrompt(_) => "Voice prompt",
+        SettingCommand::ButtonDoublePress(_) => messages::SUBJECT_DOUBLE_PRESS,
+        SettingCommand::AmbientSoundModeCycle(_) => messages::SUBJECT_MODE_CYCLE,
+        SettingCommand::LowBatteryPrompt(_) => messages::SUBJECT_LOW_BATTERY_PROMPT,
+        SettingCommand::DolbyAudio(_) => messages::SUBJECT_DOLBY_AUDIO,
+        SettingCommand::Ldac(_) => messages::SUBJECT_LDAC,
+        SettingCommand::DualConnections(_) => messages::SUBJECT_DUAL_CONNECTIONS,
+        SettingCommand::AutoPowerOff(_) => messages::SUBJECT_AUTO_POWER_OFF,
+        SettingCommand::LimitHighVolume { .. } => messages::SUBJECT_LIMIT_HIGH_VOLUME,
+        SettingCommand::LimitHighVolumeRefreshRate(_) => messages::SUBJECT_REFRESH_RATE,
+        SettingCommand::SideTone(_) => messages::SUBJECT_SIDE_TONE,
+        SettingCommand::VoicePrompt(_) => messages::SUBJECT_VOICE_PROMPT,
     }
 }
 
@@ -1538,61 +1533,65 @@ pub fn change_a3954_button<T: Transport>(
     Ok(Box::new(state))
 }
 
-/// The `AppState.error-label` of a failed gesture write, naming the row the user
-/// changed; the vendored banner wraps it as "Could not change “{}”.".
-pub fn a3954_button_failure_label(failure: SettingFailure, button: A3954Button) -> String {
-    format!("{} ({})", a3954_button_label(button), failure.reason())
+/// The `AppState.error-label` message of a failed gesture write, naming the row
+/// the user changed; the catalog resolves the button's subject key and reason.
+pub fn a3954_button_failure_message(failure: SettingFailure, button: A3954Button) -> UiMessage {
+    failure.row_message(a3954_button_subject(button))
 }
 
-/// The row name a failed A3954 write's banner shows, matching the setting the
-/// row names. A case-screen write changes one of four flags, so it names the
-/// specific flag row the user toggled (relative to the state the command was
-/// built from) instead of the panel title; the other settings name their own row.
-pub fn a3954_setting_row_label(setting: A3954SettingCommand, current: &A3954State) -> &'static str {
+/// The [`messages::SUBJECT_*`] key a failed A3954 write's banner shows, matching
+/// the setting the row names. A case-screen write changes one of four flags, so
+/// it names the specific flag row the user toggled (relative to the state the
+/// command was built from) instead of the panel title; the other settings name
+/// their own row.
+pub fn a3954_setting_row_subject(
+    setting: A3954SettingCommand,
+    current: &A3954State,
+) -> &'static str {
     if let A3954SettingCommand::CaseFeatures(changed) = setting {
         let before = current.case_features;
         return if changed.atmospheric != before.atmospheric {
-            "Atmospheric"
+            messages::SUBJECT_CASE_ATMOSPHERIC
         } else if changed.remote_camera != before.remote_camera {
-            "Remote camera"
+            messages::SUBJECT_CASE_REMOTE_CAMERA
         } else if changed.find_device != before.find_device {
-            "Find device"
+            messages::SUBJECT_CASE_FIND_DEVICE
         } else if changed.case_spatial_audio != before.case_spatial_audio {
-            "Spatial audio on case"
+            messages::SUBJECT_CASE_SPATIAL_AUDIO
         } else {
-            a3954_setting_label(setting)
+            a3954_setting_subject(setting)
         };
     }
-    a3954_setting_label(setting)
+    a3954_setting_subject(setting)
 }
 
-/// The `AppState.error-label` of a failed A3954 settings write, naming the row
-/// the user changed; worded like [`SettingFailure::label`].
-pub fn a3954_setting_failure_label(
+/// The `AppState.error-label` message of a failed A3954 settings write, naming
+/// the row the user changed; worded like [`SettingFailure::message`].
+pub fn a3954_setting_failure_message(
     failure: SettingFailure,
     setting: A3954SettingCommand,
     current: &A3954State,
-) -> String {
-    failure.row_label(a3954_setting_row_label(setting, current))
+) -> UiMessage {
+    failure.row_message(a3954_setting_row_subject(setting, current))
 }
 
-/// The row name a failed A3954 write's banner shows, matching the setting the
-/// row names.
-pub fn a3954_setting_label(setting: A3954SettingCommand) -> &'static str {
+/// The [`messages::SUBJECT_*`] key a failed A3954 write's banner names, matching
+/// the setting the row names.
+pub const fn a3954_setting_subject(setting: A3954SettingCommand) -> &'static str {
     match setting {
-        A3954SettingCommand::Ldac(_) => "LDAC",
-        A3954SettingCommand::DualConnections(_) => "Dual connections",
-        A3954SettingCommand::AutoPowerOff(_) => "Auto power off",
-        A3954SettingCommand::LimitHighVolume { .. } => "Limit high volume",
-        A3954SettingCommand::LimitHighVolumeRefreshRate(_) => "Refresh rate",
-        A3954SettingCommand::LowBatteryPrompt(_) => "Low battery prompt",
-        A3954SettingCommand::AmbientSoundModeCycle(_) => "Mode cycle",
-        A3954SettingCommand::WearingDetection(_) => "Wearing detection",
-        A3954SettingCommand::SoundLeakCompensation(_) => "Sound leak compensation",
-        A3954SettingCommand::SpatialAudio(_) => "Spatial audio",
-        A3954SettingCommand::EasyChat(_) => "Easy chat",
-        A3954SettingCommand::CaseFeatures(_) => "Case screen",
-        A3954SettingCommand::CaseLanguage(_) => "Case language",
+        A3954SettingCommand::Ldac(_) => messages::SUBJECT_LDAC,
+        A3954SettingCommand::DualConnections(_) => messages::SUBJECT_DUAL_CONNECTIONS,
+        A3954SettingCommand::AutoPowerOff(_) => messages::SUBJECT_AUTO_POWER_OFF,
+        A3954SettingCommand::LimitHighVolume { .. } => messages::SUBJECT_LIMIT_HIGH_VOLUME,
+        A3954SettingCommand::LimitHighVolumeRefreshRate(_) => messages::SUBJECT_REFRESH_RATE,
+        A3954SettingCommand::LowBatteryPrompt(_) => messages::SUBJECT_LOW_BATTERY_PROMPT,
+        A3954SettingCommand::AmbientSoundModeCycle(_) => messages::SUBJECT_MODE_CYCLE,
+        A3954SettingCommand::WearingDetection(_) => messages::SUBJECT_WEARING_DETECTION,
+        A3954SettingCommand::SoundLeakCompensation(_) => messages::SUBJECT_SOUND_LEAK_COMPENSATION,
+        A3954SettingCommand::SpatialAudio(_) => messages::SUBJECT_SPATIAL_AUDIO,
+        A3954SettingCommand::EasyChat(_) => messages::SUBJECT_EASY_CHAT,
+        A3954SettingCommand::CaseFeatures(_) => messages::SUBJECT_CASE_SCREEN,
+        A3954SettingCommand::CaseLanguage(_) => messages::SUBJECT_CASE_LANGUAGE,
     }
 }
 
@@ -1617,12 +1616,13 @@ enum DualAction {
 }
 
 impl DualAction {
-    /// The row name a failed write's banner shows; never the address.
-    fn label(self) -> &'static str {
+    /// The [`messages::SUBJECT_*`] key a failed write's banner names; never the
+    /// address.
+    fn subject(self) -> &'static str {
         match self {
-            Self::Connect(_) => "Connect device",
-            Self::Disconnect(_) => "Disconnect device",
-            Self::Forget(_) => "Forget device",
+            Self::Connect(_) => messages::SUBJECT_CONNECT_DEVICE,
+            Self::Disconnect(_) => messages::SUBJECT_DISCONNECT_DEVICE,
+            Self::Forget(_) => messages::SUBJECT_FORGET_DEVICE,
         }
     }
 
@@ -1669,25 +1669,25 @@ impl DualFailure {
         }
     }
 
-    /// The parenthesised reason the banner appends to the list's name.
-    fn reason(self) -> &'static str {
+    /// The [`messages::REASON_*`] key the banner appends to the list's column.
+    const fn reason_key(self) -> &'static str {
         match self {
-            Self::TimedOut => "no answer",
-            Self::Disconnected => "connection lost",
-            Self::Unreadable => "unreadable answer",
+            Self::TimedOut => messages::REASON_NO_ANSWER,
+            Self::Disconnected => messages::REASON_CONNECTION_LOST,
+            Self::Unreadable => messages::REASON_UNREADABLE_ANSWER,
         }
     }
 
-    /// The `AppState.error-label` of a failed list read, e.g. after entering the
-    /// Connections page; the vendored banner wraps it as "Could not change “{}”.".
-    fn list_label(self) -> String {
-        format!("Dual connections list ({})", self.reason())
+    /// The `AppState.error-label` message of a failed list read, e.g. after
+    /// entering the Connections page.
+    fn list_message(self) -> UiMessage {
+        messages::setting_write_failure(messages::SUBJECT_DUAL_CONNECTIONS_LIST, self.reason_key())
     }
 
-    /// The `AppState.error-label` of a failed list-row action, naming what the
-    /// user asked the earbuds to do.
-    fn action_label(self, action: DualAction) -> String {
-        format!("{} ({})", action.label(), self.reason())
+    /// The `AppState.error-label` message of a failed list-row action, naming
+    /// what the user asked the earbuds to do.
+    fn action_message(self, action: DualAction) -> UiMessage {
+        messages::setting_write_failure(action.subject(), self.reason_key())
     }
 }
 
@@ -1798,7 +1798,13 @@ pub enum ConnectFailure {
     UnsupportedLayout,
     /// The device answered with bytes that are not a valid state frame.
     Protocol,
-    /// Any other OS or transport failure, with its readable text.
+    /// The Bluetooth worker thread could not be started.
+    WorkerStart,
+    /// The demo worker thread could not be started.
+    DemoWorkerStart,
+    /// The saved card's Bluetooth address cannot be parsed any more.
+    SavedAddress,
+    /// Any other OS or transport failure, with its readable technical text.
     Transport(String),
 }
 
@@ -1844,8 +1850,8 @@ impl ConnectFailure {
         }
     }
 
-    /// The failure kind the window words itself: the two cases it names, and
-    /// `Other` for everything it must word from [`Self::text`].
+    /// The failure kind the window shows: the connection state and the enum are
+    /// page data, [`Self::message`] carries the sentence.
     pub fn kind(&self) -> FailureKind {
         match self {
             Self::NotFound => FailureKind::NotFound,
@@ -1856,37 +1862,30 @@ impl ConnectFailure {
         }
     }
 
-    /// The readable explanation; never contains a Bluetooth address.
-    pub fn text(&self) -> String {
+    /// The explanation the window shows, as a message the catalog resolves. The
+    /// transport detail is a technical OS string quoted by the sentence, never a
+    /// ready-made English sentence from Rust.
+    pub fn message(&self) -> UiMessage {
         match self {
-            Self::NotPaired => {
-                "The device is not paired with Windows. Pair it in Windows settings, then try again.".into()
-            }
-            Self::NotFound => {
-                "The device was not found. Make sure it is turned on and nearby.".into()
-            }
-            Self::TimedOut => {
-                "The device did not answer in time. Make sure it is turned on and nearby, then try again.".into()
-            }
-            Self::BluetoothOff => {
-                "Bluetooth is off. Turn it on in Windows settings, then try again.".into()
-            }
+            Self::NotPaired => messages::connect_failure(messages::CONNECT_NOT_PAIRED, ""),
+            Self::NotFound => messages::connect_failure(messages::CONNECT_NOT_FOUND, ""),
+            Self::TimedOut => messages::connect_failure(messages::CONNECT_TIMED_OUT, ""),
+            Self::BluetoothOff => messages::connect_failure(messages::CONNECT_BLUETOOTH_OFF, ""),
             Self::ConnectionFailed => {
-                "Could not open a Bluetooth connection to the device. Make sure it is nearby and not connected to another device.".into()
+                messages::connect_failure(messages::CONNECT_CONNECTION_FAILED, "")
             }
-            Self::NoService => {
-                "This paired device does not offer the Soundcore Bluetooth service. Pair it again in Windows settings and try again.".into()
-            }
-            Self::NoParser => {
-                "The app cannot read this model's state yet, so its battery levels are unavailable.".into()
-            }
+            Self::NoService => messages::connect_failure(messages::CONNECT_NO_SERVICE, ""),
+            Self::NoParser => messages::connect_failure(messages::CONNECT_NO_PARSER, ""),
             Self::UnsupportedLayout => {
-                "This model reports a battery layout the app cannot read yet, so battery levels are unavailable.".into()
+                messages::connect_failure(messages::CONNECT_UNSUPPORTED_LAYOUT, "")
             }
-            Self::Protocol => {
-                "The device answered with a Bluetooth message the app could not read.".into()
+            Self::Protocol => messages::connect_failure(messages::CONNECT_PROTOCOL, ""),
+            Self::WorkerStart => messages::connect_failure(messages::CONNECT_WORKER_START, ""),
+            Self::DemoWorkerStart => {
+                messages::connect_failure(messages::CONNECT_DEMO_WORKER_START, "")
             }
-            Self::Transport(detail) => detail.clone(),
+            Self::SavedAddress => messages::connect_failure(messages::CONNECT_SAVED_ADDRESS, ""),
+            Self::Transport(detail) => messages::connect_transport(detail),
         }
     }
 }
@@ -2093,13 +2092,24 @@ enum DeviceCommand {
     RunDiagnostics { request: u64 },
 }
 
+/// Why a paired-device enumeration did not finish. The worker start failure is
+/// the app's own case, so the Add Device dialog can word it instead of quoting
+/// an English detail string.
+#[derive(Debug)]
+enum PairedFailure {
+    /// The Windows Bluetooth lookup failed.
+    Bluetooth(BluetoothError),
+    /// The enumeration thread could not be started.
+    WorkerStart,
+}
+
 /// A worker-to-UI message; the sequence number tells the UI whether the result
 /// still belongs to the attempt the user is waiting for.
 #[derive(Debug)]
 enum Event {
     Paired {
         request: u64,
-        result: Result<Vec<Candidate>, BluetoothError>,
+        result: Result<Vec<Candidate>, PairedFailure>,
     },
     Connected {
         attempt: u64,
@@ -2390,15 +2400,14 @@ impl Inner {
                     model
                         .as_ref()
                         .map(|(code, name)| (code.as_str(), name.as_str())),
-                );
+                )
+                .map_err(PairedFailure::Bluetooth);
                 let _ = sender.send(Event::Paired { request, result });
             });
         if spawned.is_err() {
             let _ = self.sender.send(Event::Paired {
                 request,
-                result: Err(BluetoothError::Other(
-                    "could not start the paired-device worker".into(),
-                )),
+                result: Err(PairedFailure::WorkerStart),
             });
         }
     }
@@ -2426,9 +2435,7 @@ impl Inner {
             self.stop_worker();
             let _ = self.sender.send(Event::Connected {
                 attempt,
-                outcome: ConnectOutcome::Failed(ConnectFailure::Transport(
-                    "could not start the Bluetooth worker".into(),
-                )),
+                outcome: ConnectOutcome::Failed(ConnectFailure::WorkerStart),
             });
         }
     }
@@ -2458,9 +2465,7 @@ impl Inner {
             self.stop_worker();
             let _ = self.sender.send(Event::Connected {
                 attempt,
-                outcome: ConnectOutcome::Failed(ConnectFailure::Transport(
-                    "could not start the demo device worker".into(),
-                )),
+                outcome: ConnectOutcome::Failed(ConnectFailure::DemoWorkerStart),
             });
         }
     }
@@ -3165,7 +3170,9 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         let inner = Rc::clone(inner);
         move || {
             if let Some(window) = inner.ui.upgrade() {
-                window.global::<AppState>().set_error_label("".into());
+                window
+                    .global::<AppState>()
+                    .set_error_label(messages::empty());
             }
         }
     });
@@ -3822,8 +3829,7 @@ fn drain_events(inner: &Rc<Inner>) {
                         // and say why, after the card was filled.
                         let state = window.global::<AppState>();
                         state.set_diagnostic_available(false);
-                        let language = inner.settings.borrow().language.clone().unwrap_or_default();
-                        state.set_diagnostic_error(demo::diagnostics_unavailable(&language).into());
+                        state.set_diagnostic_error(messages::diagnostics_demo_unavailable());
                     }
                     // A connected A3062 shows the Saved profiles panel, so the
                     // loaded rows and their Applied tags are filled here.
@@ -4903,7 +4909,7 @@ fn set_demo(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
     let state = window.global::<AppState>();
     state.set_add_demo(on);
     state.set_add_failure_kind(FailureKind::None);
-    state.set_add_error("".into());
+    state.set_add_error(messages::empty());
     state.set_add_bluetooth_off(false);
     if !on {
         state.set_paired_options(ModelRc::default());
@@ -4930,7 +4936,7 @@ fn show_demo_options(state: &AppState<'_>, model: &SelectedModel) -> bool {
         state.set_paired_options(ModelRc::default());
         state.set_add_loading(false);
         state.set_add_failure_kind(FailureKind::Other);
-        state.set_add_error(demo::DEMO_UNAVAILABLE.into());
+        state.set_add_error(messages::demo_unavailable());
         return false;
     }
     state.set_paired_options(ModelRc::new(VecModel::from(vec![PairedOption {
@@ -4941,7 +4947,7 @@ fn show_demo_options(state: &AppState<'_>, model: &SelectedModel) -> bool {
     state.set_add_loading(false);
     state.set_add_bluetooth_off(false);
     state.set_add_failure_kind(FailureKind::None);
-    state.set_add_error("".into());
+    state.set_add_error(messages::empty());
     true
 }
 
@@ -4956,7 +4962,7 @@ fn open_add_device(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_add_demo(false);
     state.set_add_bluetooth_off(false);
     state.set_add_failure_kind(FailureKind::None);
-    state.set_add_error("".into());
+    state.set_add_error(messages::empty());
     state.set_paired_options(ModelRc::default());
     reset_models(&state, paint_black(inner));
     request_paired_for_selection(&state, inner);
@@ -4976,7 +4982,7 @@ fn choose_model(window: &AppWindow, inner: &Rc<Inner>, code: &str) {
     state.set_add_step(1);
     state.set_add_bluetooth_off(false);
     state.set_add_failure_kind(FailureKind::None);
-    state.set_add_error("".into());
+    state.set_add_error(messages::empty());
     state.set_paired_options(ModelRc::default());
     state.set_add_loading(true);
     // The confirmation card already carries the chosen color; a filter or a
@@ -4996,7 +5002,7 @@ fn choose_model(window: &AppWindow, inner: &Rc<Inner>, code: &str) {
 fn refresh_paired(window: &AppWindow, inner: &Rc<Inner>) {
     let state = window.global::<AppState>();
     state.set_add_failure_kind(FailureKind::None);
-    state.set_add_error("".into());
+    state.set_add_error(messages::empty());
     state.set_add_bluetooth_off(false);
     if state.get_add_demo() {
         match chosen_model(&state) {
@@ -5033,7 +5039,7 @@ fn pair(window: &AppWindow, inner: &Rc<Inner>, mac: &str, name: &str) {
     let state = window.global::<AppState>();
     let Some(model) = chosen_model(&state) else {
         state.set_add_failure_kind(FailureKind::Other);
-        state.set_add_error("Choose a model before picking a paired device.".into());
+        state.set_add_error(messages::add_choose_model());
         return;
     };
     if state.get_add_demo() {
@@ -5042,9 +5048,7 @@ fn pair(window: &AppWindow, inner: &Rc<Inner>, mac: &str, name: &str) {
     }
     let Some(address) = parse_mac(mac) else {
         state.set_add_failure_kind(FailureKind::Other);
-        state.set_add_error(
-            "This paired device could not be read. Refresh the list and try again.".into(),
-        );
+        state.set_add_error(messages::add_unreadable_paired());
         return;
     };
     let card = DeviceCard {
@@ -5128,13 +5132,7 @@ fn begin_card_connect(window: &AppWindow, inner: &Rc<Inner>, card: DeviceCard) {
     state.set_one_earbud(false);
     paint_device_art(&state, paint_black(inner));
     let Some(address) = parse_mac(card.mac.as_str()) else {
-        apply_failure(
-            inner,
-            &state,
-            ConnectFailure::Transport(
-                "The saved device's Bluetooth address cannot be read. Add the device again.".into(),
-            ),
-        );
+        apply_failure(inner, &state, ConnectFailure::SavedAddress);
         return;
     };
     begin_connecting(
@@ -5155,10 +5153,10 @@ fn begin_connecting(state: &AppState<'_>, inner: &Rc<Inner>, request: ConnectReq
     // reaches the Windows worker, so the demo-only rules must not apply.
     inner.demo.set(false);
     state.set_connection(Connection::Connecting);
-    state.set_connection_reason("".into());
+    state.set_connection_reason(messages::empty());
     state.set_failure_kind(FailureKind::None);
-    state.set_failure_text("".into());
-    state.set_error_label("".into());
+    state.set_failure_text(messages::empty());
+    state.set_error_label(messages::empty());
     state.set_batteries(ModelRc::default());
     inner.device.borrow_mut().take();
     inner.clear_dual_devices();
@@ -5186,7 +5184,7 @@ fn begin_demo_connect(window: &AppWindow, inner: &Rc<Inner>, model: SelectedMode
     let demo_model = demo::demo_model();
     if model.code != demo_model.code {
         state.set_add_failure_kind(FailureKind::Other);
-        state.set_add_error(demo::DEMO_UNAVAILABLE.into());
+        state.set_add_error(messages::demo_unavailable());
         return;
     }
     let device_state = demo::demo_state();
@@ -5209,13 +5207,13 @@ fn begin_demo_connect(window: &AppWindow, inner: &Rc<Inner>, model: SelectedMode
     state.set_adding(false);
     state.set_add_step(0);
     state.set_add_failure_kind(FailureKind::None);
-    state.set_add_error("".into());
+    state.set_add_error(messages::empty());
     state.set_page(Page::Overview);
     state.set_connection(Connection::Connecting);
-    state.set_connection_reason("".into());
+    state.set_connection_reason(messages::empty());
     state.set_failure_kind(FailureKind::None);
-    state.set_failure_text("".into());
-    state.set_error_label("".into());
+    state.set_failure_text(messages::empty());
+    state.set_error_label(messages::empty());
     state.set_batteries(ModelRc::default());
     inner.device.borrow_mut().take();
     inner.clear_dual_devices();
@@ -5241,10 +5239,10 @@ fn cancel_connect(window: &AppWindow, inner: &Rc<Inner>) {
         Connection::NoDevice
     });
     state.set_batteries(ModelRc::default());
-    state.set_connection_reason("".into());
+    state.set_connection_reason(messages::empty());
     state.set_failure_kind(FailureKind::None);
-    state.set_failure_text("".into());
-    state.set_error_label("".into());
+    state.set_failure_text(messages::empty());
+    state.set_error_label(messages::empty());
     inner.device.borrow_mut().take();
     inner.clear_dual_devices();
     show_sound_mode(&state, None);
@@ -5276,10 +5274,10 @@ fn disconnect(window: &AppWindow, inner: &Rc<Inner>) {
         Connection::NoDevice
     });
     state.set_batteries(ModelRc::default());
-    state.set_connection_reason("".into());
+    state.set_connection_reason(messages::empty());
     state.set_failure_kind(FailureKind::None);
-    state.set_failure_text("".into());
-    state.set_error_label("".into());
+    state.set_failure_text(messages::empty());
+    state.set_error_label(messages::empty());
     inner.device.borrow_mut().take();
     inner.clear_dual_devices();
     show_sound_mode(&state, None);
@@ -5301,7 +5299,7 @@ fn show_current_card(state: &AppState<'_>, card: DeviceCard) {
 }
 
 /// Applies a finished enumeration to the dialog.
-fn apply_paired(window: &AppWindow, result: Result<Vec<Candidate>, BluetoothError>) {
+fn apply_paired(window: &AppWindow, result: Result<Vec<Candidate>, PairedFailure>) {
     let state = window.global::<AppState>();
     state.set_add_loading(false);
     match result {
@@ -5310,19 +5308,25 @@ fn apply_paired(window: &AppWindow, result: Result<Vec<Candidate>, BluetoothErro
             state.set_paired_options(ModelRc::new(VecModel::from(options)));
             state.set_add_bluetooth_off(false);
             state.set_add_failure_kind(FailureKind::None);
-            state.set_add_error("".into());
+            state.set_add_error(messages::empty());
         }
-        Err(BluetoothError::BluetoothOff) => {
+        Err(PairedFailure::WorkerStart) => {
+            state.set_paired_options(ModelRc::default());
+            state.set_add_bluetooth_off(false);
+            state.set_add_failure_kind(FailureKind::Other);
+            state.set_add_error(messages::add_paired_worker_start());
+        }
+        Err(PairedFailure::Bluetooth(BluetoothError::BluetoothOff)) => {
             state.set_paired_options(ModelRc::default());
             state.set_add_bluetooth_off(true);
             state.set_add_failure_kind(FailureKind::None);
-            state.set_add_error("".into());
+            state.set_add_error(messages::empty());
         }
-        Err(error) => {
+        Err(PairedFailure::Bluetooth(error)) => {
             let failure = ConnectFailure::from_bluetooth(error);
             state.set_paired_options(ModelRc::default());
             state.set_add_failure_kind(failure.kind());
-            state.set_add_error(failure.text().into());
+            state.set_add_error(failure.message());
         }
     }
 }
@@ -5350,12 +5354,12 @@ fn apply_outcome(window: &AppWindow, inner: &Rc<Inner>, outcome: ConnectOutcome)
             if device_state.a3954.is_some() {
                 state.set_page(Page::SoundModes);
             }
-            show_diagnostics_device(&state, model, &device_state, inner);
+            show_diagnostics_device(&state, model, &device_state);
             state.set_connection(Connection::Connected);
-            state.set_connection_reason("".into());
+            state.set_connection_reason(messages::empty());
             state.set_failure_kind(FailureKind::None);
-            state.set_failure_text("".into());
-            state.set_error_label("".into());
+            state.set_failure_text(messages::empty());
+            state.set_error_label(messages::empty());
             *inner.device.borrow_mut() = Some(device_state);
             show_overview(&state, inner);
             show_section_pages(&state, inner);
@@ -5380,10 +5384,10 @@ fn apply_failure(inner: &Rc<Inner>, state: &AppState<'_>, failure: ConnectFailur
     clear_section_pages(state);
     clear_overview(state);
     state.set_connection(failure.connection());
-    state.set_connection_reason("".into());
+    state.set_connection_reason(messages::empty());
     state.set_failure_kind(failure.kind());
-    state.set_failure_text(failure.text().into());
-    state.set_error_label("".into());
+    state.set_failure_text(failure.message());
+    state.set_error_label(messages::empty());
     render_settings(state, inner);
     refresh_tray(inner, state);
 }
@@ -5392,62 +5396,35 @@ fn apply_failure(inner: &Rc<Inner>, state: &AppState<'_>, failure: ConnectFailur
 /// card and use the existing Lost/Connect again presentation; do not retry in a
 /// loop behind the user's back.
 fn apply_connection_lost(inner: &Rc<Inner>, state: &AppState<'_>, failure: ConnectFailure) {
-    let reason = failure.text();
+    let reason = failure.message();
     apply_failure(inner, state, failure);
     state.set_connection(Connection::Lost);
-    state.set_connection_reason(reason.into());
+    state.set_connection_reason(reason);
     refresh_tray(inner, state);
 }
 
 /// Fills the diagnostics card for a connected model. The page keeps the last
 /// capture while the device stays connected; a new connection starts at the
 /// Device step again.
-fn show_diagnostics_device(
-    state: &AppState<'_>,
-    model: DeviceModel,
-    device_state: &DeviceState,
-    inner: &Rc<Inner>,
-) {
+fn show_diagnostics_device(state: &AppState<'_>, model: DeviceModel, device_state: &DeviceState) {
     let firmware = device_state
         .single_battery
         .as_ref()
         .and_then(|battery| battery.firmware.clone())
-        .or_else(|| device_state.firmware.left.clone())
-        .unwrap_or_else(|| "unknown".to_owned());
+        .or_else(|| device_state.firmware.left.clone());
     let battery = batteries(device_state)
         .first()
-        .map(|tile| tile.value.to_string())
-        .unwrap_or_else(|| "unknown".to_owned());
+        .map(|tile| tile.value.to_string());
     state.set_diagnostic_device_name(state.get_device_name());
     state.set_diagnostic_device_code(model.code.into());
-    state.set_diagnostic_device_meta(
-        if inner
-            .settings
-            .borrow()
-            .language
-            .as_deref()
-            .is_some_and(|language| language.starts_with("ru"))
-        {
-            format!("Прошивка {firmware} · Заряд {battery}%")
-        } else {
-            format!("Firmware {firmware} · Battery {battery}")
-        }
-        .into(),
-    );
-    state.set_diagnostic_status(
-        if inner
-            .settings
-            .borrow()
-            .language
-            .as_deref()
-            .is_some_and(|language| language.starts_with("ru"))
-        {
-            "Поддерживается"
-        } else {
-            "Supported"
-        }
-        .into(),
-    );
+    // The card's firmware and battery readings are values, not sentences: the
+    // catalog words "Firmware … · Battery …" and translates a missing reading,
+    // so the Russian UI follows the app language instead of a Rust branch.
+    state.set_diagnostic_device_meta(messages::diagnostics_meta(
+        firmware.as_deref().unwrap_or(messages::PART_UNKNOWN),
+        battery.as_deref().unwrap_or(messages::PART_UNKNOWN),
+    ));
+    state.set_diagnostic_status(messages::diagnostics_supported());
     state.set_diagnostic_available(true);
 }
 
@@ -5460,9 +5437,9 @@ fn reset_diagnostics(state: &AppState<'_>) {
     state.set_diagnostic_probes(ModelRc::default());
     state.set_diagnostic_device_name("".into());
     state.set_diagnostic_device_code("".into());
-    state.set_diagnostic_device_meta("".into());
-    state.set_diagnostic_status("".into());
-    state.set_diagnostic_error("".into());
+    state.set_diagnostic_device_meta(messages::empty());
+    state.set_diagnostic_status(messages::empty());
+    state.set_diagnostic_error(messages::empty());
     state.set_diagnostic_answered(0);
     state.set_diagnostic_frames(0);
     state.set_diagnostic_timeouts(0);
@@ -5486,7 +5463,7 @@ fn start_diagnostics(window: &AppWindow, inner: &Rc<Inner>) {
     *inner.diagnostic_archive.borrow_mut() = None;
     *inner.diagnostic_file.borrow_mut() = None;
     inner.diagnostic_note.borrow_mut().clear();
-    state.set_diagnostic_error("".into());
+    state.set_diagnostic_error(messages::empty());
     state.set_diagnostic_note("".into());
     state.set_diagnostic_probes(ModelRc::new(VecModel::from(diagnostic_probe_rows(&[]))));
     state.set_diagnostic_answered(0);
@@ -5500,9 +5477,9 @@ fn start_diagnostics(window: &AppWindow, inner: &Rc<Inner>) {
     if !inner.send_command(DeviceCommand::RunDiagnostics { request }) {
         state.set_diagnostic_busy(false);
         state.set_diagnostic_step(DiagnosticStep::Device);
-        state.set_diagnostic_error(
-            "The device worker is not running. Reconnect the device and try again.".into(),
-        );
+        state.set_diagnostic_error(messages::diagnostics_error(
+            messages::DIAGNOSTICS_WORKER_STOPPED,
+        ));
     }
 }
 
@@ -5534,7 +5511,7 @@ fn restart_diagnostics(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_diagnostic_step(DiagnosticStep::Device);
     state.set_diagnostic_probes(ModelRc::default());
     state.set_diagnostic_busy(false);
-    state.set_diagnostic_error("".into());
+    state.set_diagnostic_error(messages::empty());
     state.set_diagnostic_answered(0);
     state.set_diagnostic_frames(0);
     state.set_diagnostic_timeouts(0);
@@ -5551,14 +5528,19 @@ fn save_diagnostics_zip(window: &AppWindow, inner: &Rc<Inner>) {
         return;
     }
     let Some(mut session) = inner.diagnostic_session.borrow().clone() else {
-        state.set_diagnostic_error("There is no capture to save yet.".into());
+        state.set_diagnostic_error(messages::diagnostics_error(
+            messages::DIAGNOSTICS_NO_CAPTURE,
+        ));
         return;
     };
     session.notes = inner.diagnostic_note.borrow().clone();
     let bytes = match export_zip(&session) {
         Ok(bytes) => bytes,
         Err(error) => {
-            state.set_diagnostic_error(format!("Could not build the archive: {error}").into());
+            state.set_diagnostic_error(messages::diagnostics_error_with_detail(
+                messages::DIAGNOSTICS_BUILD_FAILED,
+                &error.to_string(),
+            ));
             return;
         }
     };
@@ -5579,14 +5561,16 @@ fn save_diagnostics_zip(window: &AppWindow, inner: &Rc<Inner>) {
             let result = match path {
                 Some(path) => fs::write(&path, &bytes)
                     .map(|()| Some(path))
-                    .map_err(|error| format!("Could not write the archive: {error}")),
+                    .map_err(|error| error.to_string()),
                 None => Ok(None),
             };
             let _ = sender.send(Event::DiagnosticSaved { result });
         });
     if spawned.is_err() {
         inner.diagnostic_saving.set(false);
-        state.set_diagnostic_error("Could not start the save dialog.".into());
+        state.set_diagnostic_error(messages::diagnostics_error(
+            messages::DIAGNOSTICS_SAVE_DIALOG_FAILED,
+        ));
     }
 }
 
@@ -5603,7 +5587,9 @@ fn open_diagnostics_issue(window: &AppWindow, _inner: &Rc<Inner>) {
     let state = window.global::<AppState>();
     let url = state.get_diagnostic_issue_url();
     if url.is_empty() {
-        state.set_diagnostic_error("The issue link is not ready yet.".into());
+        state.set_diagnostic_error(messages::diagnostics_error(
+            messages::DIAGNOSTICS_ISSUE_NOT_READY,
+        ));
         return;
     }
     open_url(url.as_str());
@@ -5626,13 +5612,16 @@ fn answer_diagnostic_saved(inner: &Rc<Inner>, result: Result<Option<PathBuf>, St
                     .to_owned()
                     .into(),
             );
-            state.set_diagnostic_error("".into());
+            state.set_diagnostic_error(messages::empty());
             state.set_diagnostic_step(DiagnosticStep::Done);
             state.set_toast(ToastKind::FileSaved);
             state.set_toast_count(0);
         }
         Ok(None) => {}
-        Err(error) => state.set_diagnostic_error(error.into()),
+        Err(error) => state.set_diagnostic_error(messages::diagnostics_error_with_detail(
+            messages::DIAGNOSTICS_WRITE_FAILED,
+            &error,
+        )),
     }
 }
 
@@ -5643,35 +5632,46 @@ fn diagnostic_probe_rows(results: &[ProbeResult]) -> Vec<DiagnosticProbe> {
             let result = results.iter().find(|result| result.id == probe.id);
             let (status, detail, ok, failed) = match result.map(|result| result.status) {
                 Some(ProbeStatus::Ok) => (
-                    "Done".to_owned(),
+                    messages::probe_status(messages::DIAGNOSTICS_PROBE_DONE),
                     format!("{} ms", result.map_or(0, |result| result.elapsed_ms)),
                     true,
                     false,
                 ),
-                Some(ProbeStatus::Timeout) => {
-                    ("No answer".to_owned(), "timeout".to_owned(), false, true)
-                }
-                Some(ProbeStatus::Empty) => {
-                    ("Empty reply".to_owned(), "empty".to_owned(), false, true)
-                }
+                Some(ProbeStatus::Timeout) => (
+                    messages::probe_status(messages::DIAGNOSTICS_PROBE_NO_ANSWER),
+                    "timeout".to_owned(),
+                    false,
+                    true,
+                ),
+                Some(ProbeStatus::Empty) => (
+                    messages::probe_status(messages::DIAGNOSTICS_PROBE_EMPTY_REPLY),
+                    "empty".to_owned(),
+                    false,
+                    true,
+                ),
                 Some(ProbeStatus::Unexpected) => (
-                    "Unexpected".to_owned(),
+                    messages::probe_status(messages::DIAGNOSTICS_PROBE_UNEXPECTED),
                     "wrong command".to_owned(),
                     false,
                     true,
                 ),
                 Some(ProbeStatus::ChecksumError) => (
-                    "Bad checksum".to_owned(),
+                    messages::probe_status(messages::DIAGNOSTICS_PROBE_BAD_CHECKSUM),
                     "checksum".to_owned(),
                     false,
                     true,
                 ),
-                None => ("Waiting…".to_owned(), "".to_owned(), false, false),
+                None => (
+                    messages::probe_status(messages::DIAGNOSTICS_PROBE_WAITING),
+                    "".to_owned(),
+                    false,
+                    false,
+                ),
             };
             DiagnosticProbe {
                 label: diagnostic_probe_label(probe.id).into(),
                 command: probe.command.to_string().into(),
-                status: status.into(),
+                status,
                 detail: detail.into(),
                 ok,
                 failed,
@@ -6400,6 +6400,25 @@ pub const fn a3954_button_label(button: A3954Button) -> &'static str {
     }
 }
 
+/// The [`messages::SUBJECT_*`] key of a gesture row's name, for a failed write's
+/// banner.
+pub const fn a3954_button_subject(button: A3954Button) -> &'static str {
+    match button {
+        A3954Button::LeftSingle => messages::SUBJECT_LEFT_SINGLE_PRESS,
+        A3954Button::RightSingle => messages::SUBJECT_RIGHT_SINGLE_PRESS,
+        A3954Button::LeftDouble => messages::SUBJECT_LEFT_DOUBLE_PRESS,
+        A3954Button::RightDouble => messages::SUBJECT_RIGHT_DOUBLE_PRESS,
+        A3954Button::LeftTriple => messages::SUBJECT_LEFT_TRIPLE_PRESS,
+        A3954Button::RightTriple => messages::SUBJECT_RIGHT_TRIPLE_PRESS,
+        A3954Button::LeftLong => messages::SUBJECT_LEFT_LONG_PRESS,
+        A3954Button::RightLong => messages::SUBJECT_RIGHT_LONG_PRESS,
+        A3954Button::LeftSlideUp => messages::SUBJECT_LEFT_SLIDE_UP,
+        A3954Button::RightSlideUp => messages::SUBJECT_RIGHT_SLIDE_UP,
+        A3954Button::LeftSlideDown => messages::SUBJECT_LEFT_SLIDE_DOWN,
+        A3954Button::RightSlideDown => messages::SUBJECT_RIGHT_SLIDE_DOWN,
+    }
+}
+
 /// The option strings of one gesture row: "None" then the eight press choices for
 /// a press, or "None" then the two volume choices for a slide.
 pub const fn a3954_button_options(button: A3954Button) -> &'static [&'static str] {
@@ -6962,13 +6981,13 @@ fn apply_mode_outcome(
     match outcome {
         Ok(reported) => {
             state.set_mode_index(mode_index(Some(reported)));
-            state.set_error_label("".into());
+            state.set_error_label(messages::empty());
         }
         Err(failure) => {
             // The worker closes the session after a failed change; Retry in the
             // banner opens a fresh connection.
             inner.stop_worker();
-            state.set_error_label(failure.label().into());
+            state.set_error_label(failure.message());
         }
     }
     refresh_tray(inner, &state);
@@ -6998,13 +7017,13 @@ fn apply_setting_outcome(
             }
             show_overview(&state, inner);
             show_section_pages(&state, inner);
-            state.set_error_label("".into());
+            state.set_error_label(messages::empty());
         }
         Err(failure) => {
             // The worker closes the session after a failed write; Retry in the
             // banner opens a fresh connection.
             inner.stop_worker();
-            state.set_error_label(failure.label(setting).into());
+            state.set_error_label(failure.message(setting));
         }
     }
     refresh_tray(inner, &state);
@@ -7022,9 +7041,9 @@ fn apply_dual_read(
     match outcome {
         Ok(devices) => {
             show_dual_devices(inner, &state, devices);
-            state.set_error_label("".into());
+            state.set_error_label(messages::empty());
         }
-        Err(failure) => state.set_error_label(failure.list_label().into()),
+        Err(failure) => state.set_error_label(failure.list_message()),
     }
 }
 
@@ -7040,9 +7059,9 @@ fn apply_dual_write(
     match outcome {
         Ok(devices) => {
             show_dual_devices(inner, &state, devices);
-            state.set_error_label("".into());
+            state.set_error_label(messages::empty());
         }
-        Err(failure) => state.set_error_label(failure.action_label(action).into()),
+        Err(failure) => state.set_error_label(failure.action_message(action)),
     }
 }
 
@@ -7065,13 +7084,13 @@ fn apply_preset_outcome(
     match outcome {
         Ok(reported) => {
             show_equalizer_state(&state, &reported);
-            state.set_error_label("".into());
+            state.set_error_label(messages::empty());
         }
         Err(failure) => {
             // The worker closes the session after a failed change; Retry in the
             // banner opens a fresh connection.
             inner.stop_worker();
-            state.set_error_label(failure.label().into());
+            state.set_error_label(failure.message());
         }
     }
 }
@@ -7114,13 +7133,13 @@ fn apply_scale_outcome(
             // the state the device reports rather than the clicked position.
             store_a3954_sound_mode(inner, reported);
             show_a3954_sound_mode_state(&state, reported);
-            state.set_error_label("".into());
+            state.set_error_label(messages::empty());
         }
         Err(failure) => {
             // The worker closes the session after a failed change; Retry in the
             // banner opens a fresh connection.
             inner.stop_worker();
-            state.set_error_label(failure.label().into());
+            state.set_error_label(failure.message());
         }
     }
     refresh_tray(inner, &state);
@@ -7157,13 +7176,13 @@ fn apply_a3954_preset_outcome(
         Ok(reported) => {
             store_a3954_equalizer(inner, reported);
             show_a3954_equalizer_state(&state, &reported);
-            state.set_error_label("".into());
+            state.set_error_label(messages::empty());
         }
         Err(failure) => {
             // The worker closes the session after a failed change; Retry in the
             // banner opens a fresh connection.
             inner.stop_worker();
-            state.set_error_label(failure.label().into());
+            state.set_error_label(failure.message());
         }
     }
 }
@@ -7179,11 +7198,11 @@ fn apply_a3954_curve_outcome(
         Ok(reported) => {
             store_a3954_equalizer(inner, reported);
             show_a3954_equalizer_state(&state, &reported);
-            state.set_error_label("".into());
+            state.set_error_label(messages::empty());
         }
         Err(failure) => {
             inner.stop_worker();
-            state.set_error_label(failure.bands_label().into());
+            state.set_error_label(failure.bands_message());
         }
     }
 }
@@ -7248,24 +7267,24 @@ fn apply_a3954_setting_outcome(
             }
             show_overview(&state, inner);
             show_section_pages(&state, inner);
-            state.set_error_label("".into());
+            state.set_error_label(messages::empty());
         }
         Err(failure) => {
             // The worker closes the session after a failed write; Retry in the
             // banner opens a fresh connection. The banner names the row the user
             // changed; a case-screen toggle names its specific flag.
             inner.stop_worker();
-            let label = {
+            let message = {
                 let device = inner.device.borrow();
                 match device.as_ref().and_then(|device| device.a3954.as_ref()) {
-                    Some(current) => a3954_setting_failure_label(failure, setting, current),
+                    Some(current) => a3954_setting_failure_message(failure, setting, current),
                     // The connected state is always present on this path; keep a
                     // generic row name if it is not, so the banner still explains
                     // the failure instead of panicking.
-                    None => failure.row_label(a3954_setting_label(setting)),
+                    None => failure.row_message(a3954_setting_subject(setting)),
                 }
             };
-            state.set_error_label(label.into());
+            state.set_error_label(message);
         }
     }
     refresh_tray(inner, &state);
@@ -7286,13 +7305,13 @@ fn apply_a3954_button_outcome(
             *inner.device.borrow_mut() = Some(reported);
             show_overview(&state, inner);
             show_section_pages(&state, inner);
-            state.set_error_label("".into());
+            state.set_error_label(messages::empty());
         }
         Err(failure) => {
             // The worker closes the session after a failed write; Retry in the
             // banner opens a fresh connection.
             inner.stop_worker();
-            state.set_error_label(a3954_button_failure_label(failure, button).into());
+            state.set_error_label(a3954_button_failure_message(failure, button));
         }
     }
     refresh_tray(inner, &state);
@@ -7349,7 +7368,7 @@ fn set_scale(window: &AppWindow, inner: &Rc<Inner>, position: i32) {
     if !sent {
         // The worker of a previous failed change has closed the connection; the
         // banner's Retry reconnects.
-        state.set_error_label(ModeFailure::Disconnected.label().into());
+        state.set_error_label(ModeFailure::Disconnected.message());
     }
 }
 
@@ -7367,7 +7386,7 @@ fn set_a3954_wind(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
         }
     });
     if !sent {
-        state.set_error_label(ModeFailure::Disconnected.label().into());
+        state.set_error_label(ModeFailure::Disconnected.message());
     }
 }
 
@@ -7398,7 +7417,7 @@ fn set_ambient_sound_mode(window: &AppWindow, inner: &Rc<Inner>, index: i32) {
     if !sent {
         // The worker of a previous failed change has closed the connection; the
         // banner's Retry reconnects.
-        state.set_error_label(ModeFailure::Disconnected.label().into());
+        state.set_error_label(ModeFailure::Disconnected.message());
     }
 }
 
@@ -7467,7 +7486,7 @@ fn answer_setting(
     if !sent {
         // The worker of a previous failed write has closed the connection; the
         // banner's Retry reconnects.
-        state.set_error_label(SettingFailure::Disconnected.label(setting).into());
+        state.set_error_label(SettingFailure::Disconnected.message(setting));
     }
 }
 
@@ -7484,7 +7503,7 @@ fn answer_a3954_setting(
     if state.get_connection() != Connection::Connected {
         return;
     }
-    let (setting, label) = {
+    let (setting, subject) = {
         let device = inner.device.borrow();
         let Some(a3954) = device
             .as_ref()
@@ -7495,15 +7514,15 @@ fn answer_a3954_setting(
         let Some(setting) = command(a3954) else {
             return;
         };
-        // Resolve the banner row while the pre-write state is borrowed: a
+        // Resolve the banner subject while the pre-write state is borrowed: a
         // case-screen toggle names the flag it changes.
-        (setting, a3954_setting_row_label(setting, a3954))
+        (setting, a3954_setting_row_subject(setting, a3954))
     };
     let sent = inner.send_queued(&inner.setting_change, |request| {
         DeviceCommand::SetA3954Setting { request, setting }
     });
     if !sent {
-        state.set_error_label(SettingFailure::Disconnected.row_label(label).into());
+        state.set_error_label(SettingFailure::Disconnected.row_message(subject));
     }
 }
 
@@ -7549,9 +7568,10 @@ fn answer_a3954_button(window: &AppWindow, inner: &Rc<Inner>, button: A3954Butto
     if !sent {
         // The worker of a previous failed change has closed the connection; the
         // banner's Retry reconnects.
-        state.set_error_label(
-            a3954_button_failure_label(SettingFailure::Disconnected, button).into(),
-        );
+        state.set_error_label(a3954_button_failure_message(
+            SettingFailure::Disconnected,
+            button,
+        ));
     }
 }
 
@@ -7595,7 +7615,7 @@ fn answer_dual_item(
         // banner's Retry reconnects.
         window
             .global::<AppState>()
-            .set_error_label(DualFailure::Disconnected.action_label(action).into());
+            .set_error_label(DualFailure::Disconnected.action_message(action));
     }
 }
 
@@ -7662,7 +7682,7 @@ fn select_equalizer_preset(window: &AppWindow, inner: &Rc<Inner>, value: &str) {
             DeviceCommand::ChangeA3954Preset { request, preset_id }
         });
         if !sent {
-            state.set_error_label(EqFailure::Disconnected.label().into());
+            state.set_error_label(EqFailure::Disconnected.message());
         }
         return;
     }
@@ -7672,7 +7692,7 @@ fn select_equalizer_preset(window: &AppWindow, inner: &Rc<Inner>, value: &str) {
     if !sent {
         // The worker of a previous failed change has closed the connection; the
         // banner's Retry reconnects.
-        state.set_error_label(EqFailure::Disconnected.label().into());
+        state.set_error_label(EqFailure::Disconnected.message());
     }
 }
 
@@ -7697,14 +7717,6 @@ impl SaveProblem {
         }
     }
 }
-
-/// The `AppState.error-label` of a failed saved-profile document write. The
-/// vendored banner wraps a label as “Could not change “{}”.”, so the visible
-/// text says the profiles could not be saved; the banner's second sentence
-/// (“The device kept its previous value.”) is the vendored device-change wording
-/// and does not describe a file failure, but there is no other visible error
-/// slot without editing the vendored UI.
-const PROFILE_WRITE_FAILURE_LABEL: &str = "Could not save equalizer profiles";
 
 /// The saved-profile dialog's answer to a save click: either the fields the
 /// dialog shows for a name it cannot store, or the name to store and whether its
@@ -7840,11 +7852,11 @@ fn save_profile(
     }
 }
 
-/// Clears the error banner when it shows a failed saved-profile write, leaving
-/// any device-change error banner in place.
+/// Clears the error banner when it shows a failed saved-profile document write,
+/// leaving any device-change error banner in place.
 fn clear_profile_write_error(state: &AppState<'_>) {
-    if state.get_error_label() == PROFILE_WRITE_FAILURE_LABEL {
-        state.set_error_label("".into());
+    if state.get_error_label() == messages::profile_write_failure() {
+        state.set_error_label(messages::empty());
     }
 }
 
@@ -7858,8 +7870,8 @@ trait SaveDialogPage {
     fn show_save_existing(&self, name: &str);
     /// Closes the dialog (`eq-saving = false`).
     fn close_save_dialog(&self);
-    /// Shows the readable banner label of a failed document write.
-    fn show_profile_error(&self, label: &str);
+    /// Shows the banner message of a failed document write.
+    fn show_profile_error(&self, message: UiMessage);
     /// Clears the banner when it shows a saved-profile write failure.
     fn clear_profile_error(&self);
 }
@@ -7877,8 +7889,8 @@ impl SaveDialogPage for AppState<'_> {
         self.set_eq_saving(false);
     }
 
-    fn show_profile_error(&self, label: &str) {
-        self.set_error_label(label.into());
+    fn show_profile_error(&self, message: UiMessage) {
+        self.set_error_label(message);
     }
 
     fn clear_profile_error(&self) {
@@ -7917,7 +7929,7 @@ fn answer_save_click(
         SaveOutcome::NotWritten => {
             page.show_save_problem(SaveProblem::None);
             page.close_save_dialog();
-            page.show_profile_error(PROFILE_WRITE_FAILURE_LABEL);
+            page.show_profile_error(messages::profile_write_failure());
         }
     }
     outcome
@@ -7972,9 +7984,9 @@ fn apply_equalizer_profile(window: &AppWindow, inner: &Rc<Inner>, name: &str) {
     }
     let outcome = apply_saved_profile(&inner.profiles.borrow(), name, &**inner);
     match outcome {
-        ApplyOutcome::Queued => state.set_error_label("".into()),
+        ApplyOutcome::Queued => state.set_error_label(messages::empty()),
         ApplyOutcome::Disconnected => {
-            state.set_error_label(EqFailure::Disconnected.bands_label().into());
+            state.set_error_label(EqFailure::Disconnected.bands_message());
         }
         ApplyOutcome::Unknown => {
             eprintln!("OpenSCL4: no saved equalizer profile named {name:?}");
@@ -8028,7 +8040,7 @@ fn delete_equalizer_profile(window: &AppWindow, inner: &Rc<Inner>, name: &str) {
         }
         DeleteOutcome::NotWritten => {
             inner.refresh_saved_profiles(&state);
-            state.set_error_label(PROFILE_WRITE_FAILURE_LABEL.into());
+            state.set_error_label(messages::profile_write_failure());
         }
         DeleteOutcome::NotFound => {}
     }
@@ -8192,8 +8204,8 @@ trait ImportPage {
     fn close_import_dialog(&self);
     /// Shows the short toast at the bottom of the window.
     fn show_import_toast(&self, kind: ToastKind, count: i32);
-    /// Shows the page banner for a failed profile-document write.
-    fn show_import_error(&self, label: &str);
+    /// Shows the page banner message for a failed profile-document write.
+    fn show_import_error(&self, message: UiMessage);
 }
 
 impl ImportPage for AppState<'_> {
@@ -8217,8 +8229,8 @@ impl ImportPage for AppState<'_> {
         self.set_toast_count(count);
     }
 
-    fn show_import_error(&self, label: &str) {
-        self.set_error_label(label.into());
+    fn show_import_error(&self, message: UiMessage) {
+        self.set_error_label(message);
     }
 }
 
@@ -8382,7 +8394,7 @@ fn answer_import_click(
         *import_text = None;
         page.close_import_dialog();
         page.show_import_note(TransferNote::None, 0);
-        page.show_import_error(PROFILE_WRITE_FAILURE_LABEL);
+        page.show_import_error(messages::profile_write_failure());
         return ImportOutcome::NotWritten;
     }
     *import_text = None;
@@ -9047,7 +9059,7 @@ mod tests {
         let path = directory.document();
         let mut set = ProfileSet::new();
         let page = RecordedSaveDialog::default();
-        page.show_profile_error(PROFILE_WRITE_FAILURE_LABEL);
+        page.show_profile_error(messages::profile_write_failure());
 
         let warm = [30, -30, 60, 0, -60, 20, 0, -20];
         let outcome = answer_save_click(&page, &mut set, Some(&path), "  Warm ", false, warm);
@@ -9058,7 +9070,7 @@ mod tests {
         assert!(page.closed.get(), "a written save closes the dialog");
         assert_eq!(page.problem.get(), SaveProblem::None.value());
         assert_eq!(
-            page.error.borrow().as_str(),
+            page.error.borrow().key.as_str(),
             "",
             "a successful write clears the stale write-failure banner"
         );
@@ -9098,8 +9110,8 @@ mod tests {
             "the dialog closes so the page banner is visible"
         );
         assert_eq!(
-            page.error.borrow().as_str(),
-            PROFILE_WRITE_FAILURE_LABEL,
+            *page.error.borrow(),
+            messages::profile_write_failure(),
             "the page banner says the profiles could not be saved"
         );
         assert!(!path.exists(), "the failed save wrote no document");
@@ -9121,7 +9133,7 @@ mod tests {
         );
         assert!(set.is_empty(), "nothing is kept in memory either");
         assert!(page.closed.get(), "the dialog closes on the failure");
-        assert_eq!(page.error.borrow().as_str(), PROFILE_WRITE_FAILURE_LABEL);
+        assert_eq!(*page.error.borrow(), messages::profile_write_failure());
     }
 
     #[test]
@@ -9259,7 +9271,7 @@ mod tests {
         importing: Cell<bool>,
         notes: RefCell<Vec<(TransferNote, i32)>>,
         toasts: RefCell<Vec<(ToastKind, i32)>>,
-        errors: RefCell<Vec<String>>,
+        errors: RefCell<Vec<UiMessage>>,
         closes: Cell<u32>,
     }
 
@@ -9308,8 +9320,8 @@ mod tests {
             self.toasts.borrow_mut().push((kind, count));
         }
 
-        fn show_import_error(&self, label: &str) {
-            self.errors.borrow_mut().push(label.to_owned());
+        fn show_import_error(&self, message: UiMessage) {
+            self.errors.borrow_mut().push(message);
         }
     }
 
@@ -9813,8 +9825,11 @@ mod tests {
         assert_eq!(profiles.len(), 1, "the imported profile is rolled back");
         assert!(!page.importing.get(), "the dialog closes");
         assert_eq!(
-            page.errors.borrow().first().map(String::as_str),
-            Some(PROFILE_WRITE_FAILURE_LABEL),
+            page.errors
+                .borrow()
+                .first()
+                .map(|message| message.key.as_str()),
+            Some(messages::ERROR_PROFILE_WRITE),
             "the page banner says the profiles could not be saved"
         );
         assert_eq!(
@@ -10335,13 +10350,32 @@ mod tests {
         assert_ratio(tile.progress, 1.0);
     }
 
-    fn readable(text: &str) -> String {
-        assert!(!text.is_empty(), "failure has no text");
-        for token in text.split_whitespace() {
-            let token = token.trim_matches(|character: char| !character.is_ascii_alphanumeric());
-            assert_eq!(parse_mac(token), None, "a MAC leaked into {text:?}");
+    /// A failure's catalog message: a non-empty key (an identifier, never a
+    /// sentence) with no Bluetooth address in the key or its technical argument.
+    fn readable(message: &UiMessage) -> String {
+        assert!(!message.key.is_empty(), "the failure has no message key");
+        assert!(
+            !message.key.contains(' '),
+            "a message key is an identifier, not a sentence: {}",
+            message.key
+        );
+        for part in [&message.key, &message.arg0, &message.arg1] {
+            for token in part.split_whitespace() {
+                let token =
+                    token.trim_matches(|character: char| !character.is_ascii_alphanumeric());
+                assert_eq!(parse_mac(token), None, "a MAC leaked into {part:?}");
+            }
         }
-        text.to_lowercase()
+        message.key.to_string()
+    }
+
+    /// Asserts a message is the catalog's failed-write sentence with `subject`
+    /// and `reason` keys: Rust holds the two keys, the catalog the sentence.
+    fn assert_write_failure(message: &UiMessage, subject: &str, reason: &str) {
+        assert_eq!(message.key.as_str(), messages::ERROR_SETTING_WRITE);
+        assert_eq!(message.arg0.as_str(), subject);
+        assert_eq!(message.arg1.as_str(), reason);
+        assert!(!message.key.contains(' ') && !message.arg0.contains(' '));
     }
 
     #[test]
@@ -10349,7 +10383,7 @@ mod tests {
         let failure = ConnectFailure::from_bluetooth(BluetoothError::NotFound);
         assert_eq!(failure.kind(), FailureKind::NotFound);
         assert_eq!(failure.connection(), Connection::Failed);
-        assert!(readable(&failure.text()).contains("not found"));
+        assert_eq!(readable(&failure.message()), messages::CONNECT_NOT_FOUND);
     }
 
     #[test]
@@ -10357,7 +10391,7 @@ mod tests {
         let failure = ConnectFailure::from_bluetooth(BluetoothError::Timeout);
         assert_eq!(failure.kind(), FailureKind::TimedOut);
         assert_eq!(failure.connection(), Connection::Failed);
-        assert!(readable(&failure.text()).contains("did not answer"));
+        assert_eq!(readable(&failure.message()), messages::CONNECT_TIMED_OUT);
     }
 
     #[test]
@@ -10365,7 +10399,10 @@ mod tests {
         let failure = ConnectFailure::from_bluetooth(BluetoothError::BluetoothOff);
         assert_eq!(failure.kind(), FailureKind::None);
         assert_eq!(failure.connection(), Connection::BluetoothOff);
-        assert!(readable(&failure.text()).contains("bluetooth is off"));
+        assert_eq!(
+            readable(&failure.message()),
+            messages::CONNECT_BLUETOOTH_OFF
+        );
     }
 
     #[test]
@@ -10373,9 +10410,7 @@ mod tests {
         let failure = ConnectFailure::from_bluetooth(BluetoothError::NotPaired);
         assert_eq!(failure.kind(), FailureKind::Other);
         assert_eq!(failure.connection(), Connection::Failed);
-        let text = readable(&failure.text());
-        assert!(text.contains("not paired"));
-        assert!(text.contains("windows"));
+        assert_eq!(readable(&failure.message()), messages::CONNECT_NOT_PAIRED);
     }
 
     #[test]
@@ -10383,7 +10418,10 @@ mod tests {
         let failure = ConnectFailure::from_bluetooth(BluetoothError::ConnectionFailed);
         assert_eq!(failure.kind(), FailureKind::Other);
         assert_eq!(failure.connection(), Connection::Failed);
-        assert!(readable(&failure.text()).contains("bluetooth connection"));
+        assert_eq!(
+            readable(&failure.message()),
+            messages::CONNECT_CONNECTION_FAILED
+        );
     }
 
     #[test]
@@ -10411,7 +10449,7 @@ mod tests {
         let failure = ConnectFailure::NoService;
         assert_eq!(failure.kind(), FailureKind::Other);
         assert_eq!(failure.connection(), Connection::Failed);
-        assert!(readable(&failure.text()).contains("soundcore"));
+        assert_eq!(readable(&failure.message()), messages::CONNECT_NO_SERVICE);
     }
 
     #[test]
@@ -10419,7 +10457,7 @@ mod tests {
         let failure = ConnectFailure::NoParser;
         assert_eq!(failure.kind(), FailureKind::Other);
         assert_eq!(failure.connection(), Connection::Failed);
-        assert!(readable(&failure.text()).contains("battery"));
+        assert_eq!(readable(&failure.message()), messages::CONNECT_NO_PARSER);
     }
 
     #[test]
@@ -10427,14 +10465,17 @@ mod tests {
         let failure = ConnectFailure::from_session(SessionError::UnsupportedLayout);
         assert_eq!(failure.kind(), FailureKind::Other);
         assert_eq!(failure.connection(), Connection::Failed);
-        assert!(readable(&failure.text()).contains("battery"));
+        assert_eq!(
+            readable(&failure.message()),
+            messages::CONNECT_UNSUPPORTED_LAYOUT
+        );
     }
 
     #[test]
     fn a_session_timeout_is_a_timed_out_failure() {
         let failure = ConnectFailure::from_session(SessionError::Timeout);
         assert_eq!(failure.kind(), FailureKind::TimedOut);
-        assert!(readable(&failure.text()).contains("did not answer"));
+        assert_eq!(readable(&failure.message()), messages::CONNECT_TIMED_OUT);
     }
 
     #[test]
@@ -10443,20 +10484,39 @@ mod tests {
             soundcore_session::ProtocolError::State(soundcore_models::StateError::NotAStateFrame),
         ));
         assert_eq!(failure.kind(), FailureKind::Other);
-        assert!(readable(&failure.text()).contains("message"));
+        assert_eq!(readable(&failure.message()), messages::CONNECT_PROTOCOL);
     }
 
     #[test]
-    fn a_transport_error_keeps_its_readable_text() {
+    fn a_transport_error_carries_its_technical_text_as_the_message_argument() {
+        // The OS detail is technical data inside the translated catalog sentence;
+        // the Rust side never words the sentence itself.
         let failure = ConnectFailure::from_session(SessionError::Io(std::io::Error::other(
             "the socket closed",
         )));
         assert_eq!(failure.kind(), FailureKind::Other);
-        assert_eq!(failure.text(), "the socket closed");
+        let message = failure.message();
+        assert_eq!(readable(&message), messages::CONNECT_TRANSPORT);
+        assert_eq!(message.arg0.as_str(), "the socket closed");
 
         let failure =
             ConnectFailure::from_bluetooth(BluetoothError::Other("Winsock error 7".into()));
-        assert_eq!(failure.text(), "Winsock error 7");
+        assert_eq!(failure.message().arg0.as_str(), "Winsock error 7");
+    }
+
+    #[test]
+    fn the_internal_worker_failures_have_their_own_catalog_keys() {
+        // The app's own failures are keys, not English detail strings a translated
+        // sentence would quote.
+        for failure in [
+            ConnectFailure::WorkerStart,
+            ConnectFailure::DemoWorkerStart,
+            ConnectFailure::SavedAddress,
+        ] {
+            let message = readable(&failure.message());
+            assert!(message.starts_with("connect."), "{message}");
+            assert!(failure.message().arg0.is_empty(), "{message}");
+        }
     }
 
     const SPP: u128 = 0x0000_1101_0000_1000_8000_0080_5F9B_34FB;
@@ -11379,11 +11439,14 @@ mod tests {
         for (error, expected) in cases {
             let failure = SettingFailure::from_session(error);
             assert_eq!(failure, expected);
-            let label = failure.label(SettingCommand::SideTone(true));
-            assert_eq!(label, format!("Side tone ({})", failure.reason()));
-            assert!(readable(&label).contains("side tone"), "{label:?}");
+            let message = failure.message(SettingCommand::SideTone(true));
+            assert_eq!(message.key.as_str(), messages::ERROR_SETTING_WRITE);
+            assert_eq!(message.arg0.as_str(), messages::SUBJECT_SIDE_TONE);
+            assert_eq!(message.arg1.as_str(), expected.reason_key());
+            // A key, not the English sentence the UI resolves through Messages.text.
+            assert!(!message.arg0.contains(' ') && !message.arg1.contains(' '));
         }
-        // Every setting the toggles and choices write has a row name.
+        // Every setting the toggles and choices write has its own subject key.
         let settings = measured_settings();
         let commands = [
             SettingCommand::ButtonDoublePress(None),
@@ -11401,10 +11464,17 @@ mod tests {
             SettingCommand::SideTone(true),
             SettingCommand::VoicePrompt(true),
         ];
+        let catalog = include_str!("../ui/messages.slint");
+        let mut subjects = Vec::new();
         for setting in commands {
-            assert!(!setting_label(setting).is_empty(), "{setting:?}");
-            assert!(readable(setting_label(setting)).len() > 2);
+            let subject = setting_subject(setting);
+            assert!(subject.starts_with("subject."), "{subject}");
+            assert!(!subject.contains(' '), "{subject}");
+            assert!(catalog.contains(subject), "no catalog branch for {subject}");
+            assert!(!subjects.contains(&subject), "two settings share {subject}");
+            subjects.push(subject);
         }
+        assert_eq!(subjects.len(), commands.len());
     }
 
     #[test]
@@ -11904,7 +11974,13 @@ mod tests {
                     outcome: Err(failure),
                 } => {
                     assert_eq!(failure, DualFailure::TimedOut);
-                    assert_eq!(failure.list_label(), "Dual connections list (no answer)");
+                    assert_eq!(
+                        failure.list_message(),
+                        messages::setting_write_failure(
+                            messages::SUBJECT_DUAL_CONNECTIONS_LIST,
+                            messages::REASON_NO_ANSWER
+                        )
+                    );
                 }
                 other => panic!("unexpected event: {other:?}"),
             }
@@ -11959,8 +12035,11 @@ mod tests {
                 assert_eq!(mac, PHONE_MAC);
                 assert_eq!(failure, DualFailure::Disconnected);
                 assert_eq!(
-                    failure.action_label(DualAction::Forget(mac)),
-                    "Forget device (connection lost)"
+                    failure.action_message(DualAction::Forget(mac)),
+                    messages::setting_write_failure(
+                        messages::SUBJECT_FORGET_DEVICE,
+                        messages::REASON_CONNECTION_LOST
+                    )
                 );
             }
             other => panic!("unexpected event: {other:?}"),
@@ -12082,24 +12161,35 @@ mod tests {
         for (error, expected) in cases {
             let failure = DualFailure::from_session(error);
             assert_eq!(failure, expected);
-            assert_eq!(
-                failure.list_label(),
-                format!("Dual connections list ({})", failure.reason())
-            );
-            assert_eq!(
-                failure.action_label(DualAction::Forget(PHONE_MAC)),
-                format!("Forget device ({})", failure.reason())
-            );
+            let list = failure.list_message();
+            assert_eq!(list.key.as_str(), messages::ERROR_SETTING_WRITE);
+            assert_eq!(list.arg0.as_str(), messages::SUBJECT_DUAL_CONNECTIONS_LIST);
+            assert_eq!(list.arg1.as_str(), expected.reason_key());
+            let action = failure.action_message(DualAction::Forget(PHONE_MAC));
+            assert_eq!(action.key.as_str(), messages::ERROR_SETTING_WRITE);
+            assert_eq!(action.arg0.as_str(), messages::SUBJECT_FORGET_DEVICE);
+            assert_eq!(action.arg1.as_str(), expected.reason_key());
         }
         // Each action names itself; none names the address the frame carries.
-        for (action, label) in [
-            (DualAction::Connect(PHONE_MAC), "Connect device"),
-            (DualAction::Disconnect(PHONE_MAC), "Disconnect device"),
-            (DualAction::Forget(PHONE_MAC), "Forget device"),
+        for (action, subject) in [
+            (
+                DualAction::Connect(PHONE_MAC),
+                messages::SUBJECT_CONNECT_DEVICE,
+            ),
+            (
+                DualAction::Disconnect(PHONE_MAC),
+                messages::SUBJECT_DISCONNECT_DEVICE,
+            ),
+            (
+                DualAction::Forget(PHONE_MAC),
+                messages::SUBJECT_FORGET_DEVICE,
+            ),
         ] {
-            let shown = DualFailure::TimedOut.action_label(action);
-            assert_eq!(shown, format!("{label} (no answer)"));
-            assert!(!shown.contains("02:00"), "{shown:?} leaks no address");
+            let shown = DualFailure::TimedOut.action_message(action);
+            assert_eq!(shown.arg0.as_str(), subject);
+            assert_eq!(shown.arg1.as_str(), messages::REASON_NO_ANSWER);
+            assert!(!shown.arg0.contains("02:00"), "{shown:?} leaks no address");
+            assert!(!shown.key.contains(' '), "a key, not a sentence");
         }
     }
 
@@ -12327,8 +12417,11 @@ mod tests {
         for (error, expected) in cases {
             let failure = ModeFailure::from_session(error);
             assert_eq!(failure, expected);
-            let label = readable(failure.label());
-            assert!(label.contains("sound mode"), "{label:?} names the setting");
+            assert_write_failure(
+                &failure.message(),
+                messages::SUBJECT_SOUND_MODE,
+                expected.reason_key(),
+            );
         }
     }
 
@@ -12475,7 +12568,7 @@ mod tests {
         shown: RefCell<Vec<i16>>,
         curves: RefCell<Vec<Vec<i16>>>,
         reported: RefCell<Vec<EqualizerState>>,
-        errors: RefCell<Vec<String>>,
+        errors: RefCell<Vec<UiMessage>>,
     }
 
     impl RecordedPage {
@@ -12502,8 +12595,8 @@ mod tests {
             self.reported.borrow_mut().push(*equalizer);
         }
 
-        fn show_error(&self, label: &str) {
-            self.errors.borrow_mut().push(label.to_owned());
+        fn show_error(&self, message: UiMessage) {
+            self.errors.borrow_mut().push(message);
         }
     }
 
@@ -12540,7 +12633,7 @@ mod tests {
         problem: Cell<i32>,
         existing: RefCell<String>,
         closed: Cell<bool>,
-        error: RefCell<String>,
+        error: RefCell<UiMessage>,
     }
 
     impl SaveDialogPage for RecordedSaveDialog {
@@ -12556,14 +12649,14 @@ mod tests {
             self.closed.set(true);
         }
 
-        fn show_profile_error(&self, label: &str) {
-            *self.error.borrow_mut() = label.to_owned();
+        fn show_profile_error(&self, message: UiMessage) {
+            *self.error.borrow_mut() = message;
         }
 
         fn clear_profile_error(&self) {
-            let shows_write_failure = self.error.borrow().as_str() == PROFILE_WRITE_FAILURE_LABEL;
+            let shows_write_failure = *self.error.borrow() == messages::profile_write_failure();
             if shows_write_failure {
-                self.error.borrow_mut().clear();
+                *self.error.borrow_mut() = messages::empty();
             }
         }
     }
@@ -12699,7 +12792,7 @@ mod tests {
         assert!(!wrote);
         assert_eq!(
             page.errors.borrow()[0],
-            EqFailure::Disconnected.bands_label(),
+            EqFailure::Disconnected.bands_message(),
             "the banner names the bands and why nothing was written"
         );
     }
@@ -12726,11 +12819,10 @@ mod tests {
         for (error, expected) in cases {
             let failure = EqFailure::from_session(error);
             assert_eq!(failure, expected);
-            let label = readable(failure.bands_label());
-            assert!(
-                label.contains("equalizer bands"),
-                "{label:?} names the bands"
-            );
+            let message = failure.bands_message();
+            assert_eq!(message.key.as_str(), messages::ERROR_SETTING_WRITE);
+            assert_eq!(message.arg0.as_str(), messages::SUBJECT_EQUALIZER_BANDS);
+            assert_eq!(message.arg1.as_str(), expected.reason_key());
         }
     }
 
@@ -12752,7 +12844,10 @@ mod tests {
         );
         assert_eq!(stopped.get(), 0);
         assert_eq!(
-            page.errors.borrow().last().map(String::as_str),
+            page.errors
+                .borrow()
+                .last()
+                .map(|message| message.key.as_str()),
             Some(""),
             "a success clears the banner"
         );
@@ -12760,8 +12855,8 @@ mod tests {
         apply_curve_outcome(&page, &stop, Err(EqFailure::TimedOut));
         assert_eq!(stopped.get(), 1, "a failed change stops the worker");
         assert_eq!(
-            page.errors.borrow().last().map(String::as_str),
-            Some("Equalizer bands (no answer)")
+            page.errors.borrow().last().cloned(),
+            Some(EqFailure::TimedOut.bands_message())
         );
     }
 
@@ -12985,8 +13080,11 @@ mod tests {
         for (error, expected) in cases {
             let failure = EqFailure::from_session(error);
             assert_eq!(failure, expected);
-            let label = readable(failure.label());
-            assert!(label.contains("equalizer"), "{label:?} names the setting");
+            assert_write_failure(
+                &failure.message(),
+                messages::SUBJECT_EQUALIZER_PROFILE,
+                expected.reason_key(),
+            );
         }
     }
 
@@ -13123,7 +13221,11 @@ mod tests {
             change_sound_mode(&mut session, SoundMode::Transparency).expect_err("no answer");
 
         assert_eq!(failure, ModeFailure::TimedOut);
-        assert_eq!(failure.label(), "Sound mode (no answer)");
+        assert_write_failure(
+            &failure.message(),
+            messages::SUBJECT_SOUND_MODE,
+            messages::REASON_NO_ANSWER,
+        );
         assert_eq!(
             transport.writes(),
             vec![
@@ -13143,7 +13245,11 @@ mod tests {
             change_sound_mode(&mut session, SoundMode::Normal).expect_err("the link dropped");
 
         assert_eq!(failure, ModeFailure::Disconnected);
-        assert_eq!(failure.label(), "Sound mode (connection lost)");
+        assert_write_failure(
+            &failure.message(),
+            messages::SUBJECT_SOUND_MODE,
+            messages::REASON_CONNECTION_LOST,
+        );
     }
 
     #[test]
@@ -13291,7 +13397,11 @@ mod tests {
             .expect_err("the device stays silent");
 
         assert_eq!(failure, EqFailure::TimedOut);
-        assert_eq!(failure.label(), "Equalizer profile (no answer)");
+        assert_write_failure(
+            &failure.message(),
+            messages::SUBJECT_EQUALIZER_PROFILE,
+            messages::REASON_NO_ANSWER,
+        );
         assert_eq!(
             transport.writes(),
             vec![bass_reducer_frame(), state_request()],
@@ -13310,7 +13420,11 @@ mod tests {
             change_equalizer_preset(&mut session, &current, preset).expect_err("the link dropped");
 
         assert_eq!(failure, EqFailure::Disconnected);
-        assert_eq!(failure.label(), "Equalizer profile (connection lost)");
+        assert_write_failure(
+            &failure.message(),
+            messages::SUBJECT_EQUALIZER_PROFILE,
+            messages::REASON_CONNECTION_LOST,
+        );
     }
 
     #[test]
@@ -13359,7 +13473,11 @@ mod tests {
             .expect_err("the device stays silent");
 
         assert_eq!(failure, EqFailure::TimedOut);
-        assert_eq!(failure.bands_label(), "Equalizer bands (no answer)");
+        assert_write_failure(
+            &failure.bands_message(),
+            messages::SUBJECT_EQUALIZER_BANDS,
+            messages::REASON_NO_ANSWER,
+        );
         let writes = transport.writes();
         assert_eq!(writes.len(), 2, "the custom frame and the 01 01 re-poll");
         assert_eq!(&writes[0][..9], &hex("08 EE 00 00 00 03 87 3F 00")[..]);
@@ -13739,11 +13857,11 @@ mod tests {
                     }
                     Err(error) => {
                         let failure = ConnectFailure::from_session(error);
-                        println!("  failed ({:?}): {}", failure.kind(), failure.text());
+                        println!("  failed ({:?}): {}", failure.kind(), failure.message().key);
                     }
                 },
                 OpenOutcome::Failed(failure) => {
-                    println!("  failed ({:?}): {}", failure.kind(), failure.text());
+                    println!("  failed ({:?}): {}", failure.kind(), failure.message().key);
                 }
                 OpenOutcome::Cancelled => println!("  cancelled"),
             }
@@ -14849,7 +14967,7 @@ mod tests {
             self.session = None;
             match open_session(&self.request, &AtomicBool::new(false)) {
                 OpenOutcome::Opened(session) => self.session = Some(session),
-                OpenOutcome::Failed(failure) => panic!("{what}: {}", failure.text()),
+                OpenOutcome::Failed(failure) => panic!("{what}: {}", failure.message().key),
                 OpenOutcome::Cancelled => panic!("{what}: the connect was cancelled"),
             }
         }
@@ -15377,7 +15495,7 @@ mod tests {
             "  retry result: {:?} ({:?}): {}",
             state.get_connection(),
             state.get_failure_kind(),
-            state.get_failure_text()
+            state.get_failure_text().key
         );
         assert!(reconnected, "the retried connection succeeds");
         let tiles = shown_batteries(&state);
@@ -15504,7 +15622,7 @@ mod tests {
             println!(
                 "  connect failed ({:?}): {}",
                 state.get_failure_kind(),
-                state.get_failure_text()
+                state.get_failure_text().key
             );
             return None;
         }
@@ -15519,8 +15637,8 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             drain_events(inner);
-            if !state.get_error_label().is_empty() {
-                println!("  error banner: {}", state.get_error_label());
+            if !state.get_error_label().key.is_empty() {
+                println!("  error banner: {}", state.get_error_label().key);
                 return None;
             }
             if state.get_mode_index() == want {
@@ -15591,8 +15709,8 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             drain_events(inner);
-            if !state.get_error_label().is_empty() {
-                println!("  error banner: {}", state.get_error_label());
+            if !state.get_error_label().key.is_empty() {
+                println!("  error banner: {}", state.get_error_label().key);
                 return None;
             }
             if let Some(settings) = current_settings(inner)
@@ -15718,9 +15836,10 @@ mod tests {
         // error banner instead of writing, and the banner's Retry reconnects.
         inner.stop_worker();
         click_mode(&ui, first);
-        let error = state.get_error_label().to_string();
-        println!("  after a failed worker: error-label {error:?}");
-        assert!(error.contains("Sound mode"), "{error:?} names the setting");
+        let error = state.get_error_label();
+        println!("  after a failed worker: error-label {:?}", error.key);
+        assert_eq!(error.key.as_str(), messages::ERROR_SETTING_WRITE);
+        assert_eq!(error.arg0.as_str(), messages::SUBJECT_SOUND_MODE);
         // Give the stopped worker time to drop its socket: a real Retry click
         // comes much later than this line.
         std::thread::sleep(Duration::from_millis(1000));
@@ -15733,10 +15852,14 @@ mod tests {
             "  retry: connected={:?} sound-pages={} error-label={:?}",
             state.get_connection(),
             state.get_sound_pages().row_count(),
-            state.get_error_label()
+            state.get_error_label().key
         );
         assert_eq!(state.get_sound_pages().row_count(), 3, "the pages are back");
-        assert_eq!(state.get_error_label().as_str(), "", "the banner is gone");
+        assert_eq!(
+            state.get_error_label().key.as_str(),
+            "",
+            "the banner is gone"
+        );
         let reported = state.get_mode_index();
         println!("  retried connection reports mode index {reported}");
         assert_eq!(reported, initial, "the device kept the last mode");
@@ -15832,7 +15955,7 @@ mod tests {
         if initial.dual_connections {
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
             while panels.len() < 2
-                && state.get_error_label().is_empty()
+                && state.get_error_label().key.is_empty()
                 && std::time::Instant::now() < deadline
             {
                 std::thread::sleep(Duration::from_millis(100));
@@ -16029,7 +16152,7 @@ mod tests {
         let mut panels: Vec<SettingsPanel> = state.get_panels().iter().collect();
         while settings.dual_connections
             && panels.len() < 2
-            && state.get_error_label().is_empty()
+            && state.get_error_label().key.is_empty()
             && std::time::Instant::now() < deadline
         {
             std::thread::sleep(Duration::from_millis(100));
@@ -16114,7 +16237,7 @@ mod tests {
         assert_eq!(state.get_modes().row_count(), 0);
         assert_eq!(state.get_mode_index(), -1);
         assert_eq!(
-            state.get_error_label().as_str(),
+            state.get_error_label().key.as_str(),
             "",
             "a P20i tile click changes nothing"
         );
@@ -16215,8 +16338,8 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             drain_events(inner);
-            if !state.get_error_label().is_empty() {
-                println!("  error banner: {}", state.get_error_label());
+            if !state.get_error_label().key.is_empty() {
+                println!("  error banner: {}", state.get_error_label().key);
                 return None;
             }
             let bands: Vec<EqBand> = state.get_eq_bands().iter().collect();
@@ -16246,8 +16369,8 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             drain_events(inner);
-            if !state.get_error_label().is_empty() {
-                println!("  error banner: {}", state.get_error_label());
+            if !state.get_error_label().key.is_empty() {
+                println!("  error banner: {}", state.get_error_label().key);
                 return None;
             }
             if state.get_eq_preset().as_str() == want {
@@ -16423,9 +16546,10 @@ mod tests {
         inner.stop_worker();
         let other = targets[0].id.to_string();
         click_preset(&ui, &other);
-        let error = state.get_error_label().to_string();
-        println!("  after a stopped worker: error-label {error:?}");
-        assert!(error.contains("Equalizer"), "{error:?} names the setting");
+        let error = state.get_error_label();
+        println!("  after a stopped worker: error-label {:?}", error.key);
+        assert_eq!(error.key.as_str(), messages::ERROR_SETTING_WRITE);
+        assert_eq!(error.arg0.as_str(), messages::SUBJECT_EQUALIZER_PROFILE);
         // Give the stopped worker time to drop its socket: a real Retry click
         // comes much later than this line.
         std::thread::sleep(Duration::from_millis(1000));
@@ -16442,7 +16566,11 @@ mod tests {
             state.get_error_label()
         );
         assert_eq!(state.get_sound_pages().row_count(), 3, "the pages are back");
-        assert_eq!(state.get_error_label().as_str(), "", "the banner is gone");
+        assert_eq!(
+            state.get_error_label().key.as_str(),
+            "",
+            "the banner is gone"
+        );
         assert_eq!(
             state.get_eq_preset().as_str(),
             initial,
@@ -16639,12 +16767,10 @@ mod tests {
         // the banner's Retry reconnects and reads the restored state back.
         inner.stop_worker();
         commit_band(&ui, 0, 0);
-        let error = state.get_error_label().to_string();
-        println!("  after a stopped worker: error-label {error:?}");
-        assert!(
-            error.contains("Equalizer bands"),
-            "{error:?} names the bands"
-        );
+        let error = state.get_error_label();
+        println!("  after a stopped worker: error-label {:?}", error.key);
+        assert_eq!(error.key.as_str(), messages::ERROR_SETTING_WRITE);
+        assert_eq!(error.arg0.as_str(), messages::SUBJECT_EQUALIZER_BANDS);
         // Give the stopped worker time to drop its socket: a real Retry click
         // comes much later than this line.
         std::thread::sleep(Duration::from_millis(1000));
@@ -16654,7 +16780,11 @@ mod tests {
             "the banner's Retry reconnects"
         );
         assert_eq!(state.get_sound_pages().row_count(), 3, "the pages are back");
-        assert_eq!(state.get_error_label().as_str(), "", "the banner is gone");
+        assert_eq!(
+            state.get_error_label().key.as_str(),
+            "",
+            "the banner is gone"
+        );
         assert_eq!(
             state.get_eq_preset().as_str(),
             initial_preset,
@@ -16858,19 +16988,21 @@ mod tests {
         // banner's Retry reconnects and re-reads the device.
         inner.stop_worker();
         click_apply_profile(&ui, "Test curve");
-        let error = state.get_error_label().to_string();
-        println!("  after a stopped worker: error-label {error:?}");
-        assert!(
-            error.contains("Equalizer bands"),
-            "{error:?} names the bands"
-        );
+        let error = state.get_error_label();
+        println!("  after a stopped worker: error-label {:?}", error.key);
+        assert_eq!(error.key.as_str(), messages::ERROR_SETTING_WRITE);
+        assert_eq!(error.arg0.as_str(), messages::SUBJECT_EQUALIZER_BANDS);
         std::thread::sleep(Duration::from_millis(1000));
         ui.global::<Actions>().invoke_retry();
         assert!(
             wait_for_connection(&inner, &ui, Connection::Connected, Duration::from_secs(20)),
             "the banner's Retry reconnects"
         );
-        assert_eq!(state.get_error_label().as_str(), "", "the banner is gone");
+        assert_eq!(
+            state.get_error_label().key.as_str(),
+            "",
+            "the banner is gone"
+        );
 
         // Delete after the confirmation state: the row and the document lose it.
         state.set_eq_deleting("Test curve".into());
@@ -16899,9 +17031,13 @@ mod tests {
         fs::write(&blocker, b"not a directory").expect("the blocking file is written");
         let blocked = test_inner_with_profiles(&ui, blocker.join(PROFILES_FILE_NAME));
         save_equalizer_profile(&ui, &blocked, "Not saved", false);
-        let error = state.get_error_label().to_string();
-        println!("  save to a blocked document: error-label {error:?}");
-        assert_eq!(error, PROFILE_WRITE_FAILURE_LABEL, "the banner is readable");
+        let error = state.get_error_label();
+        println!("  save to a blocked document: error-label {:?}", error.key);
+        assert_eq!(
+            error,
+            messages::profile_write_failure(),
+            "the banner is readable"
+        );
         assert!(!state.get_eq_saving(), "the save dialog closes");
         assert!(
             blocked.profiles.borrow().is_empty(),
@@ -16915,7 +17051,7 @@ mod tests {
             load_profiles(&path).is_empty(),
             "the user's document is unchanged by the failed save"
         );
-        state.set_error_label("".into());
+        state.set_error_label(messages::empty());
 
         // Put the state found on connect back, so the device is left as found.
         let initial_is_built_in = initial_preset.parse::<u16>().ok().is_some_and(|id| {
@@ -17853,7 +17989,7 @@ mod tests {
 
             let state = ui.global::<AppState>();
             assert_eq!(state.get_connection(), Connection::Lost);
-            assert!(!state.get_connection_reason().is_empty());
+            assert!(!state.get_connection_reason().key.is_empty());
             assert_eq!(state.get_devices().row_count(), 1);
             assert!(state.get_devices().row_data(0).expect("saved card").current);
             assert!(inner.commands.borrow().is_none());
@@ -18072,12 +18208,10 @@ mod tests {
             )])));
             answer_tray_request(ui, &inner, TrayRequest::Connect);
             assert_eq!(state.get_connection(), Connection::Failed);
-            assert!(
-                state
-                    .get_failure_text()
-                    .contains("saved device's Bluetooth address cannot be read"),
-                "{:?} names the saved card",
-                state.get_failure_text()
+            assert_eq!(
+                state.get_failure_text(),
+                messages::connect_failure(messages::CONNECT_SAVED_ADDRESS, ""),
+                "the message names the saved card's unreadable address"
             );
             let content = inner.tray_content.borrow().clone();
             assert!(content.has_device);
@@ -18119,7 +18253,7 @@ mod tests {
                 queued.try_recv().is_err(),
                 "nothing is written for an index or row that names no device"
             );
-            assert_eq!(state.get_error_label().as_str(), "", "nothing failed");
+            assert_eq!(state.get_error_label().key.as_str(), "", "nothing failed");
         });
     }
 
@@ -18143,8 +18277,11 @@ mod tests {
             inner.stop_worker();
             answer_dual_item(ui, &inner, DUAL_DEVICES_ROW_ID, 0, DualAction::Disconnect);
             assert_eq!(
-                state.get_error_label().as_str(),
-                "Disconnect device (connection lost)"
+                state.get_error_label(),
+                messages::setting_write_failure(
+                    messages::SUBJECT_DISCONNECT_DEVICE,
+                    messages::REASON_CONNECTION_LOST
+                )
             );
         });
     }
@@ -18221,11 +18358,10 @@ mod tests {
         assert_eq!(waiting.len(), 3);
         assert_eq!(waiting[0].label, "State");
         assert_eq!(waiting[0].command, "01 01");
-        assert!(
-            waiting
-                .iter()
-                .all(|row| row.status == "Waiting…" && !row.ok && !row.failed)
-        );
+        assert!(waiting.iter().all(|row| row.status
+            == messages::probe_status(messages::DIAGNOSTICS_PROBE_WAITING)
+            && !row.ok
+            && !row.failed));
 
         let results = vec![
             ProbeResult {
@@ -18245,9 +18381,15 @@ mod tests {
         ];
         let rows = diagnostic_probe_rows(&results);
         assert!(rows[0].ok);
-        assert_eq!(rows[0].status, "Done");
+        assert_eq!(
+            rows[0].status,
+            messages::probe_status(messages::DIAGNOSTICS_PROBE_DONE)
+        );
         assert!(rows[1].failed);
-        assert_eq!(rows[1].status, "No answer");
+        assert_eq!(
+            rows[1].status,
+            messages::probe_status(messages::DIAGNOSTICS_PROBE_NO_ANSWER)
+        );
         assert!(!rows[2].ok && !rows[2].failed);
     }
 
@@ -18907,7 +19049,7 @@ mod tests {
             assert!(state.get_add_demo());
             assert_eq!(0, state.get_paired_options().row_count());
             assert_eq!(FailureKind::Other, state.get_add_failure_kind());
-            assert_eq!(demo::DEMO_UNAVAILABLE, state.get_add_error().as_str());
+            assert_eq!(state.get_add_error(), messages::demo_unavailable());
 
             // The Space One Pro lists exactly one suggested simulated device,
             // and the list is not a loading state.
@@ -18920,12 +19062,12 @@ mod tests {
             assert!(option.suggested);
             assert!(!state.get_add_loading());
             assert_eq!(FailureKind::None, state.get_add_failure_kind());
-            assert_eq!("", state.get_add_error().as_str());
+            assert_eq!(state.get_add_error(), messages::empty());
 
             // Choosing another model while Demo mode is on repeats the refusal
             // instead of listing the Windows paired devices.
             actions.invoke_choose_model("A3949".into());
-            assert_eq!(demo::DEMO_UNAVAILABLE, state.get_add_error().as_str());
+            assert_eq!(state.get_add_error(), messages::demo_unavailable());
             assert_eq!(0, state.get_paired_options().row_count());
             actions.invoke_choose_model(demo::DEMO_MODEL_CODE.into());
             assert_eq!(1, state.get_paired_options().row_count());
@@ -19031,8 +19173,8 @@ mod tests {
             // and its capture button stays disabled.
             assert!(!state.get_diagnostic_available());
             assert_eq!(
-                demo::DEMO_DIAGNOSTICS_UNAVAILABLE,
-                state.get_diagnostic_error().as_str()
+                state.get_diagnostic_error(),
+                messages::diagnostics_demo_unavailable()
             );
             assert!(
                 inner.commands.borrow().is_some(),
@@ -19083,7 +19225,7 @@ mod tests {
                 wait_for_settings(ui, &inner, |settings| settings.ldac, "LDAC on").is_some(),
                 "the simulated settings change"
             );
-            assert_eq!("", state.get_error_label().as_str());
+            assert_eq!("", state.get_error_label().key.as_str());
             // The re-polled state carries the simulated equalizer too.
             {
                 let device = inner.device.borrow();
@@ -20610,8 +20752,11 @@ mod tests {
                 Err(SettingFailure::TimedOut),
             );
             assert_eq!(
-                state.get_error_label().as_str(),
-                "Find device (no answer)",
+                state.get_error_label(),
+                messages::setting_write_failure(
+                    messages::SUBJECT_CASE_FIND_DEVICE,
+                    messages::REASON_NO_ANSWER
+                ),
                 "the banner names the toggled case row"
             );
             // The case-language row keeps its own name.
@@ -20622,8 +20767,11 @@ mod tests {
                 Err(SettingFailure::Disconnected),
             );
             assert_eq!(
-                state.get_error_label().as_str(),
-                "Case language (connection lost)"
+                state.get_error_label(),
+                messages::setting_write_failure(
+                    messages::SUBJECT_CASE_LANGUAGE,
+                    messages::REASON_CONNECTION_LOST
+                )
             );
         });
     }
@@ -20809,76 +20957,83 @@ mod tests {
         // The banner names the row that failed. A case-screen write changes one
         // of four flags, so it names the specific flag row the control toggled,
         // like a gesture write names its gesture, not the panel title.
-        assert_eq!(a3954_setting_label(A3954SettingCommand::Ldac(true)), "LDAC");
         assert_eq!(
-            a3954_setting_label(A3954SettingCommand::CaseFeatures(state.case_features)),
-            "Case screen",
+            a3954_setting_subject(A3954SettingCommand::Ldac(true)),
+            messages::SUBJECT_LDAC
+        );
+        assert_eq!(
+            a3954_setting_subject(A3954SettingCommand::CaseFeatures(state.case_features)),
+            messages::SUBJECT_CASE_SCREEN,
             "the panel name stays the fallback for a command that changes no flag"
         );
-        assert_eq!(
-            a3954_setting_failure_label(
+        let flag_cases = [
+            (
                 SettingFailure::TimedOut,
-                A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                A3954CaseFeatures {
                     atmospheric: true,
                     ..state.case_features
-                }),
-                &state,
+                },
+                messages::SUBJECT_CASE_ATMOSPHERIC,
             ),
-            "Atmospheric (no answer)"
-        );
-        assert_eq!(
-            a3954_setting_failure_label(
+            (
                 SettingFailure::Disconnected,
-                A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                A3954CaseFeatures {
                     remote_camera: true,
                     ..state.case_features
-                }),
-                &state,
+                },
+                messages::SUBJECT_CASE_REMOTE_CAMERA,
             ),
-            "Remote camera (connection lost)"
-        );
-        assert_eq!(
-            a3954_setting_failure_label(
+            (
                 SettingFailure::TimedOut,
-                A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                A3954CaseFeatures {
                     find_device: false,
                     ..state.case_features
-                }),
-                &state,
+                },
+                messages::SUBJECT_CASE_FIND_DEVICE,
             ),
-            "Find device (no answer)"
-        );
-        assert_eq!(
-            a3954_setting_failure_label(
+            (
                 SettingFailure::Disconnected,
-                A3954SettingCommand::CaseFeatures(A3954CaseFeatures {
+                A3954CaseFeatures {
                     case_spatial_audio: true,
                     ..state.case_features
-                }),
-                &state,
+                },
+                messages::SUBJECT_CASE_SPATIAL_AUDIO,
             ),
-            "Spatial audio on case (connection lost)"
-        );
-        assert_eq!(
-            a3954_setting_failure_label(
+        ];
+        for (failure, features, subject) in flag_cases {
+            assert_write_failure(
+                &a3954_setting_failure_message(
+                    failure,
+                    A3954SettingCommand::CaseFeatures(features),
+                    &state,
+                ),
+                subject,
+                failure.reason_key(),
+            );
+        }
+        assert_write_failure(
+            &a3954_setting_failure_message(
                 SettingFailure::Disconnected,
                 A3954SettingCommand::WearingDetection(false),
                 &state,
             ),
-            "Wearing detection (connection lost)"
+            messages::SUBJECT_WEARING_DETECTION,
+            messages::REASON_CONNECTION_LOST,
         );
-        assert_eq!(
-            a3954_setting_failure_label(
+        assert_write_failure(
+            &a3954_setting_failure_message(
                 SettingFailure::TimedOut,
                 A3954SettingCommand::CaseLanguage(A3954CaseLanguage::English),
                 &state,
             ),
-            "Case language (no answer)"
+            messages::SUBJECT_CASE_LANGUAGE,
+            messages::REASON_NO_ANSWER,
         );
         // A failed gesture write names the row it changed.
-        assert_eq!(
-            a3954_button_failure_label(SettingFailure::Disconnected, A3954Button::LeftSlideDown),
-            "Left slide down (connection lost)"
+        assert_write_failure(
+            &a3954_button_failure_message(SettingFailure::Disconnected, A3954Button::LeftSlideDown),
+            messages::SUBJECT_LEFT_SLIDE_DOWN,
+            messages::REASON_CONNECTION_LOST,
         );
     }
 

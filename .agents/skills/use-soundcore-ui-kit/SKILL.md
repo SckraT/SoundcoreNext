@@ -24,7 +24,7 @@ Work in the project workspace. Treat `desktop/ui/UI_KIT.md` as the design-system
 
 ## 3. Build accessible, adaptive UI
 
-- Mark user-visible copy with `@tr`; do not hard-code a new English-only label. A sentence the Rust model composes is a `UiMessage` key resolved by `Messages.text` (`desktop/ui/messages.slint`), with the key in `desktop/src/messages.rs`; Rust never carries the English sentence.
+- Mark user-visible copy with `@tr`; do not hard-code a new English-only label. A sentence the Rust model composes is a `UiMessage` key resolved by `Messages.text` (`desktop/ui/messages.slint`), with the key in `desktop/src/messages.rs`; Rust never carries the English sentence. A translatable word quoted inside a sentence is passed as a `MessageParts` key (`subject.*`, `reason.*`, `part.unknown`), and the `.po` documents must give every new source a non-empty translation (`cargo test` runs `desktop/tests/translations.rs`).
 - Give icon-only controls and interactive rows accessible names and roles. Preserve keyboard focus and activation, disabled behavior and readable focus indication.
 - Use shared text roles. Consolas is only for literal commands, file names and identifiers through `CodeText`.
 - Bind scrollable content width to `ScrollArea.visible-width`; keep every action reachable at the minimum window size.
