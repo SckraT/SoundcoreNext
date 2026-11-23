@@ -39,7 +39,9 @@ use windows::core::GUID;
 
 use crate::catalog_adapter::{self, Chip};
 use crate::overview::{self, OverviewBlock, OverviewLayout, OverviewPreferences, OverviewPreset};
-use crate::settings::{self, DesktopSettings};
+use crate::settings::{
+    self, Accent, AppTheme, ContentScale, DesktopSettings, DeviceColor, SoundModeView,
+};
 use crate::single_instance::ShowRequest;
 use crate::transport_windows::{
     BluetoothError, VENDOR_SERVICE_PREFIX, WindowsRfcommTransport, format_mac, installed_services,
@@ -48,8 +50,9 @@ use crate::transport_windows::{
 use crate::tray::{TrayActions, TrayContent, TraySettings, TrayShell};
 use crate::{
     Actions, AppState, AppWindow, Battery, Connection, DeviceCard, DiagnosticProbe, DiagnosticStep,
-    EqBand, EqLine, EqProfile, FailureKind, ImportItem, ModeOption, Page, PairedOption, PanelKind,
-    RowKind, SettingRow, SettingsPanel, SystemPage, ToastKind, TransferNote,
+    EqBand, EqLine, EqProfile, FailureKind, ImportItem, ModeOption, ModelOption, Page,
+    PairedOption, PaletteChoice, PanelKind, RowKind, SettingRow, SettingsPanel, Strings,
+    SystemPage, Theme, ToastKind, TransferNote,
 };
 
 /// The model chosen in the Add Device dialog: what the catalog card shows plus
@@ -1640,6 +1643,11 @@ pub fn selected_model(code: &str) -> Option<SelectedModel> {
 /// How often the UI thread drains the worker channel.
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+/// How often Follow system re-reads the Windows app mode. Two seconds is quick
+/// enough for a settings change to feel immediate and light enough to leave a
+/// hidden window idle.
+const SYSTEM_THEME_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
 /// An idle connected worker asks for state this often. The read-only request
 /// detects a dropped link without waiting for the user's next setting change;
 /// it never reconnects automatically and never changes a device setting.
@@ -1855,12 +1863,19 @@ struct Inner {
     /// icon; the desktop start fills it before the event loop runs.
     tray: RefCell<Option<TrayShell>>,
     /// The Settings page's persisted appearance, language and tray choices. The
-    /// tray code reads [`DesktopSettings::tray`]; the other fields are loaded and
-    /// preserved for the Settings wiring in ticket 02.
+    /// tray code reads [`DesktopSettings::tray`]; the other fields are applied to
+    /// the window and its device art.
     settings: RefCell<DesktopSettings>,
     /// The document `settings` is saved to; `None` in tests and when Windows
     /// provides no roaming app-data directory.
     settings_path: Option<PathBuf>,
+    /// The dark/light appearance last applied to the window. Follow system keeps
+    /// it so its poll repaints only when Windows actually changed mode.
+    system_dark: Cell<Option<bool>>,
+    /// The Follow-system poll, running only while the saved theme is
+    /// [`AppTheme::System`] and once the native window exists. Kept here so the
+    /// poll lives exactly as long as the controller does.
+    theme_poll: RefCell<Option<Timer>>,
     /// What the tray currently shows, kept on the UI thread so the icon can be
     /// created again with the last content and so the tests can read it.
     tray_content: RefCell<TrayContent>,
@@ -1900,6 +1915,37 @@ impl Inner {
             .borrow()
             .as_ref()
             .is_some_and(TrayShell::available)
+    }
+
+    /// Keeps the Follow-system appearance current. While the saved theme is
+    /// [`AppTheme::System`] a repeated timer re-reads the real Windows app mode
+    /// and repaints only when it changed; choosing Light or Dark stops the timer,
+    /// and a missing native window starts none at all. Safe to call repeatedly.
+    fn sync_theme_poll(self: &Rc<Self>) {
+        if self.settings.borrow().theme != AppTheme::System {
+            // Dropping the timer cancels it, so no poll outlives the choice.
+            self.theme_poll.borrow_mut().take();
+            return;
+        }
+        if self.theme_poll.borrow().is_some() || self.ui.upgrade().is_none() {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let timer = Timer::default();
+        timer.start(TimerMode::Repeated, SYSTEM_THEME_POLL_INTERVAL, move || {
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            if inner.settings.borrow().theme != AppTheme::System {
+                return;
+            }
+            let dark = settings::system_prefers_dark();
+            if inner.system_dark.get() == Some(dark) {
+                return;
+            }
+            apply_theme(&inner, dark);
+        });
+        *self.theme_poll.borrow_mut() = Some(timer);
     }
 
     /// Enumerates paired devices on a worker thread for a model, or for every
@@ -2024,6 +2070,10 @@ impl Inner {
 pub struct Controller {
     /// The polling timer; dropping it stops the polling.
     _timer: Timer,
+    /// The state every action and the Follow-system poll work on. Retained so
+    /// [`Self::shown`] can apply the saved appearance after the native window
+    /// exists.
+    inner: Rc<Inner>,
 }
 
 impl Controller {
@@ -2087,6 +2137,8 @@ impl Controller {
             tray: RefCell::new(None),
             settings: RefCell::new(desktop_settings),
             settings_path,
+            system_dark: Cell::new(None),
+            theme_poll: RefCell::new(None),
             tray_content: RefCell::new(TrayContent::default()),
             diagnostic_probes: RefCell::new(Vec::new()),
             diagnostic_session: RefCell::new(None),
@@ -2095,12 +2147,11 @@ impl Controller {
             diagnostic_note: RefCell::new(String::new()),
             diagnostic_saving: Cell::new(false),
         });
-        initial_state(ui);
+        initial_state(ui, &inner);
         let shell = TrayShell::new(ui, tray_actions(&inner), tray_settings);
         *inner.tray.borrow_mut() = Some(shell);
         let state = ui.global::<AppState>();
-        let tray_settings = inner.settings.borrow().tray;
-        show_tray_settings(&state, &tray_settings, inner.tray_available());
+        render_settings(&state, &inner);
         refresh_tray(&inner, &state);
         inner.refresh_saved_profiles(&state);
         wire_actions(ui, &inner);
@@ -2109,16 +2160,27 @@ impl Controller {
         timer.start(TimerMode::Repeated, EVENT_POLL_INTERVAL, move || {
             drain_events(&polling);
         });
-        Self { _timer: timer }
+        Self {
+            _timer: timer,
+            inner,
+        }
     }
 
-    /// Called once the native window exists, which is when Windows can report
-    /// its current light/dark app mode and its language.
+    /// Called once the native window exists, which is when the saved appearance
+    /// and language are applied to the running window.
     ///
-    /// TODO(ticket 02): resolve Follow system, apply the saved theme, accent and
-    /// language from `Inner::settings`, and listen for app-mode changes. It is a
-    /// no-op for now so build recovery does not change any UI behavior.
-    pub fn shown(&self) {}
+    /// The theme is resolved first, because Follow system reads the real Windows
+    /// app mode, and the language afterwards, because selecting a translation
+    /// re-renders the Settings fields. Only then does Follow system start its
+    /// poll; choosing Light or Dark later stops it again.
+    pub fn shown(&self) {
+        if self.inner.ui.upgrade().is_none() {
+            return;
+        }
+        apply_theme(&self.inner, saved_dark(&self.inner));
+        apply_language(&self.inner);
+        self.inner.sync_theme_poll();
+    }
 }
 
 fn clear_overview(state: &AppState<'_>) {
@@ -2245,7 +2307,7 @@ fn choose_overview_toggle(window: &AppWindow, inner: &Rc<Inner>, id: &str, selec
 
 /// The shell's never-changing state: version, Windows wording, and the pages
 /// this MVP deliberately leaves empty.
-fn initial_state(ui: &AppWindow) {
+fn initial_state(ui: &AppWindow, inner: &Rc<Inner>) {
     let state = ui.global::<AppState>();
     state.set_app_version(crate::app_version().into());
     // The vendored shell keeps its Windows wording; the deep links become
@@ -2261,7 +2323,7 @@ fn initial_state(ui: &AppWindow) {
     clear_overview(&state);
     state.set_page(Page::Devices);
     state.set_connection(Connection::NoDevice);
-    reset_models(&state);
+    reset_models(&state, paint_black(inner));
 }
 
 /// Answers every action this MVP needs; the others stay unwired and disabled by
@@ -2286,6 +2348,7 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
                     &window.global::<AppState>(),
                     query.as_str(),
                     Chip::from_index(kind),
+                    paint_black(&inner),
                 );
             }
         }
@@ -2624,6 +2687,110 @@ fn wire_actions(ui: &AppWindow, inner: &Rc<Inner>) {
         }
     });
 
+    // The Settings page's appearance, language and Copy logs controls. Each
+    // handler validates the index first, so a stale or hand-written value changes
+    // nothing, then saves the whole document and applies the choice at once.
+    actions.on_set_app_theme({
+        let inner = Rc::clone(inner);
+        move |index| {
+            let Some(theme) = AppTheme::from_index(index) else {
+                return;
+            };
+            inner.settings.borrow_mut().theme = theme;
+            persist_settings(&inner);
+            apply_theme(&inner, saved_dark(&inner));
+            // Follow system runs its poll only while it is the chosen theme.
+            inner.sync_theme_poll();
+            rerender_settings(&inner);
+        }
+    });
+
+    actions.on_set_palette({
+        let inner = Rc::clone(inner);
+        move |index| {
+            let Some(accent) = Accent::from_index(index) else {
+                return;
+            };
+            inner.settings.borrow_mut().accent = accent;
+            persist_settings(&inner);
+            apply_theme(&inner, saved_dark(&inner));
+            rerender_settings(&inner);
+        }
+    });
+
+    actions.on_set_content_scale({
+        let inner = Rc::clone(inner);
+        move |index| {
+            let Some(content_scale) = ContentScale::from_index(index) else {
+                return;
+            };
+            inner.settings.borrow_mut().content_scale = content_scale;
+            persist_settings(&inner);
+            apply_theme(&inner, saved_dark(&inner));
+            rerender_settings(&inner);
+        }
+    });
+
+    actions.on_set_device_color({
+        let inner = Rc::clone(inner);
+        move |index| {
+            let Some(device_color) = DeviceColor::from_index(index) else {
+                return;
+            };
+            inner.settings.borrow_mut().device_color = device_color;
+            persist_settings(&inner);
+            apply_theme(&inner, saved_dark(&inner));
+            rerender_settings(&inner);
+        }
+    });
+
+    actions.on_set_mode_view({
+        let inner = Rc::clone(inner);
+        move |index| {
+            let Some(sound_mode_view) = SoundModeView::from_index(index) else {
+                return;
+            };
+            inner.settings.borrow_mut().sound_mode_view = sound_mode_view;
+            persist_settings(&inner);
+            rerender_settings(&inner);
+        }
+    });
+
+    actions.on_set_badge({
+        let inner = Rc::clone(inner);
+        move |on| {
+            inner.settings.borrow_mut().one_earbud_badge = on;
+            persist_settings(&inner);
+            rerender_settings(&inner);
+        }
+    });
+
+    actions.on_set_language({
+        let inner = Rc::clone(inner);
+        move |index| {
+            let Some(language) = settings::language_from_index(index) else {
+                return;
+            };
+            inner.settings.borrow_mut().language =
+                language.map(|language| language.code.to_owned());
+            persist_settings(&inner);
+            apply_language(&inner);
+        }
+    });
+
+    actions.on_copy_logs({
+        let inner = Rc::clone(inner);
+        move || {
+            let Some(window) = inner.ui.upgrade() else {
+                return;
+            };
+            let state = window.global::<AppState>();
+            if copy_logs(&state, inner.transfer_io.as_ref()) {
+                clear_transfer_toast_after_a_while(&window);
+            }
+        }
+    });
+
     actions.on_set_tray({
         let inner = Rc::clone(inner);
         move |on| {
@@ -2815,12 +2982,214 @@ fn show_tray_choices(window: &AppWindow, inner: &Rc<Inner>) {
     show_tray_settings(&state, &settings, inner.tray_available());
 }
 
-/// Persists the current desktop settings without blocking startup or turning a
-/// file error into a crash. The running window keeps the user's selected values.
+/// Fills the Settings page from the saved choices: every control's index, the
+/// language names, the one-earbud badge switch, and the notification-area
+/// fields.
 ///
-/// The document holds appearance and language choices the Settings page will
-/// wire in ticket 02; saving the whole in-memory document keeps those fields.
-fn persist_tray_settings(inner: &Rc<Inner>) {
+/// The sound-mode view is still mapped from the document, but
+/// `app-mode-view-applies` stays false: the clean core has no 1–11 modes-scale
+/// control, so no connected device can use that view.
+fn render_settings(state: &AppState<'_>, inner: &Rc<Inner>) {
+    let settings = inner.settings.borrow().clone();
+    state.set_app_theme(settings.theme.index());
+    state.set_app_palette(settings.accent.index());
+    state.set_app_content_scale(settings.content_scale.index());
+    state.set_app_device_color(settings.device_color.index());
+    state.set_app_mode_view(settings.sound_mode_view.index());
+    state.set_app_mode_view_applies(false);
+    state.set_one_earbud_badge_applies(one_earbud_badge_applies(inner));
+    state.set_app_language(settings::language_index(settings.language.as_deref()));
+    state.set_language_names(ModelRc::new(VecModel::from(language_names(
+        system_language_word(inner),
+    ))));
+    state.set_show_one_earbud_badge(settings.one_earbud_badge);
+    show_tray_settings(state, &settings.tray, inner.tray_available());
+}
+
+/// Re-renders the Settings page, when its window still exists. A settings
+/// callback can run while the window is being torn down, so this is the guarded
+/// form of a plain [`render_settings`] call.
+fn rerender_settings(inner: &Rc<Inner>) {
+    if let Some(window) = inner.ui.upgrade() {
+        render_settings(&window.global::<AppState>(), inner);
+    }
+}
+
+/// The translated "Follow system" label for the first language choice, in the
+/// language the window currently shows.
+fn system_language_word(inner: &Rc<Inner>) -> SharedString {
+    inner
+        .ui
+        .upgrade()
+        .map(|window| window.global::<Strings>().get_system_language())
+        .unwrap_or_default()
+}
+
+/// The App language Select's model: Follow system in the window's language,
+/// then every bundled language by its own name.
+fn language_names(system: SharedString) -> Vec<SharedString> {
+    let mut names = Vec::with_capacity(settings::LANGUAGES.len() + 1);
+    names.push(system);
+    names.extend(
+        settings::LANGUAGES
+            .iter()
+            .map(|language| SharedString::from(language.name)),
+    );
+    names
+}
+
+/// The Slint palette a saved accent names.
+fn palette_choice(accent: Accent) -> PaletteChoice {
+    match accent {
+        Accent::Purple => PaletteChoice::Purple,
+        Accent::Sage => PaletteChoice::Sage,
+        Accent::Rose => PaletteChoice::Rose,
+    }
+}
+
+/// Whether the one-earbud badge can be offered: only for a connected pair of
+/// earbuds, the only layout that can be down to one earbud. A single-battery
+/// model such as the A3062 has no separate earbuds to count.
+fn one_earbud_badge_applies(inner: &Rc<Inner>) -> bool {
+    inner
+        .device
+        .borrow()
+        .as_ref()
+        .is_some_and(|device| device.battery.is_some())
+}
+
+/// The dark/light appearance the saved settings ask for, reading the real
+/// Windows app mode for Follow system.
+fn saved_dark(inner: &Rc<Inner>) -> bool {
+    let theme = inner.settings.borrow().theme;
+    match theme {
+        AppTheme::System => settings::system_prefers_dark(),
+        AppTheme::Light | AppTheme::Dark => theme.is_dark(false),
+    }
+}
+
+/// Whether device pictures are currently black. The appearance applied last
+/// wins, so repainting after a filter click never reads the registry.
+fn paint_black(inner: &Rc<Inner>) -> bool {
+    let dark = inner.system_dark.get().unwrap_or_else(|| saved_dark(inner));
+    inner.settings.borrow().device_color.is_black(dark)
+}
+
+/// Applies a resolved light/dark appearance to the window: the theme colors, the
+/// chosen palette and content scale, and the device art in the selected color.
+///
+/// `dark` is already resolved, so Follow system is read once by the caller and
+/// every control that changes the appearance uses the same value.
+fn apply_theme(inner: &Rc<Inner>, dark: bool) {
+    inner.system_dark.set(Some(dark));
+    let Some(window) = inner.ui.upgrade() else {
+        return;
+    };
+    let settings = inner.settings.borrow().clone();
+    let theme = window.global::<Theme>();
+    theme.set_dark(dark);
+    theme.set_palette(palette_choice(settings.accent));
+    theme.set_content_scale(settings.content_scale.factor());
+    paint_device_art(
+        &window.global::<AppState>(),
+        settings.device_color.is_black(dark),
+    );
+}
+
+/// The embedded illustration of a catalog code in the chosen color, or `None`
+/// when the catalog lists no such model, in which case the existing picture is
+/// kept.
+fn art_for_code(code: &str, black: bool) -> Option<slint::Image> {
+    catalog_adapter::form_factor(code)
+        .map(|form_factor| catalog_adapter::art_in_color(form_factor, black))
+}
+
+/// A saved card with its device art in the chosen color; a card of a model the
+/// catalog does not know keeps the picture it has.
+fn repaint_card(card: DeviceCard, black: bool) -> DeviceCard {
+    match art_for_code(card.code.as_str(), black) {
+        Some(art) => DeviceCard { art, ..card },
+        None => card,
+    }
+}
+
+/// A model list row with its device art in the chosen color.
+fn repaint_model(model: ModelOption, black: bool) -> ModelOption {
+    match art_for_code(model.code.as_str(), black) {
+        Some(art) => ModelOption { art, ..model },
+        None => model,
+    }
+}
+
+/// Repaints every device picture the window shows: the current device, the saved
+/// cards, the Add Device model list and the chosen model's confirmation picture.
+/// With no model the default art stays.
+fn paint_device_art(state: &AppState<'_>, black: bool) {
+    if let Some(art) = art_for_code(state.get_device_code().as_str(), black) {
+        state.set_device_art(art);
+    }
+    let cards: Vec<DeviceCard> = state.get_devices().iter().collect();
+    if !cards.is_empty() {
+        let repainted: Vec<DeviceCard> = cards
+            .into_iter()
+            .map(|card| repaint_card(card, black))
+            .collect();
+        state.set_devices(ModelRc::new(VecModel::from(repainted)));
+    }
+    let models: Vec<ModelOption> = state.get_models().iter().collect();
+    if !models.is_empty() {
+        let repainted: Vec<ModelOption> = models
+            .into_iter()
+            .map(|model| repaint_model(model, black))
+            .collect();
+        state.set_models(ModelRc::new(VecModel::from(repainted)));
+    }
+    if let Some(art) = art_for_code(state.get_add_model_code().as_str(), black) {
+        state.set_add_model_art(art);
+    }
+}
+
+/// Selects the bundled translation for `code`, falling back to English when
+/// Slint does not bundle it, so a stale choice never leaves the window in the
+/// previous language. Returns the code now selected.
+fn select_bundled_language(code: &'static str) -> &'static str {
+    match slint::select_bundled_translation(code) {
+        Ok(()) => code,
+        Err(error) => {
+            crate::app_log!(
+                "OpenSCL4: could not select the {code} app language ({error}); using English"
+            );
+            let english = settings::LANGUAGES[0].code;
+            if let Err(fallback) = slint::select_bundled_translation(english) {
+                crate::app_log!("OpenSCL4: could not restore the English UI ({fallback})");
+            }
+            english
+        }
+    }
+}
+
+/// Applies the saved language, or the system's, to the running window: selects
+/// the bundled translation, re-evaluates every `@tr` string and refills the
+/// Settings page (the language names are themselves translated). Returns the
+/// code now selected.
+fn apply_language(inner: &Rc<Inner>) -> &'static str {
+    let code = settings::preferred_language(inner.settings.borrow().language.as_deref()).code;
+    let selected = select_bundled_language(code);
+    slint::update_all_translations();
+    if let Some(window) = inner.ui.upgrade() {
+        render_settings(&window.global::<AppState>(), inner);
+    }
+    selected
+}
+
+/// Persists the whole desktop settings document without blocking startup or
+/// turning a file error into a crash. The running window keeps the user's
+/// selected values.
+///
+/// The document holds the appearance, language and notification-area choices;
+/// saving the whole in-memory document is what keeps the tray choices and the
+/// Settings choices in one atomic file.
+fn persist_settings(inner: &Rc<Inner>) {
     let Some(path) = inner.settings_path.as_deref() else {
         return;
     };
@@ -2836,7 +3205,7 @@ fn persist_tray_settings(inner: &Rc<Inner>) {
 /// away the icon and saves the choice for the next run.
 fn set_tray(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
     inner.settings.borrow_mut().tray.icon = on;
-    persist_tray_settings(inner);
+    persist_settings(inner);
     if let Some(shell) = inner.tray.borrow().as_ref() {
         shell.set_icon(on);
     }
@@ -2848,7 +3217,7 @@ fn set_tray(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
 /// window's close handler reads the same saved choice.
 fn set_close_to_tray(window: &AppWindow, inner: &Rc<Inner>, on: bool) {
     inner.settings.borrow_mut().tray.close_to_tray = on;
-    persist_tray_settings(inner);
+    persist_settings(inner);
     if let Some(shell) = inner.tray.borrow().as_ref() {
         shell.set_close_to_tray(on);
     }
@@ -2870,7 +3239,7 @@ fn set_tray_item(window: &AppWindow, inner: &Rc<Inner>, index: i32, on: bool) {
             _ => return,
         }
     }
-    persist_tray_settings(inner);
+    persist_settings(inner);
     show_tray_choices(window, inner);
     refresh_tray(inner, &window.global::<AppState>());
 }
@@ -3521,7 +3890,7 @@ fn open_add_device(window: &AppWindow, inner: &Rc<Inner>) {
     state.set_add_failure_kind(FailureKind::None);
     state.set_add_error("".into());
     state.set_paired_options(ModelRc::default());
-    reset_models(&state);
+    reset_models(&state, paint_black(inner));
     request_paired_for_selection(&state, inner);
 }
 
@@ -3542,6 +3911,9 @@ fn choose_model(window: &AppWindow, inner: &Rc<Inner>, code: &str) {
     state.set_add_error("".into());
     state.set_paired_options(ModelRc::default());
     state.set_add_loading(true);
+    // The confirmation card already carries the chosen color; a filter or a
+    // theme change before the next step must not reset it to silver.
+    paint_device_art(&state, paint_black(inner));
     inner.request_paired(Some((model.code.to_owned(), model.name.to_owned())));
 }
 
@@ -3599,6 +3971,8 @@ fn pair(window: &AppWindow, inner: &Rc<Inner>, mac: &str, name: &str) {
     state.set_adding(false);
     state.set_add_step(0);
     state.set_page(Page::Overview);
+    // The card and the Overview device picture use the chosen silver/black art.
+    paint_device_art(&state, paint_black(inner));
     begin_connecting(
         &state,
         inner,
@@ -3653,6 +4027,7 @@ fn begin_card_connect(window: &AppWindow, inner: &Rc<Inner>, card: DeviceCard) {
         selected_model(card.code.as_str()).is_some_and(|model| model.is_speaker),
     );
     state.set_one_earbud(false);
+    paint_device_art(&state, paint_black(inner));
     let Some(address) = parse_mac(card.mac.as_str()) else {
         apply_failure(
             inner,
@@ -3689,6 +4064,7 @@ fn begin_connecting(state: &AppState<'_>, inner: &Rc<Inner>, request: ConnectReq
     show_equalizer(state, &EqualizerDisplay::default());
     reset_diagnostics(state);
     clear_section_pages(state);
+    render_settings(state, inner);
     refresh_tray(inner, state);
     inner.request_connect(request);
 }
@@ -3715,6 +4091,7 @@ fn cancel_connect(window: &AppWindow, inner: &Rc<Inner>) {
     reset_diagnostics(&state);
     clear_section_pages(&state);
     clear_overview(&state);
+    render_settings(&state, inner);
     refresh_tray(inner, &state);
 }
 
@@ -3750,6 +4127,7 @@ fn disconnect(window: &AppWindow, inner: &Rc<Inner>) {
     clear_section_pages(&state);
     clear_overview(&state);
     state.set_page(Page::Devices);
+    render_settings(&state, inner);
     refresh_tray(inner, &state);
 }
 
@@ -3820,6 +4198,9 @@ fn apply_outcome(window: &AppWindow, inner: &Rc<Inner>, outcome: ConnectOutcome)
             *inner.device.borrow_mut() = Some(device_state);
             show_overview(&state, inner);
             show_section_pages(&state, inner);
+            // The one-earbud badge is offered only for a pair of earbuds, so its
+            // availability is part of the page a connection refills.
+            render_settings(&state, inner);
         }
         ConnectOutcome::Failed(failure) => apply_failure(inner, &state, failure),
     }
@@ -3842,6 +4223,7 @@ fn apply_failure(inner: &Rc<Inner>, state: &AppState<'_>, failure: ConnectFailur
     state.set_failure_kind(failure.kind());
     state.set_failure_text(failure.text().into());
     state.set_error_label("".into());
+    render_settings(state, inner);
     refresh_tray(inner, state);
 }
 
@@ -5937,6 +6319,23 @@ fn copy_export_profiles(
     }
 }
 
+/// Answers `Actions.copy-logs`: puts the real recent application log (the same
+/// bounded history the log file keeps) on the clipboard and shows the Copied
+/// toast. A clipboard failure is only logged, never fatal. Returns whether the
+/// toast is showing.
+fn copy_logs(page: &impl ExportPage, io: &dyn TransferIo) -> bool {
+    match io.set_clipboard_text(&crate::logs::recent()) {
+        Ok(()) => {
+            page.show_export_toast(ToastKind::Copied, 0);
+            true
+        }
+        Err(error) => {
+            eprintln!("OpenSCL4: could not copy the logs to the clipboard: {error}");
+            false
+        }
+    }
+}
+
 /// Answers `Actions.eq-export-choose(name, checked)` on the window: the choice
 /// is applied to the controller's selection and the rows and export count are
 /// refilled.
@@ -6036,27 +6435,33 @@ fn answer_export_file(inner: &Rc<Inner>, result: Option<Result<(), ExportFileErr
 }
 
 /// Replaces the dialog's model list with the models for a query and chip; an
-/// index that is not one of the vendored chips lists nothing.
-fn show_models(state: &AppState<'_>, query: &str, chip: Option<Chip>) {
+/// index that is not one of the vendored chips lists nothing. The cards carry
+/// the device art of the chosen color, so a re-filter never resets a dark
+/// appearance to the silver pictures.
+fn show_models(state: &AppState<'_>, query: &str, chip: Option<Chip>, black: bool) {
     let models = match chip {
-        Some(chip) => catalog_adapter::filter_models(query, chip),
+        Some(chip) => catalog_adapter::filter_models(query, chip)
+            .into_iter()
+            .map(|model| repaint_model(model, black))
+            .collect(),
         None => Vec::new(),
     };
     state.set_models(ModelRc::new(VecModel::from(models)));
 }
 
 /// Resets the dialog's search and chip to All, then lists the whole catalog.
-fn reset_models(state: &AppState<'_>) {
+fn reset_models(state: &AppState<'_>, black: bool) {
     state.set_model_query("".into());
     state.set_model_kind(Chip::All.index());
-    show_models(state, "", Some(Chip::All));
+    show_models(state, "", Some(Chip::All), black);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_ui_window;
+    use crate::test_support::{with_slint_thread, with_ui_window};
     use soundcore_diagnostics::ProbeId;
+    use soundcore_models::catalog::FormFactor;
     use soundcore_models::{
         BatteryScale, BatteryState, FirmwareVersions, HostDevice, Layout, SoundMode,
     };
@@ -6692,6 +7097,8 @@ mod tests {
         clipboard: RefCell<Option<String>>,
         /// What the last copy put on the clipboard.
         copied: RefCell<Option<String>>,
+        /// Whether writing to the clipboard fails, for the never-fatal paths.
+        fail_copy: Cell<bool>,
         picked: RefCell<Option<PathBuf>>,
         read: RefCell<Option<Result<String, ImportFileError>>>,
         /// The path the save dialog returns; `None` is a cancelled dialog.
@@ -6745,6 +7152,9 @@ mod tests {
         }
 
         fn set_clipboard_text(&self, text: &str) -> io::Result<()> {
+            if self.fail_copy.get() {
+                return Err(io::Error::other("the test clipboard is unavailable"));
+            }
             *self.copied.borrow_mut() = Some(text.to_owned());
             Ok(())
         }
@@ -11162,6 +11572,36 @@ mod tests {
     /// [`test_inner`], using `path` as the saved-profile document instead of a
     /// temporary one.
     fn test_inner_with_profiles(ui: &AppWindow, path: PathBuf) -> Rc<Inner> {
+        test_inner_with_documents(ui, path, DesktopSettings::default(), None)
+    }
+
+    /// A controller state under a saved settings document: `settings` is what
+    /// `Controller::new` would have loaded from `settings_path`, and the actions
+    /// save it back there like the real app.
+    fn test_inner_with_settings(
+        ui: &AppWindow,
+        settings: DesktopSettings,
+        settings_path: PathBuf,
+    ) -> Rc<Inner> {
+        test_inner_with_documents(
+            ui,
+            temp_profiles_path("settings"),
+            settings,
+            Some(settings_path),
+        )
+    }
+
+    /// The controller state of a manual or unit test: the same fields
+    /// `Controller::new` fills, with the worker channel drained by hand instead
+    /// of by the timer. The profile document is a unique temporary one, and
+    /// `settings_path` is `None` unless the test names a document, so no test
+    /// touches the app-data directory of the running app.
+    fn test_inner_with_documents(
+        ui: &AppWindow,
+        profiles_path: PathBuf,
+        settings: DesktopSettings,
+        settings_path: Option<PathBuf>,
+    ) -> Rc<Inner> {
         let (sender, receiver) = mpsc::channel();
         Rc::new(Inner {
             ui: ui.as_weak(),
@@ -11178,8 +11618,8 @@ mod tests {
             diagnostic_request: Cell::new(0),
             device: RefCell::new(None),
             dual_devices: RefCell::new(Vec::new()),
-            profiles: RefCell::new(load_profiles(&path)),
-            profiles_path: Some(path),
+            profiles: RefCell::new(load_profiles(&profiles_path)),
+            profiles_path: Some(profiles_path),
             overview_preferences: RefCell::new(OverviewPreferences::default()),
             overview_preferences_path: None,
             import_text: RefCell::new(None),
@@ -11189,9 +11629,10 @@ mod tests {
             picking_export_file: Cell::new(false),
             show_request: None,
             tray: RefCell::new(None),
-            settings: RefCell::new(DesktopSettings::default()),
-            // Unit and manual tests must never overwrite the user's real file.
-            settings_path: None,
+            settings: RefCell::new(settings),
+            settings_path,
+            system_dark: Cell::new(None),
+            theme_poll: RefCell::new(None),
             tray_content: RefCell::new(TrayContent::default()),
             diagnostic_probes: RefCell::new(Vec::new()),
             diagnostic_session: RefCell::new(None),
@@ -14051,6 +14492,491 @@ mod tests {
             other => panic!("unexpected done event: {other:?}"),
         }
     }
+    // ---- Settings wiring (ticket 02) ---------------------------------------
+
+    /// A unique temporary settings-document path; the file itself is written by
+    /// the action under test and removed by the test.
+    fn temp_settings_path(label: &str) -> PathBuf {
+        temp_profiles_path(label)
+    }
+
+    #[test]
+    fn every_saved_accent_maps_to_its_palette() {
+        assert_eq!(palette_choice(Accent::Purple), PaletteChoice::Purple);
+        assert_eq!(palette_choice(Accent::Sage), PaletteChoice::Sage);
+        assert_eq!(palette_choice(Accent::Rose), PaletteChoice::Rose);
+    }
+
+    #[test]
+    fn language_names_are_follow_system_then_every_bundled_language() {
+        let names = language_names(SharedString::from("Follow system"));
+        assert_eq!(names.len(), settings::LANGUAGES.len() + 1);
+        assert_eq!(names[0].as_str(), "Follow system");
+        assert_eq!(names[1].as_str(), "English");
+        assert_eq!(names[14].as_str(), "Русский");
+        assert_eq!(
+            names.last().expect("the model is not empty").as_str(),
+            "Українська"
+        );
+        for (name, language) in names.iter().skip(1).zip(settings::LANGUAGES.iter()) {
+            assert_eq!(name.as_str(), language.name);
+        }
+    }
+
+    #[test]
+    fn render_settings_maps_every_saved_choice_to_the_page() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            {
+                let mut settings = inner.settings.borrow_mut();
+                settings.theme = AppTheme::Dark;
+                settings.accent = Accent::Rose;
+                settings.content_scale = ContentScale::Percent125;
+                settings.device_color = DeviceColor::Black;
+                settings.sound_mode_view = SoundModeView::Scale;
+                settings.one_earbud_badge = false;
+                settings.language = Some("ru".into());
+                settings.tray.icon = false;
+                settings.tray.battery = false;
+                settings.tray.modes = false;
+                settings.tray.presets = true;
+                settings.tray.ldac = false;
+            }
+            let state = ui.global::<AppState>();
+            render_settings(&state, &inner);
+
+            assert_eq!(state.get_app_theme(), 2);
+            assert_eq!(state.get_app_palette(), 2);
+            assert_eq!(state.get_app_content_scale(), 2);
+            assert_eq!(state.get_app_device_color(), 2);
+            assert_eq!(state.get_app_mode_view(), 1);
+            assert!(
+                !state.get_app_mode_view_applies(),
+                "the clean core has no 1-11 sound-mode scale"
+            );
+            assert!(
+                !state.get_one_earbud_badge_applies(),
+                "no device is connected"
+            );
+            assert_eq!(state.get_app_language(), 14, "Russian is the 14th choice");
+            assert!(!state.get_show_one_earbud_badge());
+            assert!(!state.get_app_tray());
+            assert!(
+                !state.get_app_tray_available(),
+                "a test window hosts no notification-area icon"
+            );
+            assert!(state.get_app_close_to_tray());
+            assert!(!state.get_tray_battery());
+            assert!(!state.get_tray_modes());
+            assert!(state.get_tray_presets());
+            assert!(!state.get_tray_ldac());
+
+            let names: Vec<String> = state
+                .get_language_names()
+                .iter()
+                .map(|name| name.to_string())
+                .collect();
+            assert_eq!(names.len(), settings::LANGUAGES.len() + 1);
+            assert_eq!(
+                names[0],
+                ui.global::<Strings>().get_system_language().to_string()
+            );
+            assert_eq!(names[1], "English");
+            assert_eq!(names[14], "Русский");
+        });
+    }
+
+    #[test]
+    fn one_earbud_badge_applies_only_for_a_pair_of_earbuds() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            let state = ui.global::<AppState>();
+            render_settings(&state, &inner);
+            assert!(!state.get_one_earbud_badge_applies(), "no device");
+
+            *inner.device.borrow_mut() = Some(Box::new(state_of(5, 4, BatteryScale::Five)));
+            render_settings(&state, &inner);
+            assert!(
+                state.get_one_earbud_badge_applies(),
+                "a pair of earbuds can be down to one earbud"
+            );
+
+            *inner.device.borrow_mut() = Some(Box::new(single_state_of(5)));
+            render_settings(&state, &inner);
+            assert!(
+                !state.get_one_earbud_badge_applies(),
+                "a single-battery device has no second earbud"
+            );
+        });
+    }
+
+    #[test]
+    fn apply_theme_resolves_colors_scale_and_recolors_every_device_picture() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            {
+                let mut settings = inner.settings.borrow_mut();
+                settings.accent = Accent::Sage;
+                settings.content_scale = ContentScale::Percent110;
+                settings.device_color = DeviceColor::AsTheme;
+            }
+            let state = ui.global::<AppState>();
+            state.set_device_code("A3062".into());
+            state.set_devices(ModelRc::new(VecModel::from(vec![
+                DeviceCard {
+                    mac: "AA".into(),
+                    name: "Space One Pro".into(),
+                    code: "A3062".into(),
+                    art: catalog_adapter::art(FormFactor::Headphones),
+                    current: true,
+                    demo: false,
+                },
+                DeviceCard {
+                    mac: "BB".into(),
+                    name: "P20i".into(),
+                    code: "A3949".into(),
+                    art: catalog_adapter::art(FormFactor::TwsEarbuds),
+                    current: false,
+                    demo: false,
+                },
+            ])));
+            show_models(&state, "", Some(Chip::All), false);
+            state.set_add_model_code("A3954".into());
+            state.set_add_model_art(catalog_adapter::art(FormFactor::TwsEarbuds));
+
+            apply_theme(&inner, true);
+            let theme = ui.global::<Theme>();
+            assert!(theme.get_dark());
+            assert_eq!(theme.get_palette(), PaletteChoice::Sage);
+            assert!((theme.get_content_scale() - 1.1).abs() < 1e-6);
+            assert_eq!(
+                state.get_device_art(),
+                catalog_adapter::art_in_color(FormFactor::Headphones, true),
+                "the current device is drawn black"
+            );
+            let cards: Vec<DeviceCard> = state.get_devices().iter().collect();
+            assert_eq!(
+                cards[0].art,
+                catalog_adapter::art_in_color(FormFactor::Headphones, true)
+            );
+            assert_eq!(
+                cards[1].art,
+                catalog_adapter::art_in_color(FormFactor::TwsEarbuds, true)
+            );
+            let models: Vec<ModelOption> = state.get_models().iter().collect();
+            assert!(!models.is_empty(), "the model list is filled");
+            for model in &models {
+                let form_factor = catalog_adapter::form_factor(model.code.as_str())
+                    .expect("a listed model is in the catalog");
+                assert_eq!(
+                    model.art,
+                    catalog_adapter::art_in_color(form_factor, true),
+                    "{} is drawn black",
+                    model.code
+                );
+            }
+            assert_eq!(
+                state.get_add_model_art(),
+                catalog_adapter::art_in_color(FormFactor::TwsEarbuds, true)
+            );
+
+            // The explicit Black choice keeps black pictures in a light window.
+            inner.settings.borrow_mut().device_color = DeviceColor::Black;
+            apply_theme(&inner, false);
+            assert!(!theme.get_dark());
+            assert_eq!(
+                state.get_device_art(),
+                catalog_adapter::art_in_color(FormFactor::Headphones, true)
+            );
+
+            // Silver overrides both the theme and the explicit Black choice.
+            inner.settings.borrow_mut().device_color = DeviceColor::Silver;
+            apply_theme(&inner, true);
+            assert_eq!(
+                state.get_device_art(),
+                catalog_adapter::art_in_color(FormFactor::Headphones, false)
+            );
+            assert_eq!(
+                state.get_add_model_art(),
+                catalog_adapter::art_in_color(FormFactor::TwsEarbuds, false)
+            );
+        });
+    }
+
+    #[test]
+    fn apply_theme_keeps_the_default_art_when_no_model_is_chosen() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            inner.settings.borrow_mut().device_color = DeviceColor::Black;
+            let state = ui.global::<AppState>();
+            apply_theme(&inner, true);
+            assert_eq!(state.get_device_art(), slint::Image::default());
+            assert_eq!(state.get_add_model_art(), slint::Image::default());
+        });
+    }
+
+    #[test]
+    fn a_model_outside_the_catalog_keeps_the_device_art_it_has() {
+        let art = catalog_adapter::art(FormFactor::TwsEarbuds);
+        let card = DeviceCard {
+            mac: "AA".into(),
+            name: "Unknown".into(),
+            code: "NOT-A-MODEL".into(),
+            art: art.clone(),
+            current: false,
+            demo: false,
+        };
+        let repainted = repaint_card(card.clone(), true);
+        assert_eq!(repainted.art, art);
+        assert_eq!(repainted.code, card.code);
+        let model = ModelOption {
+            code: "NOT-A-MODEL".into(),
+            name: "Unknown".into(),
+            art: art.clone(),
+        };
+        assert_eq!(repaint_model(model, true).art, art);
+    }
+
+    #[test]
+    fn black_pictures_follow_the_device_color_and_the_resolved_theme() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            inner.settings.borrow_mut().device_color = DeviceColor::AsTheme;
+            inner.system_dark.set(Some(false));
+            assert!(!paint_black(&inner));
+            inner.system_dark.set(Some(true));
+            assert!(paint_black(&inner));
+            inner.settings.borrow_mut().device_color = DeviceColor::Silver;
+            assert!(!paint_black(&inner));
+            inner.settings.borrow_mut().device_color = DeviceColor::Black;
+            inner.system_dark.set(Some(false));
+            assert!(paint_black(&inner));
+        });
+    }
+
+    #[test]
+    fn apply_language_selects_the_saved_language_and_falls_back_to_english() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            inner.settings.borrow_mut().language = Some("ru".into());
+            assert_eq!(apply_language(&inner), "ru");
+            assert_eq!(ui.global::<AppState>().get_app_language(), 14);
+
+            // A language Slint does not bundle cannot leave the previous
+            // translation in place: it falls back to the source language.
+            assert_eq!(
+                select_bundled_language("zz"),
+                settings::LANGUAGES[0].code,
+                "an unbundled choice falls back to English"
+            );
+
+            // Leave the shared test thread in the source language for the other
+            // window tests.
+            inner.settings.borrow_mut().language = Some("en".into());
+            assert_eq!(apply_language(&inner), "en");
+            assert_eq!(ui.global::<AppState>().get_app_language(), 1);
+        });
+    }
+
+    #[test]
+    fn the_follow_system_poll_runs_only_for_follow_system() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            inner.settings.borrow_mut().theme = AppTheme::System;
+            inner.sync_theme_poll();
+            assert!(
+                inner.theme_poll.borrow().is_some(),
+                "Follow system starts the poll"
+            );
+            inner.settings.borrow_mut().theme = AppTheme::Dark;
+            inner.sync_theme_poll();
+            assert!(
+                inner.theme_poll.borrow().is_none(),
+                "a fixed theme stops the poll"
+            );
+            inner.settings.borrow_mut().theme = AppTheme::Light;
+            inner.sync_theme_poll();
+            assert!(inner.theme_poll.borrow().is_none());
+        });
+    }
+
+    #[test]
+    fn applying_settings_without_a_window_does_not_panic() {
+        with_slint_thread(|| {
+            let ui = AppWindow::new().expect("the shell window builds");
+            let inner = test_inner(&ui);
+            drop(ui);
+
+            apply_theme(&inner, true);
+            assert_eq!(
+                inner.system_dark.get(),
+                Some(true),
+                "the resolved appearance is remembered without a window"
+            );
+            let selected = apply_language(&inner);
+            assert!(
+                settings::find_language(selected).is_some(),
+                "{selected} is a bundled language"
+            );
+            inner.sync_theme_poll();
+            assert!(
+                inner.theme_poll.borrow().is_none(),
+                "no window, no Follow-system poll"
+            );
+            // Leave the shared test thread in the source language.
+            select_bundled_language("en");
+        });
+    }
+
+    #[test]
+    fn settings_actions_apply_the_change_to_the_running_window() {
+        with_ui_window(|ui| {
+            let inner = test_inner(ui);
+            wire_actions(ui, &inner);
+            let actions = ui.global::<Actions>();
+            let state = ui.global::<AppState>();
+            let theme = ui.global::<Theme>();
+
+            actions.invoke_set_app_theme(2);
+            assert!(theme.get_dark(), "the chosen dark theme is applied");
+            assert_eq!(state.get_app_theme(), 2);
+
+            actions.invoke_set_palette(2);
+            assert_eq!(theme.get_palette(), PaletteChoice::Rose);
+            assert_eq!(state.get_app_palette(), 2);
+
+            actions.invoke_set_content_scale(2);
+            assert!((theme.get_content_scale() - 1.25).abs() < 1e-6);
+            assert_eq!(state.get_app_content_scale(), 2);
+
+            actions.invoke_set_device_color(2);
+            assert_eq!(state.get_app_device_color(), 2);
+
+            actions.invoke_set_badge(false);
+            assert!(!state.get_show_one_earbud_badge());
+
+            actions.invoke_set_mode_view(1);
+            assert_eq!(state.get_app_mode_view(), 1);
+
+            assert_eq!(
+                *inner.settings.borrow(),
+                DesktopSettings {
+                    theme: AppTheme::Dark,
+                    accent: Accent::Rose,
+                    content_scale: ContentScale::Percent125,
+                    device_color: DeviceColor::Black,
+                    sound_mode_view: SoundModeView::Scale,
+                    one_earbud_badge: false,
+                    language: None,
+                    tray: TraySettings::default(),
+                },
+                "every action changed exactly its own field"
+            );
+        });
+    }
+
+    #[test]
+    fn settings_actions_save_to_the_document_and_keep_the_tray_choices() {
+        with_ui_window(|ui| {
+            let path = temp_settings_path("wired-document");
+            let _ = fs::remove_file(&path);
+            let mut initial = DesktopSettings::default();
+            initial.tray.icon = false;
+            initial.tray.battery = false;
+            let inner = test_inner_with_settings(ui, initial.clone(), path.clone());
+            wire_actions(ui, &inner);
+            let actions = ui.global::<Actions>();
+
+            actions.invoke_set_app_theme(2);
+            actions.invoke_set_palette(1);
+            actions.invoke_set_content_scale(2);
+            actions.invoke_set_device_color(2);
+            actions.invoke_set_mode_view(1);
+            actions.invoke_set_badge(false);
+            actions.invoke_set_language(14);
+
+            let saved = settings::load_settings(&path);
+            assert_eq!(saved.theme, AppTheme::Dark);
+            assert_eq!(saved.accent, Accent::Sage);
+            assert_eq!(saved.content_scale, ContentScale::Percent125);
+            assert_eq!(saved.device_color, DeviceColor::Black);
+            assert_eq!(saved.sound_mode_view, SoundModeView::Scale);
+            assert!(!saved.one_earbud_badge);
+            assert_eq!(saved.language.as_deref(), Some("ru"));
+            assert_eq!(
+                saved.tray, initial.tray,
+                "the tray and Settings choices share one document"
+            );
+            // A restarted app loads exactly what the last run saved.
+            assert_eq!(settings::load_settings(&path), saved);
+            assert!(
+                !PathBuf::from(format!("{}.tmp", path.display())).exists(),
+                "the save is atomic"
+            );
+
+            // Leave the shared test thread in the source language and remove the
+            // test document.
+            actions.invoke_set_language(1);
+            let _ = fs::remove_file(&path);
+        });
+    }
+
+    #[test]
+    fn invalid_settings_indexes_change_nothing() {
+        with_ui_window(|ui| {
+            let path = temp_settings_path("invalid-indexes");
+            let _ = fs::remove_file(&path);
+            let inner = test_inner_with_settings(ui, DesktopSettings::default(), path.clone());
+            wire_actions(ui, &inner);
+            let before = inner.settings.borrow().clone();
+            let actions = ui.global::<Actions>();
+            for index in [-1, 3, 99] {
+                actions.invoke_set_app_theme(index);
+                actions.invoke_set_palette(index);
+                actions.invoke_set_content_scale(index);
+                actions.invoke_set_device_color(index);
+            }
+            for index in [-1, 2, 99] {
+                actions.invoke_set_mode_view(index);
+            }
+            for index in [-1, 17, 99] {
+                actions.invoke_set_language(index);
+            }
+            assert_eq!(*inner.settings.borrow(), before);
+            assert!(!path.exists(), "an invalid index saves nothing");
+        });
+    }
+
+    #[test]
+    fn copy_logs_puts_the_recent_log_on_the_clipboard() {
+        crate::logs::line("settings wiring copy-logs marker".to_owned());
+        let page = RecordedExportPanel::default();
+        let io = RecordedTransferIo::default();
+        assert!(copy_logs(&page, &io));
+        let copied = io
+            .copied
+            .borrow()
+            .clone()
+            .expect("the clipboard was written");
+        assert!(copied.starts_with("OpenSCL4 "), "the log header is copied");
+        assert!(
+            copied.contains("settings wiring copy-logs marker"),
+            "the real recent history is copied"
+        );
+        assert_eq!(page.last_toast(), Some((ToastKind::Copied, 0)));
+    }
+
+    #[test]
+    fn a_failed_copy_logs_is_logged_without_a_toast() {
+        let page = RecordedExportPanel::default();
+        let io = RecordedTransferIo {
+            fail_copy: Cell::new(true),
+            ..RecordedTransferIo::default()
+        };
+        assert!(!copy_logs(&page, &io));
+        assert_eq!(page.last_toast(), None);
+    }
+
     /// Manual hardware check, not part of the automated suite:
     ///
     /// ```text

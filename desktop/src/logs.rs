@@ -28,7 +28,6 @@ impl History {
         self.lines.push_back(line.to_owned());
     }
 
-    #[allow(dead_code)] // only `recent` calls it; Copy logs is ticket 02
     fn text(&self) -> String {
         let mut text = header();
         text.push('\n');
@@ -132,7 +131,6 @@ pub fn line(message: String) {
 }
 
 /// The real recent application messages, oldest first, with a version header.
-#[allow(dead_code)] // Copy logs in ticket 02 puts this on the clipboard
 pub fn recent() -> String {
     RECENT
         .lock()

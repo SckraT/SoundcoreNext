@@ -158,7 +158,6 @@ pub fn art(form_factor: FormFactor) -> slint::Image {
 }
 
 /// Resolves a catalog model's shape for recoloring its existing UI images.
-#[allow(dead_code)] // ticket 02 recolors the device art with this and `art_in_color`
 pub fn form_factor(code: &str) -> Option<FormFactor> {
     let model = catalog::model(code)?;
     Some(
