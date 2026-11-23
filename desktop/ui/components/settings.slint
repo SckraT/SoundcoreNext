@@ -2,6 +2,7 @@
 import { SpinBox } from "std-widgets.slint";
 import { Select } from "select.slint";
 import { LocalizedText } from "localized.slint";
+import { Messages } from "../messages.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { AppState, Actions, RowKind, SettingRow, SettingsPanel, PanelKind } from "../types.slint";
@@ -273,8 +274,8 @@ export component SettingRowView inherits VerticalLayout {
                 wrap: word-wrap;
                 opacity: root.setting.enabled ? 1 : 0.55;
             }
-            if root.setting.reason != "": Text {
-                text: LocalizedText.setting-reason(root.setting.id, root.setting.reason);
+            if root.setting.reason.key != "": Text {
+                text: Messages.text(root.setting.reason);
                 color: Theme.muted;
                 font-size: Theme.font-small;
                 wrap: word-wrap;

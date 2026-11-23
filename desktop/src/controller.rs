@@ -44,6 +44,7 @@ use windows::core::GUID;
 
 use crate::catalog_adapter::{self, Chip};
 use crate::demo;
+use crate::messages;
 use crate::overview::{self, OverviewBlock, OverviewLayout, OverviewPreferences, OverviewPreset};
 use crate::settings::{
     self, Accent, AppTheme, ContentScale, DesktopSettings, DeviceColor, SoundModeView,
@@ -6204,9 +6205,9 @@ fn a3954_panels_for_page(
             // on, so they are disabled with the device's own reason when it is
             // off; the row still shows the value the device reports.
             let (spatial_enabled, spatial_reason) = if a3954.spatial_audio.enabled {
-                (true, "")
+                (true, messages::empty())
             } else {
-                (false, "Turn on spatial audio first")
+                (false, messages::turn_on_spatial_audio_first())
             };
             let mut music_mode = select_row(
                 "spatialAudioMusicMode",
@@ -6215,7 +6216,7 @@ fn a3954_panels_for_page(
                 spatial_audio_music_mode_index(a3954.spatial_audio.music_mode),
             );
             music_mode.enabled = spatial_enabled;
-            music_mode.reason = spatial_reason.into();
+            music_mode.reason = spatial_reason.clone();
             let mut mode = select_row(
                 "spatialAudioMode",
                 "Spatial audio mode",
@@ -6223,7 +6224,7 @@ fn a3954_panels_for_page(
                 i32::from(a3954.spatial_audio.mode.value()),
             );
             mode.enabled = spatial_enabled;
-            mode.reason = spatial_reason.into();
+            mode.reason = spatial_reason;
             vec![settings_panel(
                 PanelKind::Plain,
                 vec![
@@ -6552,7 +6553,7 @@ fn setting_row(id: &str, kind: RowKind, label: &str) -> SettingRow {
         kind,
         label: label.into(),
         enabled: true,
-        reason: "".into(),
+        reason: messages::empty(),
         checked: false,
         options: ModelRc::default(),
         index: -1,
@@ -11322,6 +11323,38 @@ mod tests {
                 db_limit: DbLimit::new(100).expect("100 dB is a measured step"),
             })
         );
+    }
+
+    #[test]
+    fn the_row_constructors_start_with_the_empty_reason() {
+        // A row that can be changed has nothing to explain: the empty message.
+        let rows = [
+            setting_row("example", RowKind::Toggle, "Example"),
+            toggle_row("example", "Example", true),
+            select_row("example", "Example", &["None"], 0),
+            range_row("example", "Example", 0, 10, 1, 5),
+            info_row("example", "Example", "value"),
+        ];
+        assert!(
+            rows.iter()
+                .all(|row| row.enabled && row.reason == messages::empty()),
+            "an available row explains nothing"
+        );
+    }
+
+    #[test]
+    fn a_disabled_setting_row_reason_names_its_catalog_key() {
+        let mut row = select_row("spatialAudioMode", "Spatial audio mode", &["Fixed"], 0);
+        row.enabled = false;
+        row.reason = messages::turn_on_spatial_audio_first();
+        assert_eq!(row.reason, messages::turn_on_spatial_audio_first());
+        assert_eq!(
+            row.reason.key.as_str(),
+            messages::SETTING_TURN_ON_SPATIAL_AUDIO
+        );
+        // A key, not the English sentence the UI resolves through Messages.text.
+        assert!(!row.reason.key.contains(' '));
+        assert!(row.reason.arg0.is_empty() && row.reason.arg1.is_empty());
     }
 
     #[test]
@@ -20204,8 +20237,18 @@ mod tests {
             "the spatial choices are disabled while spatial audio is off"
         );
         assert_eq!(
-            effect_rows[2].reason.as_str(),
-            "Turn on spatial audio first"
+            effect_rows[2].reason.key.as_str(),
+            messages::SETTING_TURN_ON_SPATIAL_AUDIO
+        );
+        assert_eq!(
+            effect_rows[2].reason.arg0.as_str(),
+            "",
+            "the sentence takes no arguments"
+        );
+        assert_eq!(effect_rows[2].reason.arg1.as_str(), "");
+        assert_eq!(
+            effect_rows[3].reason, effect_rows[2].reason,
+            "both spatial choices share the same reason"
         );
         assert_eq!(select_options(&effects[0], 2), ["Fixed", "Head tracking"]);
         assert_eq!(

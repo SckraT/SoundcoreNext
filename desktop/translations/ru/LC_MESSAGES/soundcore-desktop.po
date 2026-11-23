@@ -1565,3 +1565,14 @@ msgstr "Подавление шума ветра"
 
 msgid "Turn on spatial audio first"
 msgstr "Сначала включите пространственный звук"
+
+# Runtime messages from the Rust model (desktop/ui/messages.slint). These are
+# sentences the controller supplies as UiMessage keys, not static page copy.
+msgid "Changing is available when both earbuds are connected"
+msgstr "Изменение доступно, когда подключены оба наушника"
+
+# Preview-only: the wrapped-row fixture in .scratch/ui-preview; no controller
+# message sends this key.
+msgid "This setting is unavailable while the earbuds are in the charging case. Take them out and keep them connected to change it."
+msgstr "Эта настройка недоступна, пока наушники в зарядном кейсе. Достаньте их и не отключайте, чтобы изменить её."
+

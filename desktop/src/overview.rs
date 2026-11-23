@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use slint::{ModelRc, VecModel};
 use soundcore_models::DeviceState;
 
+use crate::messages;
 use crate::{BlockKind, LayoutBlock, OverviewBlockData, OverviewRow, Page, QuickToggle};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -511,9 +512,9 @@ fn toggle(device: &DeviceState, id: &str) -> Option<QuickToggle> {
         on,
         enabled: !unavailable,
         reason: if unavailable {
-            "Changing is available when both earbuds are connected".into()
+            messages::quick_toggle_one_earbud()
         } else {
-            "".into()
+            messages::empty()
         },
     })
 }
@@ -606,8 +607,9 @@ pub fn save_preferences(path: &Path, preferences: &OverviewPreferences) -> io::R
 mod tests {
     use super::*;
     use soundcore_models::{
-        A3062Settings, AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, DbLimit,
-        DecibelReadingRefreshRate, FirmwareVersions, HostDevice, LimitHighVolume,
+        A3062Settings, AmbientSoundModeCycle, AutoPowerOff, AutoPowerOffDuration, BatteryScale,
+        BatteryState, DbLimit, DecibelReadingRefreshRate, FirmwareVersions, HostDevice,
+        LimitHighVolume,
     };
 
     fn visible(layout: &OverviewLayout, block: OverviewBlock) -> Option<bool> {
@@ -754,6 +756,123 @@ mod tests {
                 .find(|toggle| toggle.id == "dolbyAudio")
                 .unwrap()
                 .on
+        );
+    }
+
+    #[test]
+    fn a_disabled_quick_toggle_reason_is_a_message_key() {
+        let device = DeviceState {
+            battery: Some(BatteryState {
+                left: 4,
+                right: 0,
+                left_charging: false,
+                right_charging: false,
+                scale: BatteryScale::Five,
+            }),
+            ..device_with_settings(Some(settings()))
+        };
+        let (shown, all) = quick_toggles(&device, None);
+        let ldac = shown
+            .iter()
+            .find(|toggle| toggle.id == "ldac")
+            .expect("LDAC is the default visible toggle");
+        assert!(!ldac.enabled, "LDAC needs both earbuds");
+        assert_eq!(ldac.reason, messages::quick_toggle_one_earbud());
+        assert_eq!(ldac.reason.key.as_str(), messages::QUICK_TOGGLE_ONE_EARBUD);
+        assert!(ldac.reason.arg0.is_empty() && ldac.reason.arg1.is_empty());
+        // A catalog key, not the English sentence the UI shows through Messages.text.
+        assert!(!ldac.reason.key.contains(' '));
+        for toggle in &all {
+            if toggle.id != "ldac" {
+                assert_eq!(
+                    toggle.reason,
+                    messages::empty(),
+                    "{} is available and has no reason",
+                    toggle.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_available_quick_toggle_has_the_empty_reason() {
+        let device = device_with_settings(Some(settings()));
+        let (shown, all) = quick_toggles(&device, None);
+        assert!(!shown.is_empty() && !all.is_empty());
+        assert!(
+            shown
+                .iter()
+                .chain(all.iter())
+                .all(|toggle| toggle.enabled && toggle.reason == messages::empty())
+        );
+    }
+
+    // The English source `messages.slint` returns for a key, i.e. the text
+    // `Messages.text` resolves through `@tr` before the translation is applied.
+    fn message_source<'a>(catalog: &'a str, key: &str) -> &'a str {
+        let marker = format!("message.key == \"{key}\"");
+        let branch = catalog
+            .find(&marker)
+            .unwrap_or_else(|| panic!("messages.slint has no branch for {key}"))
+            + marker.len();
+        let translated = catalog[branch..]
+            .find("@tr(\"")
+            .expect("a Messages branch returns an @tr source")
+            + "@tr(\"".len();
+        let source = &catalog[branch + translated..];
+        &source[..source.find('"').expect("the @tr source is a string")]
+    }
+
+    // The translation a `.po` document carries for a source string.
+    fn translation<'a>(catalog: &'a str, source: &str) -> &'a str {
+        let msgid = format!("msgid \"{source}\"");
+        let after_id = catalog
+            .find(&msgid)
+            .unwrap_or_else(|| panic!("the translation document has no msgid for {source:?}"))
+            + msgid.len();
+        let after_str = &catalog[after_id..];
+        let value =
+            after_str.find("msgstr \"").expect("the msgid has a msgstr") + "msgstr \"".len();
+        let value = &after_str[value..];
+        &value[..value.find('"').expect("the msgstr is a string")]
+    }
+
+    #[test]
+    fn the_quick_toggle_reason_resolves_to_russian_copy() {
+        // The UI model carries a key; `messages.slint` owns the English source;
+        // the Russian document translates that source. This is the same data
+        // chain `Messages.text` follows at runtime, so the LDAC one-earbud reason
+        // follows the app language.
+        let device = DeviceState {
+            battery: Some(BatteryState {
+                left: 4,
+                right: 0,
+                left_charging: false,
+                right_charging: false,
+                scale: BatteryScale::Five,
+            }),
+            ..device_with_settings(Some(settings()))
+        };
+        let (shown, _) = quick_toggles(&device, None);
+        let reason = &shown
+            .iter()
+            .find(|toggle| toggle.id == "ldac")
+            .expect("LDAC is the default visible toggle")
+            .reason;
+        let source = message_source(include_str!("../ui/messages.slint"), reason.key.as_str());
+        let russian = translation(
+            include_str!("../translations/ru/LC_MESSAGES/soundcore-desktop.po"),
+            source,
+        );
+        assert!(
+            !russian.is_empty() && russian != source,
+            "the Russian document translates {source:?}"
+        );
+        assert!(
+            russian
+                .chars()
+                .any(|c| ('\u{0400}'..='\u{04FF}').contains(&c)),
+            "the translation is Russian: {russian:?}"
         );
     }
 

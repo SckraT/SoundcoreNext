@@ -1,5 +1,16 @@
 // What the window shows and what it can ask for. Rust (src/lib.rs, src/view.rs) fills AppState and answers Actions.
 
+// A sentence the Rust model supplies: the key names a message in the `Messages`
+// catalog and arg0/arg1 are the values it puts into that sentence. Rust carries
+// no English copy itself; the window resolves the key through `@tr` and the
+// translation documents (see `messages.slint`). Keys are internal identifiers,
+// not UI text.
+export struct UiMessage {
+    key: string,
+    arg0: string,
+    arg1: string,
+}
+
 export enum Page {
     overview,
     sound-modes,
@@ -72,8 +83,8 @@ export struct SettingRow {
     kind: RowKind,
     label: string,
     enabled: bool,
-    // why the row cannot be changed in the device's current state, empty while it can
-    reason: string,
+    // why the row cannot be changed in the device's current state; the empty message while it can
+    reason: UiMessage,
     checked: bool,
     // a select's options, or a list's items
     options: [string],
@@ -112,8 +123,8 @@ export struct QuickToggle {
     label: string,
     on: bool,
     enabled: bool,
-    // why the toggle cannot be changed in the device's current state, empty while it can
-    reason: string,
+    // why the toggle cannot be changed in the device's current state; the empty message while it can
+    reason: UiMessage,
 }
 
 // a block of the overview, and what its shortcut says: numbers and names the window puts into words
