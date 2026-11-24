@@ -22,3 +22,6 @@ local.properties
 /dist/
 # Generated UI screenshot runs
 /artifacts/ui-screenshots/
+# Python bytecode
+*.pyc
+__pycache__/

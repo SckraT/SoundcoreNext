@@ -16,12 +16,10 @@ GPL-3.0 too; the attribution is in `NOTICE`.
 - **Android** (`android/`) — planned Kotlin/Compose UI; the OpenSCL4 UI may be reused and adapted under GPL-3.0 (ADR 0004).
 - **Desktop** (`desktop/`) — Rust + Slint: the OpenSCL4 2.0 desktop shell, with the UI vendored from OpenSCL4 under GPL-3.0.
 
-The normative specification lives in the research repository at `D:\Pixel 8 Pro\Soundcore\wiki` (`wiki/docs/index.md`). In particular:
-
-- `wiki/docs/protocol/framing.md`
-- `wiki/docs/protocol/models.md`
-- `wiki/docs/diagnostics/session-format.md`
-- `wiki/docs/process/adr/0004-openscl4-ui-reuse.md`
+The protocol research notes are maintained separately from this repository. The
+implemented protocol, model and diagnostics behavior is documented in this
+README and in the desktop documentation; the OpenSCL4 UI provenance is recorded
+in `NOTICE` and `desktop/ui/SOURCE.md`.
 
 ## Current status
 

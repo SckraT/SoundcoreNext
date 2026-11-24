@@ -2,7 +2,7 @@
 
 The desktop app is the **OpenSCL4 2.0 desktop shell**: the product keeps the
 OpenSCL4 name, and its Slint UI is based on **OpenSCL4** under GPL-3.0. The tree
-in `ui/` comes from `D:\Projects\OpenSCL4\desktop\ui` at commit `01276e08` and
+in `ui/` comes from [OpenSCL4 `desktop/ui`](https://github.com/SckraT/OpenSCL4/tree/01276e08/desktop/ui) at commit `01276e08` and
 keeps the upstream palette, typography, icons, fonts and art. Local adaptations
 include the Connections row actions, the Diagnostics workflow, the restored
 configurable Overview and the internal UI kit documented in `ui/UI_KIT.md`;
